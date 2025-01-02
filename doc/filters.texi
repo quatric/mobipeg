@@ -18721,16 +18721,28 @@ fixing movies that were inverse-telecined incorrectly.
 A description of the accepted options follows.
 
 @table @option
+@item mode
+Set the mode. If the value is 0, the filter drops similar frames.
+If the value is 1, the filter keeps only frames that are one representative of sufficiently long duplicate runs.
+
+Default value is 0.
+
 @item max
-Set the maximum number of consecutive frames which can be dropped (if
+For mode 0: Set the maximum number of consecutive frames which can be dropped (if
 positive), or the minimum interval between dropped frames (if
 negative). If the value is 0, the frame is dropped disregarding the
 number of previous sequentially dropped frames.
 
 Default value is 0.
 
+@item min
+For mode 1: Set the minimum number of frame duplicates to mark the frame as non-unique
+and keep the first occurrence of it.
+
+Default value is 1.
+
 @item keep
-Set the maximum number of consecutive similar frames to ignore before to start dropping them.
+For mode 0: Set the maximum number of consecutive similar frames to ignore before to start dropping them.
 If the value is 0, the frame is dropped disregarding the
 number of previous sequentially similar frames.
 
