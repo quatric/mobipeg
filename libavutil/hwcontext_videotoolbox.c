@@ -86,6 +86,7 @@ static const struct {
 #if HAVE_KCVPIXELFORMATTYPE_422YPCBCR8_YUVS
     { kCVPixelFormatType_422YpCbCr8_yuvs,               false, AV_PIX_FMT_YUYV422 },
 #endif
+    { 'bp16'/*kCVPixelFormatType_16VersatileBayer*/,    false, AV_PIX_FMT_BAYER_RGGB16},
 };
 
 static const enum AVPixelFormat supported_formats[] = {
@@ -121,6 +122,7 @@ static const enum AVPixelFormat supported_formats[] = {
     AV_PIX_FMT_YUYV422,
 #endif
     AV_PIX_FMT_BGRA,
+    AV_PIX_FMT_BAYER_RGGB16,
 };
 
 static int vt_frames_get_constraints(AVHWDeviceContext *ctx,

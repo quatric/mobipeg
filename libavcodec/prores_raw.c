@@ -315,6 +315,9 @@ static enum AVPixelFormat get_pixel_format(AVCodecContext *avctx,
 #if CONFIG_PRORES_RAW_VULKAN_HWACCEL
         AV_PIX_FMT_VULKAN,
 #endif
+#if CONFIG_PRORES_RAW_VIDEOTOOLBOX_HWACCEL
+        AV_PIX_FMT_VIDEOTOOLBOX,
+#endif
         pix_fmt,
         AV_PIX_FMT_NONE,
     };
@@ -573,6 +576,9 @@ const FFCodec ff_prores_raw_decoder = {
     .hw_configs     = (const AVCodecHWConfigInternal *const []) {
 #if CONFIG_PRORES_RAW_VULKAN_HWACCEL
         HWACCEL_VULKAN(prores_raw),
+#endif
+#if CONFIG_PRORES_RAW_VIDEOTOOLBOX_HWACCEL
+        HWACCEL_VIDEOTOOLBOX(prores_raw),
 #endif
         NULL
     },
