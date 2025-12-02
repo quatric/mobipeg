@@ -8,6 +8,7 @@ HEADERS = avformat.h                                                    \
 
 OBJS = allformats.o         \
        av1.o                \
+       avlanguage.o         \
        avformat.o           \
        avio.o               \
        aviobuf.o            \
@@ -138,11 +139,10 @@ OBJS-$(CONFIG_ARGO_BRP_DEMUXER)          += argo_brp.o argo_asf.o
 OBJS-$(CONFIG_ARGO_CVG_DEMUXER)          += argo_cvg.o
 OBJS-$(CONFIG_ARGO_CVG_MUXER)            += argo_cvg.o
 OBJS-$(CONFIG_ASF_DEMUXER)               += asfdec_f.o asf.o asfcrypt.o \
-                                            asf_tags.o avlanguage.o
+                                            asf_tags.o
 OBJS-$(CONFIG_ASF_O_DEMUXER)             += asfdec_o.o asf.o asfcrypt.o \
-                                            asf_tags.o avlanguage.o
-OBJS-$(CONFIG_ASF_MUXER)                 += asfenc.o asf.o asf_tags.o \
-                                            avlanguage.o
+                                            asf_tags.o
+OBJS-$(CONFIG_ASF_MUXER)                 += asfenc.o asf.o asf_tags.o
 OBJS-$(CONFIG_ASS_DEMUXER)               += assdec.o subtitles.o
 OBJS-$(CONFIG_ASS_MUXER)                 += assenc.o
 OBJS-$(CONFIG_AST_DEMUXER)               += ast.o astdec.o
@@ -150,7 +150,7 @@ OBJS-$(CONFIG_AST_MUXER)                 += ast.o astenc.o
 OBJS-$(CONFIG_AU_DEMUXER)                += au.o pcm.o
 OBJS-$(CONFIG_AU_MUXER)                  += au.o rawenc.o
 OBJS-$(CONFIG_AVI_DEMUXER)               += avidec.o
-OBJS-$(CONFIG_AVI_MUXER)                 += avienc.o mpegtsenc.o avlanguage.o rawutils.o
+OBJS-$(CONFIG_AVI_MUXER)                 += avienc.o mpegtsenc.o rawutils.o
 OBJS-$(CONFIG_AVM2_MUXER)                += swfenc.o swf.o
 OBJS-$(CONFIG_AVR_DEMUXER)               += avr.o pcm.o
 OBJS-$(CONFIG_AVS_DEMUXER)               += avs.o voc_packet.o voc.o
@@ -368,8 +368,8 @@ OBJS-$(CONFIG_MATROSKA_DEMUXER)          += matroskadec.o matroska.o  \
                                             oggparsevorbis.o vorbiscomment.o \
                                             qtpalette.o replaygain.o dovi_isom.o
 OBJS-$(CONFIG_MATROSKA_MUXER)            += matroskaenc.o matroska.o \
-                                            flacenc_header.o avlanguage.o \
-                                            vorbiscomment.o wv.o dovi_isom.o
+                                            flacenc_header.o vorbiscomment.o \
+                                            wv.o dovi_isom.o
 OBJS-$(CONFIG_MCA_DEMUXER)               += mca.o
 OBJS-$(CONFIG_MCC_DEMUXER)               += mccdec.o subtitles.o
 OBJS-$(CONFIG_MCC_MUXER)                 += mccenc.o
@@ -424,7 +424,7 @@ OBJS-$(CONFIG_MUSX_DEMUXER)              += musx.o
 OBJS-$(CONFIG_MV_DEMUXER)                += mvdec.o
 OBJS-$(CONFIG_MVI_DEMUXER)               += mvi.o
 OBJS-$(CONFIG_MVR_DEMUXER)               += mvrdec.o
-OBJS-$(CONFIG_MXF_DEMUXER)               += mxfdec.o mxf.o avlanguage.o
+OBJS-$(CONFIG_MXF_DEMUXER)               += mxfdec.o mxf.o
 OBJS-$(CONFIG_MXF_MUXER)                 += mxfenc.o mxf.o
 OBJS-$(CONFIG_MXG_DEMUXER)               += mxg.o
 OBJS-$(CONFIG_NC_DEMUXER)                += ncdec.o
@@ -644,8 +644,7 @@ OBJS-$(CONFIG_WAVARC_DEMUXER)            += wavarc.o
 OBJS-$(CONFIG_WAV_DEMUXER)               += wavdec.o pcm.o
 OBJS-$(CONFIG_WAV_MUXER)                 += wavenc.o
 OBJS-$(CONFIG_WC3_DEMUXER)               += wc3movie.o
-OBJS-$(CONFIG_WEBM_MUXER)                += matroskaenc.o matroska.o \
-                                            avlanguage.o
+OBJS-$(CONFIG_WEBM_MUXER)                += matroskaenc.o matroska.o
 OBJS-$(CONFIG_WEBM_DASH_MANIFEST_MUXER)  += webmdashenc.o
 OBJS-$(CONFIG_WEBM_CHUNK_MUXER)          += webm_chunk.o
 OBJS-$(CONFIG_WEBP_ANIM_DEMUXER)         += webp_anim_dec.o
