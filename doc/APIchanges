@@ -2,6 +2,10 @@ The last version increases of all libraries were on 2025-03-28
 
 API changes, most recent first:
 
+2026-05-17 - xxxxxxxxxxx - lavf 62.17.100 - avformat.h
+  Add AV_STREAM_GROUP_PARAMS_TREF.
+  Add AVStreamGroupTREF.
+
 2026-05-16 - xxxxxxxxxxx - lavf 62.16.100 - avformat.h
   Add AVFMT_FIXED_FRAMESIZE.
 
