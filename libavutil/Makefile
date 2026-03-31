@@ -278,6 +278,7 @@ TESTPROGS = adler32                                                     \
             detection_bbox                                              \
             dict                                                        \
             display                                                     \
+            dovi_meta                                                   \
             encryption_info                                             \
             error                                                       \
             eval                                                        \
