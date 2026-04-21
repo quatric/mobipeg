@@ -2,6 +2,12 @@ The last version increases of all libraries were on 2025-03-28
 
 API changes, most recent first:
 
+2026-05-12 - xxxxxxxxxx - lavu 60.31.100 - frame.h
+Add IAMF frame side data types to enum AVFrameSideDataType:
+- AV_FRAME_DATA_IAMF_MIX_GAIN_PARAM
+- AV_FRAME_DATA_IAMF_DEMIXING_INFO_PARAM
+- AV_FRAME_DATA_IAMF_RECON_GAIN_INFO_PARAM
+
 2026-05-05 - xxxxxxxxxxx - lavf 62.15.100 - avformat.h
   Add av_program_copy().
 
