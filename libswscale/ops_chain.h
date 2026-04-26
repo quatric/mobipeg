@@ -1,0 +1,175 @@
+/**
+ * Copyright (C) 2025 Niklas Haas
+ *
+ * This file is part of FFmpeg.
+ *
+ * FFmpeg is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * FFmpeg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with FFmpeg; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
+
+#ifndef SWSCALE_OPS_CHAIN_H
+#define SWSCALE_OPS_CHAIN_H
+
+#include "libavutil/cpu.h"
+#include "libavutil/mem.h"
+
+#include "ops_internal.h"
+
+/**
+ * Helpers for SIMD implementations based on chained kernels, using a
+ * continuation passing style to link them together.
+ *
+ * The basic idea here is to "link" together a series of different operation
+ * kernels by constructing a list of kernel addresses into an SwsOpChain. Each
+ * kernel will load the address of the next kernel (the "continuation") from
+ * this struct, and jump directly into it; using an internal function signature
+ * that is an implementation detail of the specific backend.
+ */
+
+typedef struct SwsOpTable SwsOpTable;
+
+/**
+ * Private data for each kernel.
+ */
+typedef union SwsOpPriv {
+    DECLARE_ALIGNED_16(char, data)[16];
+
+    /* Common types */
+    void *ptr;
+    uint8_t    u8[16];
+    int8_t     i8[16];
+    uint16_t   u16[8];
+    int16_t    i16[8];
+    uint32_t   u32[4];
+    int32_t    i32[4];
+    float      f32[4];
+    uint64_t   u64[2];
+    int64_t    i64[2];
+    uintptr_t uptr[2];
+    intptr_t  iptr[2];
+} SwsOpPriv;
+
+static_assert(sizeof(SwsOpPriv) == 16, "SwsOpPriv size mismatch");
+
+/**
+ * Per-kernel execution context.
+ *
+ * Note: This struct is hard-coded in assembly, so do not change the layout.
+ */
+typedef void (*SwsFuncPtr)(void);
+typedef struct SwsOpImpl {
+    SwsFuncPtr cont; /* [offset =  0] Continuation for this operation. */
+    SwsOpPriv  priv; /* [offset = 16] Private data for this operation. */
+} SwsOpImpl;
+
+static_assert(sizeof(SwsOpImpl) == 32,         "SwsOpImpl layout mismatch");
+static_assert(offsetof(SwsOpImpl, priv) == 16, "SwsOpImpl layout mismatch");
+
+/**
+ * Compiled "chain" of operations, which can be dispatched efficiently.
+ * Effectively just a list of function pointers, alongside a small amount of
+ * private data for each operation.
+ */
+typedef struct SwsOpChain {
+#define SWS_MAX_OPS 16
+    SwsOpImpl impl[SWS_MAX_OPS + 1]; /* reserve extra space for the entrypoint */
+    void (*free[SWS_MAX_OPS + 1])(SwsOpPriv *);
+    int num_impl;
+    int cpu_flags;  /* set of all used CPU flags */
+    int over_read;  /* chain over-reads input by this many bytes */
+    int over_write; /* chain over-writes output by this many bytes */
+} SwsOpChain;
+
+SwsOpChain *ff_sws_op_chain_alloc(void);
+void ff_sws_op_chain_free_cb(void *chain);
+static inline void ff_sws_op_chain_free(SwsOpChain *chain)
+{
+    ff_sws_op_chain_free_cb(chain);
+}
+
+/* Returns 0 on success, or a negative error code. */
+int ff_sws_op_chain_append(SwsOpChain *chain, SwsFuncPtr func,
+                           void (*free)(SwsOpPriv *), const SwsOpPriv *priv);
+
+typedef struct SwsImplParams {
+    const SwsOpTable *table;
+    const SwsOp *op;
+    SwsContext *ctx;
+} SwsImplParams;
+
+typedef struct SwsImplResult {
+    SwsFuncPtr func; /* overrides `SwsOpEntry.func` if non-NULL */
+    SwsOpPriv priv; /* private data for this implementation instance */
+    void (*free)(SwsOpPriv *priv); /* free function for `priv` */
+    int over_read;  /* implementation over-reads input by this many bytes */
+    int over_write; /* implementation over-writes output by this many bytes */
+} SwsImplResult;
+
+typedef struct SwsOpEntry {
+    /* Kernel metadata; reduced size subset of SwsOp */
+    SwsOpType op;
+    SwsPixelType type;
+    SwsCompMask mask; /* mask of active components (after operation) */
+    bool flexible; /* if true, only the type and op are matched */
+
+    union { /* extra data defining the operation, unless `flexible` is true */
+        SwsReadWriteOp rw;
+        SwsPackOp      pack;
+        SwsSwizzleOp   swizzle;
+        SwsConvertOp   convert;
+        SwsClearOp     clear;
+        uint32_t       linear_mask; /* subset of SwsLinearOp */
+        int            dither_size; /* subset of SwsDitherOp */
+        AVRational     scale;       /* scale factor for SWS_OP_SCALE */
+    };
+
+    /* Kernel implementation */
+    SwsFuncPtr func;
+    int (*setup)(const SwsImplParams *params, SwsImplResult *out); /* optional */
+    bool (*check)(const SwsImplParams *params); /* optional, return true if supported */
+} SwsOpEntry;
+
+/* Setup helpers for common/trivial operation types */
+int ff_sws_setup_shift(const SwsImplParams *params, SwsImplResult *out);
+int ff_sws_setup_scale(const SwsImplParams *params, SwsImplResult *out);
+int ff_sws_setup_clamp(const SwsImplParams *params, SwsImplResult *out);
+int ff_sws_setup_clear(const SwsImplParams *params, SwsImplResult *out);
+
+static inline void ff_op_priv_free(SwsOpPriv *priv)
+{
+    av_freep(&priv->ptr);
+}
+
+static inline void ff_op_priv_unref(SwsOpPriv *priv)
+{
+    av_refstruct_unref(&priv->ptr);
+}
+
+struct SwsOpTable {
+    unsigned cpu_flags;   /* required CPU flags for this table */
+    int block_size;       /* fixed block size of this table */
+    const SwsOpEntry *entries[]; /* terminated by NULL */
+};
+
+/**
+ * "Compile" a single op by looking it up in a list of fixed size op tables.
+ * See `op_match` in `ops_chain.c` for details on how the matching works.
+ *
+ * Returns 0 or a negative error code.
+ */
+int ff_sws_op_compile_tables(SwsContext *ctx, const SwsOpTable *const tables[],
+                             int num_tables, SwsOpList *ops, int ops_index,
+                             const int block_size, SwsOpChain *chain);
+
+#endif
