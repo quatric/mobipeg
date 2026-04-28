@@ -3,6 +3,7 @@
  * Copyright (c) 2015-2016 Florian Nouwt
  * Copyright (c) 2017 Adib Surani
  * Copyright (c) 2020 Paul B Mahol
+ * Copyright (c) 2026 Link Mauve
  *
  * This file is part of FFmpeg.
  *
@@ -45,6 +46,9 @@ static int mods_read_header(AVFormatContext *s)
     AVIOContext *pb = s->pb;
     AVRational fps;
     int64_t pos;
+    int64_t timestamp;
+    int num_keyframes;
+    const AVIndexEntry *e;
 
     AVStream *st = avformat_new_stream(s, NULL);
     if (!st)
@@ -53,6 +57,7 @@ static int mods_read_header(AVFormatContext *s)
     avio_skip(pb, 8);
 
     st->nb_frames            = avio_rl32(pb);
+    st->duration             = st->nb_frames;
     st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     st->codecpar->codec_id   = AV_CODEC_ID_MOBICLIP;
     st->codecpar->width      = avio_rl32(pb);
@@ -64,10 +69,24 @@ static int mods_read_header(AVFormatContext *s)
 
     avio_skip(pb, 16);
 
-    pos = avio_rl32(pb) + 4;
-    avio_seek(pb, pos, SEEK_SET);
     pos = avio_rl32(pb);
+    num_keyframes = avio_rl32(pb);
     avio_seek(pb, pos, SEEK_SET);
+
+    for (int i = 0; i < num_keyframes; ++i) {
+        timestamp = avio_rl32(pb);
+        pos = avio_rl32(pb);
+        if (avio_feof(pb))
+            return AVERROR_INVALIDDATA;
+
+        av_add_index_entry(st, pos, timestamp, 0, 0, AVINDEX_KEYFRAME);
+    }
+
+    e = avformat_index_get_entry(st, 0);
+    if (!e)
+        return AVERROR_INVALIDDATA;
+
+    avio_seek(pb, e->pos, SEEK_SET);
 
     return 0;
 }
@@ -78,6 +97,7 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
     unsigned size;
     int64_t pos;
     int ret;
+    const AVIndexEntry *e;
 
     if (avio_feof(pb))
         return AVERROR_EOF;
@@ -87,7 +107,10 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
     ret = av_get_packet(pb, pkt, size);
     pkt->pos = pos;
     pkt->stream_index = 0;
-    pkt->flags |= AV_PKT_FLAG_KEY;
+
+    e = avformat_index_get_entry_from_timestamp(s->streams[0], pos, 0);
+    if (e)
+        pkt->flags |= AV_PKT_FLAG_KEY;
 
     return ret;
 }
