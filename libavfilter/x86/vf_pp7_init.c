@@ -23,7 +23,7 @@
 #include "libavutil/x86/cpu.h"
 #include "libavfilter/vf_pp7dsp.h"
 
-void ff_pp7_dctB_mmx(int16_t *dst, const int16_t *src);
+void ff_pp7_dctB_mmx(int16_t *restrict dst, const int16_t *restrict src);
 
 av_cold void ff_pp7dsp_init_x86(PP7DSPContext *p)
 {

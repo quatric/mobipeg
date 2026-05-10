@@ -27,12 +27,12 @@
 #include "config.h"
 
 typedef struct PP7DSPContext {
-    void (*dctB)(int16_t *dst, const int16_t *src);
+    void (*dctB)(int16_t *restrict dst, const int16_t *restrict src);
 } PP7DSPContext;
 
 void ff_pp7dsp_init_x86(PP7DSPContext *pp7dsp);
 
-static void dctB_c(int16_t *dst, const int16_t *src)
+static void dctB_c(int16_t *restrict dst, const int16_t *restrict src)
 {
     for (int i = 0; i < 4; i++) {
         int s0 = src[0 * 4] + src[6 * 4];
