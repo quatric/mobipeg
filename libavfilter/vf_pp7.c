@@ -226,10 +226,9 @@ static void filter(PP7Context *p, uint8_t *dst, const uint8_t *src,
     for (y = 0; y < height; y++) {
         for (x = -8; x < 0; x += 4) {
             const int index = x + y * stride + (8 - 3) * (1 + stride) + 8; //FIXME silly offset
-            const uint8_t *src = p_src + index;
             int16_t *tp   = temp + 4 * x;
 
-            dctA_c(tp + 4 * 8, src, stride);
+            dctA_c(tp + 4 * 8, p_src + index, stride);
         }
         for (x = 0; x < width; ) {
             const int qps = 3 + is_luma;
@@ -244,12 +243,11 @@ static void filter(PP7Context *p, uint8_t *dst, const uint8_t *src,
             }
             for (; x < end; x++) {
                 const int index = x + y * stride + (8 - 3) * (1 + stride) + 8; //FIXME silly offset
-                const uint8_t *src = p_src + index;
                 int16_t *tp  = temp + 4 * x;
                 int v;
 
                 if ((x & 3) == 0)
-                    dctA_c(tp + 4 * 8, src, stride);
+                    dctA_c(tp + 4 * 8, p_src + index, stride);
 
                 p->pp7dsp.dctB(block, tp);
 
