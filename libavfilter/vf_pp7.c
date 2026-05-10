@@ -27,7 +27,6 @@
  * project, and ported by Arwa Arif for FFmpeg.
  */
 
-#include "libavutil/emms.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/mem.h"
 #include "libavutil/mem_internal.h"
@@ -351,7 +350,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
                    cw,        ch,        qp_table, qp_stride, 0);
             filter(pp7, out->data[2], in->data[2], out->linesize[2], in->linesize[2],
                    cw,        ch,        qp_table, qp_stride, 0);
-            emms_c();
         }
     }
 
