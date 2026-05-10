@@ -19,28 +19,47 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#ifndef AVFILTER_PP7_H
-#define AVFILTER_PP7_H
+#ifndef AVFILTER_PP7DSP_H
+#define AVFILTER_PP7DSP_H
 
-#include "libavutil/video_enc_params.h"
-#include "avfilter.h"
+#include <stdint.h>
 
-typedef struct PP7Context {
-    AVClass *class;
-    int thres2[99][16];
+#include "config.h"
 
-    int qp;
-    int mode;
-    enum AVVideoEncParamsType qscale_type;
-    int hsub;
-    int vsub;
-    int temp_stride;
-    uint8_t *src;
-
-    int (*requantize)(const struct PP7Context *p, const int16_t *src, int qp);
+typedef struct PP7DSPContext {
     void (*dctB)(int16_t *dst, const int16_t *src);
-} PP7Context;
+} PP7DSPContext;
 
-void ff_pp7_init_x86(PP7Context *pp7);
+void ff_pp7dsp_init_x86(PP7DSPContext *pp7dsp);
 
-#endif /* AVFILTER_PP7_H */
+static void dctB_c(int16_t *dst, const int16_t *src)
+{
+    for (int i = 0; i < 4; i++) {
+        int s0 = src[0 * 4] + src[6 * 4];
+        int s1 = src[1 * 4] + src[5 * 4];
+        int s2 = src[2 * 4] + src[4 * 4];
+        int s3 = src[3 * 4];
+        int s = s3 + s3;
+        s3 = s  - s0;
+        s0 = s  + s0;
+        s  = s2 + s1;
+        s2 = s2 - s1;
+        dst[0 * 4] = s0 + s;
+        dst[2 * 4] = s0 - s;
+        dst[1 * 4] = 2 * s3 +     s2;
+        dst[3 * 4] =     s3 - 2 * s2;
+        src++;
+        dst++;
+    }
+}
+
+static inline void ff_pp7dsp_init(PP7DSPContext *pp7dsp)
+{
+    pp7dsp->dctB = dctB_c;
+
+#if ARCH_X86 && HAVE_X86ASM
+    ff_pp7dsp_init_x86(pp7dsp);
+#endif
+}
+
+#endif /* AVFILTER_PP7DSP_H */
