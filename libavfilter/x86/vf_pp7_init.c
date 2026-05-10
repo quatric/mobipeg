@@ -21,11 +21,11 @@
 #include "libavutil/attributes.h"
 #include "libavutil/cpu.h"
 #include "libavutil/x86/cpu.h"
-#include "libavfilter/vf_pp7.h"
+#include "libavfilter/vf_pp7dsp.h"
 
 void ff_pp7_dctB_mmx(int16_t *dst, const int16_t *src);
 
-av_cold void ff_pp7_init_x86(PP7Context *p)
+av_cold void ff_pp7dsp_init_x86(PP7DSPContext *p)
 {
     int cpu_flags = av_get_cpu_flags();
 
