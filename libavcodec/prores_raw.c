@@ -420,8 +420,15 @@ static int decode_frame(AVCodecContext *avctx,
         bytestream2_get_buffer(&gb_hdr, qmat, 64);
 
     if ((flags >> 4) & 1) {
-        bytestream2_skip(&gb_hdr, 2);
-        bytestream2_skip(&gb_hdr, 2 * 7);
+        /* 8-poing 16-bit control points, defining the combined linearization
+         * curve (inv. transfer fn + encoder-defined shaping) */
+        for (int i = 0; i < 8; i++)
+            s->lin_curve[i] = bytestream2_get_be16(&gb_hdr);
+    } else {
+        /* default curve: ptwos */
+        static const uint16_t default_lin_curve[8] =
+            { 0, 512, 1024, 2048, 4096, 8192, 16384, 32768 };
+        memcpy(s->lin_curve, default_lin_curve, sizeof(s->lin_curve));
     }
 
     ff_permute_scantable(s->qmat, s->prodsp.idct_permutation, qmat);
