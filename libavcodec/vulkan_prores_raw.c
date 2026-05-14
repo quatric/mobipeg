@@ -51,7 +51,6 @@ typedef struct ProResRAWVulkanDecodeContext {
 
 typedef struct DecodePushData {
     VkDeviceAddress pkt_data;
-    int32_t tile_size[2];
     uint8_t  qmat[64];
 } DecodePushData;
 
@@ -59,6 +58,7 @@ typedef struct TileData {
     int32_t pos[2];
     uint32_t offset;
     uint32_t size;
+    uint32_t log2_nb_blocks;
 } TileData;
 
 static int vk_prores_raw_start_frame(AVCodecContext          *avctx,
@@ -118,6 +118,7 @@ static int vk_prores_raw_decode_slice(AVCodecContext *avctx,
     td[pp->nb_tiles].pos[0] = prr->tiles[pp->nb_tiles].x;
     td[pp->nb_tiles].pos[1] = prr->tiles[pp->nb_tiles].y;
     td[pp->nb_tiles].size = size;
+    td[pp->nb_tiles].log2_nb_blocks = prr->tiles[pp->nb_tiles].log2_nb_blocks;
 
     if (vp->slices_buf && slices_buf->host_ref) {
         td[pp->nb_tiles].offset = data - slices_buf->mapped_mem;
@@ -229,8 +230,6 @@ static int vk_prores_raw_end_frame(AVCodecContext *avctx)
     /* Update push data */
     DecodePushData pd_decode = (DecodePushData) {
         .pkt_data = slices_buf->address,
-        .tile_size[0] = prr->tw,
-        .tile_size[1] = prr->th,
     };
     memcpy(pd_decode.qmat, prr->qmat, 64);
     ff_vk_shader_update_push_const(&ctx->s, exec, decode_shader,
