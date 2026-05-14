@@ -20,6 +20,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/avassert.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem_internal.h"
 #include "libavutil/mem.h"
@@ -131,11 +132,10 @@ static int decode_comp(AVCodecContext *avctx, TileContext *tile,
     uint16_t *dst = (uint16_t *)(frame->data[0] + tile->y*frame->linesize[0] + 2*tile->x);
 
     int idx;
-    const int w = FFMIN(s->tw, avctx->width - tile->x) / 2;
-    const int nb_blocks = w / 8;
-    const int log2_nb_blocks = 31 - ff_clz(nb_blocks);
-    const int block_mask = (1 << log2_nb_blocks) - 1;
-    const int nb_codes = 64 * nb_blocks;
+    const int log2_nb_blocks = tile->log2_nb_blocks;
+    const int nb_blocks  = 1 << log2_nb_blocks;
+    const int block_mask = nb_blocks - 1;
+    const int nb_codes   = 64 * nb_blocks;
 
     LOCAL_ALIGNED_32(int16_t, block, [64*16]);
 
@@ -426,15 +426,13 @@ static int decode_frame(AVCodecContext *avctx,
 
     ff_permute_scantable(s->qmat, s->prodsp.idct_permutation, qmat);
 
-    s->nb_tw = (w + 15) >> 4;
+    int tw16 = (w + 15) >> 4;
+    s->nb_tw = (tw16 >> align) + av_popcount(~(-1 * (1 << align)) & tw16);
     s->nb_th = (h + 15) >> 4;
-    s->nb_tw = (s->nb_tw >> align) + av_popcount(~(-1 * (1 << align)) & s->nb_tw);
     s->nb_tiles = s->nb_tw * s->nb_th;
     av_log(avctx, AV_LOG_DEBUG, "%dx%d | nb_tiles: %d\n", s->nb_tw, s->nb_th, s->nb_tiles);
 
-    s->tw = s->version == 0 ? 128 : 256;
     s->th = 16;
-    av_log(avctx, AV_LOG_DEBUG, "tile_size: %dx%d\n", s->tw, s->th);
 
     av_fast_mallocz(&s->tiles, &s->tiles_size, s->nb_tiles * sizeof(*s->tiles));
     if (!s->tiles)
@@ -443,29 +441,38 @@ static int decode_frame(AVCodecContext *avctx,
     if (bytestream2_get_bytes_left(&gb) < s->nb_tiles * 2)
         return AVERROR_INVALIDDATA;
 
-    /* Read tile data offsets */
+    /* First tile that extends past the right edge gets halved in width,
+     * next one gets quartered, and so on */
     int offset = bytestream2_tell(&gb) + s->nb_tiles * 2;
-    for (int n = 0; n < s->nb_tiles; n++) {
-        TileContext *tile = &s->tiles[n];
+    int n = 0;
+    for (int ty = 0; ty < s->nb_th; ty++) {
+        unsigned tx = 0;
+        int rem = tw16;
+        for (int e = align; rem > 0; e--) {
+            int unit = 1 << e;
+            while (unit <= rem) {
+                TileContext *tile = &s->tiles[n++];
+                int size = bytestream2_get_be16(&gb);
 
-        int size = bytestream2_get_be16(&gb);
-        if (offset >= avpkt->size)
-            return AVERROR_INVALIDDATA;
-        if (size >= avpkt->size)
-            return AVERROR_INVALIDDATA;
-        if (offset > avpkt->size - size)
-            return AVERROR_INVALIDDATA;
+                if (offset >= avpkt->size)
+                    return AVERROR_INVALIDDATA;
+                if (size >= avpkt->size)
+                    return AVERROR_INVALIDDATA;
+                if (offset > avpkt->size - size)
+                    return AVERROR_INVALIDDATA;
 
-        bytestream2_init(&tile->gb, avpkt->data + offset, size);
+                bytestream2_init(&tile->gb, avpkt->data + offset, size);
+                tile->x = tx * 16;
+                tile->y = ty * s->th;
+                tile->log2_nb_blocks = e;
+                offset += size;
 
-        tile->y = (n / s->nb_tw) * s->th;
-        tile->x = (n % s->nb_tw) * s->tw;
-
-        if (avctx->width - tile->x < 16)
-            return AVERROR_PATCHWELCOME;
-
-        offset += size;
+                tx  += unit;
+                rem -= unit;
+            }
+        }
     }
+    av_assert1(n == s->nb_tiles);
 
     ret = ff_thread_get_buffer(avctx, frame, 0);
     if (ret < 0)

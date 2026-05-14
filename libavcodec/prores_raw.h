@@ -33,6 +33,7 @@
 typedef struct TileContext {
     GetByteContext gb;
     unsigned x, y;
+    int log2_nb_blocks;
 } TileContext;
 
 typedef struct ProResRAWContext {
@@ -42,7 +43,7 @@ typedef struct ProResRAWContext {
     TileContext *tiles;
     unsigned int tiles_size;
     int nb_tiles;
-    int tw, th;
+    int th;
     int nb_tw, nb_th;
 
     enum AVPixelFormat pix_fmt;

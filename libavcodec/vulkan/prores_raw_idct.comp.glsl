@@ -30,6 +30,7 @@ struct TileData {
    ivec2 pos;
    uint offset;
    uint size;
+   uint log2_nb_blocks;
 };
 
 layout (set = 0, binding = 0, r16ui) uniform uimage2D dst;
@@ -39,7 +40,6 @@ layout (set = 0, binding = 1, scalar) readonly buffer frame_data_buf {
 
 layout (push_constant, scalar) uniform pushConstants {
    u8buf pkt_data;
-   ivec2 tile_size;
    uint8_t qmat[64];
 };
 
@@ -73,17 +73,12 @@ void main(void)
     const uint tile_idx = gl_WorkGroupID.y*gl_NumWorkGroups.x + gl_WorkGroupID.x;
     TileData td = tile_data[tile_idx];
 
-    int width = imageSize(dst).x;
-    if (expectEXT(td.pos.x >= width, false))
-        return;
-
     uint64_t pkt_offset = uint64_t(pkt_data) + td.offset;
     u8vec2buf hdr_data = u8vec2buf(pkt_offset);
     int qscale = pack16(hdr_data[0].v.yx);
 
     const ivec2 offs = td.pos + ivec2(COMP_ID & 1, COMP_ID >> 1);
-    const uint w = min(tile_size.x, width - td.pos.x) >> 1;
-    const uint nb_blocks = w >> 3;
+    const uint nb_blocks = 1 << td.log2_nb_blocks;
 
     /* Copy push-constant qmat into shared memory for fast non-uniform access */
     if (gl_LocalInvocationIndex < 64)
@@ -109,6 +104,10 @@ void main(void)
     /* Row-wise iDCT */
     idct8(BLOCK_ID, COMP_ID*72 + ROW_ID * 9, 1);
     barrier();
+
+    /* Border tile check */
+    if (BLOCK_ID >= nb_blocks)
+        return;
 
     [[unroll]]
     for (uint y = 0; y < 8; y++) {
