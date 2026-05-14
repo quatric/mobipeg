@@ -45,15 +45,19 @@ static av_cold int decode_init(AVCodecContext *avctx)
 {
     ProResRAWContext *s = avctx->priv_data;
 
-    avctx->bits_per_raw_sample = 12;
+    /* The codec outputs linear data, with the transfer function of the
+     * camera and any adjustments built into an 8-point linearization curve */
+    avctx->bits_per_raw_sample = 16;
+    avctx->color_trc = AVCOL_TRC_LINEAR;
     avctx->color_primaries = AVCOL_PRI_UNSPECIFIED;
-    avctx->color_trc = AVCOL_TRC_UNSPECIFIED;
     avctx->colorspace = AVCOL_SPC_UNSPECIFIED;
 
     s->pix_fmt = AV_PIX_FMT_NONE;
 
     ff_blockdsp_init(&s->bdsp);
-    ff_proresdsp_init(&s->prodsp, avctx->bits_per_raw_sample);
+    /* Coefficients and the iDCT are 12-bit, the linearization curve then
+     * expands the result to the 16-bit linear output range. */
+    ff_proresdsp_init(&s->prodsp, 12);
 
     ff_permute_scantable(s->scan, ff_prores_interlaced_scan, s->prodsp.idct_permutation);
 
@@ -137,7 +141,7 @@ static int decode_comp(AVCodecContext *avctx, TileContext *tile,
     const int block_mask = nb_blocks - 1;
     const int nb_codes   = 64 * nb_blocks;
 
-    LOCAL_ALIGNED_32(int16_t, block, [64*16]);
+    LOCAL_ALIGNED_32(int32_t, block, [64*16]);
 
     int16_t sign = 0;
     int16_t dc_add = 0;
@@ -158,8 +162,7 @@ static int decode_comp(AVCodecContext *avctx, TileContext *tile,
     if ((ret = init_get_bits8(&gb, data, size)) < 0)
         return ret;
 
-    for (int n = 0; n < nb_blocks; n++)
-        s->bdsp.clear_block(block + n*64);
+    memset(block, 0, nb_blocks * 64 * sizeof(*block));
 
     /* Special handling for first block */
     int dc = get_value(&gb, 700);
@@ -234,7 +237,7 @@ static int decode_comp(AVCodecContext *avctx, TileContext *tile,
 
     for (int n = 0; n < nb_blocks; n++) {
         uint16_t *ptr = dst + n*16;
-        s->prodsp.idct_put_bayer(ptr, linesize, block + n*64, qmat);
+        s->prodsp.idct_put_bayer(ptr, linesize, block + n*64, qmat, s->lin_curve);
     }
 
     return 0;
@@ -265,7 +268,7 @@ static int decode_tile(AVCodecContext *avctx, TileContext *tile,
         return AVERROR_INVALIDDATA;
 
     for (int i = 0; i < 64; i++)
-        qmat[i] = s->qmat[i] * scale >> 1;
+        qmat[i] = s->qmat[i] * scale;
 
     const uint8_t *comp_start = gb->buffer_start + header_len;
 
