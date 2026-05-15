@@ -366,7 +366,7 @@ static int decode_frame(AVCodecContext *avctx,
     bytestream2_init(&gb_hdr, gb.buffer, header_len - 2);
     bytestream2_skip(&gb, header_len - 2);
 
-    bytestream2_skip(&gb_hdr, 1);
+    bytestream2_skip(&gb_hdr, 1); /* 1 reserved byte */
     s->version = bytestream2_get_byte(&gb_hdr);
     if (s->version > 1) {
         avpriv_request_sample(avctx, "Version %d", s->version);
@@ -405,14 +405,21 @@ static int decode_frame(AVCodecContext *avctx,
         avctx->pix_fmt = ret;
     }
 
-    bytestream2_skip(&gb_hdr, 1 * 4);
-    bytestream2_skip(&gb_hdr, 2); /* & 0x3 */
-    bytestream2_skip(&gb_hdr, 2);
-    bytestream2_skip(&gb_hdr, 4);
-    bytestream2_skip(&gb_hdr, 4);
-    bytestream2_skip(&gb_hdr, 4 * 3 * 3);
-    bytestream2_skip(&gb_hdr, 4);
-    bytestream2_skip(&gb_hdr, 2);
+    bytestream2_skip(&gb_hdr, 1 * 4); /* 4 reserved bytes */
+
+    /* BayerPattern: 0=RGGB, 1/2/3 = alternates */
+    int bayer_pattern = bytestream2_get_be16(&gb_hdr) & 0x3;
+    if (bayer_pattern != 0) {
+        avpriv_request_sample(avctx, "Bayer pattern %d", bayer_pattern);
+        return AVERROR_PATCHWELCOME;
+    }
+
+    bytestream2_skip(&gb_hdr, 2); /* senselValueRange (white_level = value + 0x100, black_level = 0x100) */
+    bytestream2_skip(&gb_hdr, 4); /* WhiteBalanceRedFactor (float, pre-debayer R gain) */
+    bytestream2_skip(&gb_hdr, 4); /* WhiteBalanceBlueFactor (float, pre-debayer B gain) */
+    bytestream2_skip(&gb_hdr, 4 * 3 * 3); /* ColorMatrix (3x3 float, camera RGB -> Rec.2020 linear, row-major) */
+    bytestream2_skip(&gb_hdr, 4); /* GainFactor (float, post-matrix scene-linear scale) */
+    bytestream2_skip(&gb_hdr, 2); /* WhiteBalanceCCT (Kelvin, informational) */
 
     /* Flags */
     int flags = bytestream2_get_be16(&gb_hdr);
