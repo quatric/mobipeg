@@ -118,6 +118,8 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
 
     size = avio_rl32(pb) >> 14;
     ret = av_get_packet(pb, pkt, size);
+    if (ret < 0)
+        return ret;
     pkt->pos = pos;
     pkt->stream_index = 0;
 
