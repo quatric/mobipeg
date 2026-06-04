@@ -145,6 +145,10 @@ typedef struct InputFilterPriv {
     int                 downmixinfo_present;
     AVDownmixInfo       downmixinfo;
 
+    AVBufferRef        *downmixmatrix;
+    size_t              downmixmatrix_size;
+    int                 downmixmatrix_present;
+
     struct {
         AVFrame *frame;
 
@@ -1040,6 +1044,7 @@ void fg_free(FilterGraph **pfg)
         av_channel_layout_uninit(&ifp->ch_layout);
         av_freep(&ifilter->linklabel);
         av_freep(&ifp->opts.name);
+        av_buffer_unref(&ifp->downmixmatrix);
         av_frame_side_data_free(&ifp->side_data, &ifp->nb_side_data);
         av_freep(&ifilter->name);
         av_freep(&ifilter->input_name);
@@ -2287,6 +2292,18 @@ static int ifilter_parameters_from_frame(InputFilter *ifilter, const AVFrame *fr
         memcpy(&ifp->downmixinfo, sd->data, sizeof(ifp->downmixinfo));
     }
     ifp->downmixinfo_present = !!sd;
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DOWNMIX_MATRIX);
+    if (sd) {
+        ret = av_frame_side_data_clone(&ifp->side_data,
+                                       &ifp->nb_side_data, sd, 0);
+        if (ret < 0)
+            return ret;
+        ret = av_buffer_replace(&ifp->downmixmatrix, sd->buf);
+        if (ret < 0)
+            return ret;
+        ifp->downmixmatrix_size = sd->size;
+    }
+    ifp->downmixmatrix_present = !!sd;
 
     return 0;
 }
@@ -3101,6 +3118,13 @@ static int send_frame(FilterGraph *fg, FilterGraphThread *fgt,
             memcmp(sd->data, &ifp->downmixinfo, sizeof(ifp->downmixinfo)))
             need_reinit |= DOWNMIX_CHANGED;
     } else if (ifp->downmixinfo_present)
+        need_reinit |= DOWNMIX_CHANGED;
+
+    if (sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DOWNMIX_MATRIX)) {
+        if (!ifp->downmixmatrix_present ||
+            sd->size != ifp->downmixmatrix_size || memcmp(sd->data, ifp->downmixmatrix->data, sd->size))
+            need_reinit |= DOWNMIX_CHANGED;
+    } else if (ifp->downmixmatrix_present)
         need_reinit |= DOWNMIX_CHANGED;
 
     if (need_reinit && fgt->graph && (ifp->opts.flags & IFILTER_FLAG_DROPCHANGED)) {
