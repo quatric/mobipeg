@@ -5,6 +5,7 @@ version <next>:
 - extensively improved AAC encoder
 - APV Vulkan encoder
 - iTerm2 inline image protocol muxer
+- LCEVC payload merging bitstream filter
 
 
 version 9.0:
