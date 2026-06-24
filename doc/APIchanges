@@ -2,6 +2,19 @@ The last version increases of all libraries were on 2026-06-23.
 
 API changes, most recent first:
 
+2026-07-06 - xxxxxxxxxxx - lavc 63.4.100 - bsf.h
+  Added graph based experimental bitstream filter API.
+  Add AVBitStreamFilterContext, AVBitStreamFilterGraph.
+  Add AVBitStreamFilterLink, AVBitStreamFilterPad.
+  Add av_bsf_pad_get_name(), av_bsf_pad_get_codec_ids(), av_bsf_link().
+  Add av_bsf_init_str(), av_bsf_init_dict().
+  Add av_bsf_graph_alloc(), av_bsf_graph_alloc_filter(), av_bsf_graph_create_filter().
+  Add av_bsf_graph_get_filter(), av_bsf_graph_config().
+  Add av_bsf_graph_source_needs_input(), av_bsf_graph_free().
+  Add av_bsf_source_add_packet(), av_bsf_source_close().
+  Add av_bsf_source_parameters_set(), av_bsf_source_get_status().
+  Add av_bsf_sink_get_packet(), av_bsf_sink_get_time_base(), av_bsf_sink_get_parameters().
+
 2026-06-23 - 61693f6c35f - lavu 60.34.100 - hwcontext_vulkan.h
   Switch AVVkFrame.access to VkAccessFlagBits2.
 
