@@ -680,7 +680,7 @@ int ff_dict_set_timestamp(AVDictionary **dict, const char *key, int64_t timestam
  *                      nested protocols are used.
  * @return <0 on error
  */
-int ff_parse_opts_from_query_string(void *obj, const char *str, int allow_unkown);
+int ff_parse_opts_from_query_string(void *obj, const char *str, int allow_unknown);
 
 /**
  * Make a RFC 4281/6381 like string describing a codec.
