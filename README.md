@@ -1,45 +1,58 @@
-# FFmpeg README
+# mobipeg
 
-FFmpeg is a collection of libraries and tools to process multimedia content
-such as audio, video, subtitles and related metadata.
+![mobipeg logo](mobipeg.png)
 
-## Libraries
+**mobipeg** is a fork of [FFmpeg](https://ffmpeg.org/) with added support for encoding and decoding Nintendo MobiClip video formats. It uses [x264](https://github.com/quatric/x264) for H.264 encoding and bundles a GUI tool (`encode_gui`) for easy use.
 
-* `libavcodec` provides implementation of a wider range of codecs.
-* `libavformat` implements streaming protocols, container formats and basic I/O access.
-* `libavutil` includes hashers, decompressors and miscellaneous utility functions.
-* `libavfilter` provides means to alter decoded audio and video through a directed graph of connected filters.
-* `libavdevice` provides an abstraction to access capture and playback devices.
-* `libswresample` implements audio mixing and resampling routines.
-* `libswscale` implements color conversion and scaling routines.
+[![Mobipeg Demo](https://img.youtube.com/vi/oJN6GxvGKaM/0.jpg)](https://www.youtube.com/watch?v=oJN6GxvGKaM)
 
-## Tools
+## Supported Formats
 
-* [ffmpeg](https://ffmpeg.org/ffmpeg.html) is a command line toolbox to
-  manipulate, convert and stream multimedia content.
-* [ffplay](https://ffmpeg.org/ffplay.html) is a minimalistic multimedia player.
-* [ffprobe](https://ffmpeg.org/ffprobe.html) is a simple analysis tool to inspect
-  multimedia content.
-* Additional small tools such as `aviocat`, `ismindex` and `qt-faststart`.
+| Format | Container | Platform | Encode | Decode |
+|--------|-----------|----------|--------|--------|
+| MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
+| MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
+| MODS | `.mods` | Nintendo DS | ✅ | ✅ |
+| MO | `.mo` | Nintendo Wii | ✅ | ✅ |
 
-## Documentation
+## Audio Codec Support
 
-The offline documentation is available in the **doc/** directory.
+| Audio Codec | MOFLEX (3DS) | MODS (DS) | MO (Wii) |
+|-------------|:------------:|:---------:|:--------:|
+| ADPCM | ✅ | ✅ | ✅ |
+| FastAudio | ✅ | ✅ | ✅ |
+| PCM | ✅ | ✅ | ✅ |
+| Vorbis | ➖ | ➖ | ✅ |
+| Codebook (SX) | ➖ | ❌ | ➖ |
 
-The online documentation is available in the main [website](https://ffmpeg.org)
-and in the [wiki](https://trac.ffmpeg.org).
+> Codebook (FastAudio-SX) audio found in some MODS files is not currently supported and will return an error on decode.
 
-### Examples
+## Building
 
-Coding examples are available in the **doc/examples** directory.
+```sh
+./configure \
+  --enable-gpl \
+  --enable-libx264 \
+  --enable-libvorbis
+make -j$(nproc)
+```
+
+See [quatric/x264](https://github.com/quatric/x264) for the compatible x264 build.
+
+## GUI Tool
+
+A standalone GUI encoder (`encode_gui`) is available as a pre-built application in the [Releases](../../releases) section for Windows, macOS, and Linux. It bundles the mobipeg binary and requires no additional setup.
+
+## Contact
+
+General questions or comments can be sent to [quatricsoftware@gmail.com](mailto:quatricsoftware@gmail.com). No support will be provided for this tool.
+
+## Credits
+
+See [CREDITS_MOBICLIP.md](CREDITS_MOBICLIP.md) for the projects and authors that made the Mobiclip support possible.
 
 ## License
 
-FFmpeg codebase is mainly LGPL-licensed with optional components licensed under
-GPL. Please refer to the LICENSE file for detailed information.
+mobipeg inherits the FFmpeg license (LGPL v2.1+, GPL v2+ when built with `--enable-gpl`). See [COPYING.GPLv2](COPYING.GPLv2) and [COPYING.LGPLv2.1](COPYING.LGPLv2.1).
 
-## Contributing
-
-Patches should be submitted to the ffmpeg-devel mailing list using
-`git format-patch` or `git send-email`. Github pull requests should be
-avoided because they are not part of our review process and will be ignored.
+Copyright (c) 2026 quatric

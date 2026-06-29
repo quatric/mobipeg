@@ -1,4 +1,5 @@
 /**
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * @file
  * Vorbis I decoder
  * @author Denes Balatoni  ( dbalatoni programozo hu )
@@ -1849,8 +1850,15 @@ static int vorbis_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     if ((ret = init_get_bits8(gb, buf, buf_size)) < 0)
         return ret;
 
-    if ((len = vorbis_parse_audio_packet(vc, channel_ptrs)) <= 0)
+    if ((len = vorbis_parse_audio_packet(vc, channel_ptrs)) <= 0) {
+        /* MobiClip Wii .mo concatenates several vorbis packets per AVPacket
+         * with no size table and zero-pads the tail. When re-fed the padding
+         * (or other trailing junk) the parse fails; swallow the remainder
+         * instead of erroring so the surrounding decode loop stops cleanly. */
+        if (avctx->codec_tag == MKTAG('M', 'o', 'V', 'o'))
+            return buf_size;
         return len;
+    }
 
     if (!vc->first_frame) {
         vc->first_frame = 1;
@@ -1862,6 +1870,18 @@ static int vorbis_decode_frame(AVCodecContext *avctx, AVFrame *frame,
 
     frame->nb_samples = len;
     *got_frame_ptr    = 1;
+
+    /* MobiClip Wii .mo packs multiple vorbis packets into one AVPacket. Report
+     * the bytes this packet actually consumed (vorbis self-delimits at the bit
+     * level) so ffmpeg's decode loop re-feeds the remainder and decodes the
+     * rest. Only do this when there is plausibly another packet left (>=8 bytes)
+     * so single-packet streams (Ogg/WebM, and our own size-split sections) keep
+     * the original whole-packet return and skip a pointless re-feed. */
+    if (avctx->codec_tag == MKTAG('M', 'o', 'V', 'o')) {
+        int consumed = (get_bits_count(gb) + 7) >> 3;
+        if (consumed > 0 && buf_size - consumed >= 8)
+            return consumed;
+    }
 
     return buf_size;
 }

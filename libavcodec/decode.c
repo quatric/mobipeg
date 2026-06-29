@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * generic decoding-related code
  *
  * This file is part of FFmpeg.
@@ -472,7 +473,8 @@ static inline int decode_simple_internal(AVCodecContext *avctx, AVFrame *frame, 
     av_assert0(consumed != AVERROR(EAGAIN));
     if (consumed < 0)
         ret = consumed;
-    if (consumed >= 0 && avctx->codec->type == AVMEDIA_TYPE_VIDEO)
+    if (consumed >= 0 && avctx->codec->type == AVMEDIA_TYPE_VIDEO &&
+        !(codec->caps_internal & FF_CODEC_CAP_SUBFRAME))
         consumed = pkt->size;
 
     if (!ret)

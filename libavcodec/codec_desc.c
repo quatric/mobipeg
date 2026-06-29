@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * This file is part of FFmpeg.
  *
  * This table was generated from the long and short names of AVCodecs
@@ -226,6 +227,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .long_name = NULL_IF_CONFIG_SMALL("Creative YUV (CYUV)"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
+
     {
         .id        = AV_CODEC_ID_H264,
         .type      = AVMEDIA_TYPE_VIDEO,
@@ -1788,13 +1790,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .long_name = NULL_IF_CONFIG_SMALL("PFM (Portable FloatMap) image"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSLESS,
     },
-    {
-        .id        = AV_CODEC_ID_MOBICLIP,
-        .type      = AVMEDIA_TYPE_VIDEO,
-        .name      = "mobiclip",
-        .long_name = NULL_IF_CONFIG_SMALL("MobiClip Video"),
-        .props     = AV_CODEC_PROP_LOSSY,
-    },
+
     {
         .id        = AV_CODEC_ID_PHOTOCD,
         .type      = AVMEDIA_TYPE_VIDEO,
@@ -1994,6 +1990,20 @@ static const AVCodecDescriptor codec_descriptors[] = {
     },
 
     /* various PCM "codecs" */
+    {
+        .id        = AV_CODEC_ID_RVID,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "rvid",
+        .long_name = NULL_IF_CONFIG_SMALL("RVID video"),
+        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_MOBICLIP,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "mobiclip",
+        .long_name = NULL_IF_CONFIG_SMALL("MobiClip Video"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
     {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
@@ -2599,6 +2609,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
     {
+        .id        = AV_CODEC_ID_ADPCM_IMA_MOBICLIP_WII,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "adpcm_ima_mobiclip_wii",
+        .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA MobiClip Wii"),
+        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_ADPCM_IMA_ACORN,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "adpcm_ima_acorn",
@@ -2626,13 +2643,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .long_name = NULL_IF_CONFIG_SMALL("ADPCM Sanyo"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
-    {
-        .id        = AV_CODEC_ID_ADPCM_IMA_HVQM4,
-        .type      = AVMEDIA_TYPE_AUDIO,
-        .name      = "adpcm_ima_hvqm4",
-        .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA HVQM4"),
-        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
-    },
+
     {
         .id        = AV_CODEC_ID_ADPCM_IMA_PDA,
         .type      = AVMEDIA_TYPE_AUDIO,
@@ -2682,8 +2693,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA Acorn Escape"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
-
-    /* AMR */
+    {
+        .id        = AV_CODEC_ID_ADPCM_IMA_NDS,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "adpcm_ima_nds",
+        .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA Nintendo DS"),
+        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
+    },    /* AMR */
     {
         .id        = AV_CODEC_ID_AMR_NB,
         .type      = AVMEDIA_TYPE_AUDIO,
@@ -3445,13 +3461,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .long_name = NULL_IF_CONFIG_SMALL("CRI HCA"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
-    {
-        .id        = AV_CODEC_ID_FASTAUDIO,
-        .type      = AVMEDIA_TYPE_AUDIO,
-        .name      = "fastaudio",
-        .long_name = NULL_IF_CONFIG_SMALL("MobiClip FastAudio"),
-        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
-    },
+
     {
         .id        = AV_CODEC_ID_MSNSIREN,
         .type      = AVMEDIA_TYPE_AUDIO,
@@ -3556,6 +3566,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .name      = "apple_apac",
         .long_name = NULL_IF_CONFIG_SMALL("Apple Positional Audio Codec"),
         .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_FASTAUDIO,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "fastaudio",
+        .long_name = NULL_IF_CONFIG_SMALL("MobiClip FastAudio"),
+        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
 
     /* subtitle codecs */
@@ -3893,9 +3910,10 @@ const AVCodecDescriptor *avcodec_descriptor_next(const AVCodecDescriptor *prev)
 const AVCodecDescriptor *avcodec_descriptor_get_by_name(const char *name)
 {
     const AVCodecDescriptor *desc = NULL;
+    if (!name) return NULL;
 
     while ((desc = avcodec_descriptor_next(desc)))
-        if (!strcmp(desc->name, name))
+        if (desc->name && !strcmp(desc->name, name))
             return desc;
     return NULL;
 }

@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * Muxer/output file setup.
  *
  * This file is part of FFmpeg.
@@ -92,6 +93,23 @@ static int choose_encoder(const OptionsContext *o, AVFormatContext *s,
 
     if (!codec_name) {
         ms->par_in->codec_id = av_guess_codec(s->oformat, NULL, s->url, NULL, ost->type);
+        /* This build's libx264 is a MobiClip-only fork: it has CABAC disabled
+         * and its CAVLC path corrupts normal H.264, so a MobiClip -> .mp4
+         * transcode with the default encoder produces a garbled file. When the
+         * source video is MobiClip and the output format's default video codec
+         * is H.264 (e.g. mp4/mov/mkv), transparently fall back to the built-in,
+         * cross-platform MPEG-4 (Part 2) encoder so `ffmpeg -i in.mo out.mp4`
+         * just works on every platform without needing -c:v. An explicit
+         * -c:v still wins (handled by the codec_name branch below). */
+        if (ost->type == AVMEDIA_TYPE_VIDEO &&
+            ms->par_in->codec_id == AV_CODEC_ID_H264 &&
+            ost->ist && ost->ist->par &&
+            ost->ist->par->codec_id == AV_CODEC_ID_MOBICLIP) {
+            av_log(ost, AV_LOG_WARNING,
+                   "MobiClip source: this build's libx264 cannot encode valid "
+                   "H.264; defaulting video encoder to mpeg4. Pass -c:v to override.\n");
+            ms->par_in->codec_id = AV_CODEC_ID_MPEG4;
+        }
         *enc = avcodec_find_encoder(ms->par_in->codec_id);
         if (!*enc) {
             av_log(ost, AV_LOG_FATAL, "Automatic encoder selection failed "
