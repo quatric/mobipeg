@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+      - name: Rebase onto target branch
+        uses: ./.forgejo/actions/rebase-pr
       - name: Configure
         run: |
           ./configure --enable-gpl --enable-nonfree --enable-memory-poisoning --assert-level=2 \
@@ -84,6 +86,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          path: ffmpeg
+      - name: Rebase onto target branch
+        uses: ./ffmpeg/.forgejo/actions/rebase-pr
         with:
           path: ffmpeg
       - name: Configure
