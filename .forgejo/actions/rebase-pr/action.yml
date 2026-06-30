@@ -1,0 +1,23 @@
+name: Rebase PR onto target
+
+inputs:
+  path:
+    description: Directory to run in
+    required: false
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Rebase onto target branch
+      if: ${{ forge.event_name == 'pull_request' }}
+      working-directory: ${{ inputs.path }}
+      run: |
+        # Fetch all PR commits + merge-base
+        commits=$(curl -s -o /dev/null -w '%header{X-Total-Count}' '${{ forge.api_url }}/repos/${{ forge.repository }}/pulls/${{ forge.event.pull_request.number }}/commits?limit=1&verification=false&files=false')
+        git fetch --deepen=$commits origin pull/${{ forge.event.pull_request.number }}/head
+        # Fetch target branch
+        git fetch --depth=1 origin ${{ forge.base_ref }}
+        # Rebase PR commits onto the current state of target branch
+        git rebase --onto origin/${{ forge.base_ref }} ${{ forge.event.pull_request.merge_base }} \
+          || { echo "::error::does not rebase cleanly onto ${{ forge.base_ref }}"; exit 1; }
