@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2001-2003 The FFmpeg project
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -41,9 +42,15 @@ typedef struct ADPCMChannelStatus {
     int coeff1;
     int coeff2;
     int idelta;
+
+    int16_t custom_coeffs[16];
 } ADPCMChannelStatus;
 
 int16_t ff_adpcm_argo_expand_nibble(ADPCMChannelStatus *cs, int nibble, int shift, int flag);
 int16_t ff_adpcm_ima_qt_expand_nibble(ADPCMChannelStatus *c, int nibble);
+
+/* Compute the 8 DSP-ADPCM coefficient pairs (16 int16, Q11) for a channel's
+ * PCM, per Nintendo's reference (jackoalan/gc-dspadpcm-encode). */
+void ff_DSPCorrelateCoefs(const int16_t *source, int samples, int16_t *coefsOut);
 
 #endif /* AVCODEC_ADPCM_H */
