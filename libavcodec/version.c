@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * Version functions.
  *
  * This file is part of FFmpeg.

@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * copyright (c) 2006 Oded Shimon <ods15@ods15.dyndns.org>
  *
  * This file is part of FFmpeg.
@@ -284,7 +285,11 @@ static int create_vorbis_context(vorbis_enc_context *venc,
 
     venc->channels    = avctx->ch_layout.nb_channels;
     venc->sample_rate = avctx->sample_rate;
-    venc->log2_blocksize[0] = venc->log2_blocksize[1] = 11;
+    /* 4096-sample blocks (2048-sample packets) so one Vorbis packet covers
+     * at least one video frame at >=23.44 fps. The Wii .mo container carries
+     * exactly one Vorbis packet per video chunk (see moenc.c), matching
+     * retail Nintendo .mo files. */
+    venc->log2_blocksize[0] = venc->log2_blocksize[1] = 12;
 
     venc->ncodebooks = FF_ARRAY_ELEMS(cvectors);
     venc->codebooks  = av_mallocz(sizeof(vorbis_enc_codebook) * venc->ncodebooks);
@@ -394,7 +399,8 @@ static int create_vorbis_context(vorbis_enc_context *venc,
     rc = &venc->residues[0];
     rc->type            = 2;
     rc->begin           = 0;
-    rc->end             = 1600;
+    rc->end             = 3200; /* scaled with blocksize 2048->4096 to keep the
+                                 * same fraction of spectrum residue-coded */
     rc->partition_size  = 32;
     rc->classifications = 10;
     rc->classbook       = 15;
