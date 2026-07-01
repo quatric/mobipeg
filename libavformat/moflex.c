@@ -3,6 +3,7 @@
  * Copyright (c) 2015-2016 Florian Nouwt
  * Copyright (c) 2017 Adib Surani
  * Copyright (c) 2020 Paul B Mahol
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -22,9 +23,9 @@
  */
 
 #include "libavcodec/bytestream.h"
+#include "demux.h"
 
 #include "avformat.h"
-#include "demux.h"
 #include "internal.h"
 
 typedef struct BitReader {
@@ -40,6 +41,8 @@ typedef struct MOFLEXDemuxContext {
     int in_block;
 
     BitReader br;
+
+    int64_t stream_pts[16]; /* cumulative pts per stream index */
 } MOFLEXDemuxContext;
 
 static int pop(BitReader *br, AVIOContext *pb)
@@ -206,6 +209,7 @@ static int moflex_read_sync(AVFormatContext *s)
             codec_id = avio_r8(pb);
             switch (codec_id) {
             case 0: codec_id = AV_CODEC_ID_MOBICLIP; break;
+            case 1: codec_id = AV_CODEC_ID_H264; break;
             default:
                 av_log(s, AV_LOG_ERROR, "Unsupported video codec: %d\n", codec_id);
                 return AVERROR_PATCHWELCOME;
@@ -279,6 +283,11 @@ static int moflex_read_packet(AVFormatContext *s, AVPacket *pkt)
             m->flags = avio_r8(pb);
             if (m->flags & 2)
                 avio_skip(pb, 2);
+
+            if (getenv("MOFLEX_DEBUG"))
+                av_log(s, AV_LOG_INFO,
+                       "BLOCK pos=0x%"PRIx64" sync=%d flags=0x%02x size=%d\n",
+                       (int64_t)m->pos, ret == 0, m->flags, m->size);
         }
 
         while ((avio_tell(pb) < m->pos + m->size) && !avio_feof(pb) && avio_r8(pb)) {
@@ -317,6 +326,10 @@ static int moflex_read_packet(AVFormatContext *s, AVPacket *pkt)
             pkt_size = pop_int(br, pb, 13) + 1;
             if (pkt_size > m->size)
                 return AVERROR_INVALIDDATA;
+            if (getenv("MOFLEX_DEBUG"))
+                av_log(s, AV_LOG_INFO,
+                       "  CHUNK si=%d endframe=%d pkt_size=%d payload@0x%"PRIx64"\n",
+                       stream_index, endframe, pkt_size, (int64_t)avio_tell(pb));
             packet   = s->streams[stream_index]->priv_data;
             if (!packet) {
                 avio_skip(pb, pkt_size);
@@ -326,18 +339,69 @@ static int moflex_read_packet(AVFormatContext *s, AVPacket *pkt)
             ret = av_append_packet(pb, packet, pkt_size);
             if (ret < 0)
                 return ret;
+
+            /* Helper lambda-equivalent: fill audio packet fields and advance PTS. */
+#define FILL_AUDIO_PKT(p, si_idx) do {                                          \
+            (p)->pos          = m->pos;                                          \
+            (p)->stream_index = (si_idx);                                        \
+            (p)->flags       |= AV_PKT_FLAG_KEY;                                 \
+            if ((si_idx) < FF_ARRAY_ELEMS(m->stream_pts)) {                      \
+                (p)->pts = m->stream_pts[(si_idx)];                               \
+                (p)->dts = (p)->pts;                                              \
+            }                                                                    \
+            {                                                                    \
+                AVCodecParameters *_par = s->streams[(si_idx)]->codecpar;        \
+                int64_t _dur = 0;                                                 \
+                int _ch = _par->ch_layout.nb_channels;                           \
+                if (_ch <= 0) _ch = 1;                                           \
+                if (_par->codec_id == AV_CODEC_ID_PCM_S16LE) {                  \
+                    _dur = (p)->size / (_ch * 2);                                 \
+                } else if (_par->codec_id == AV_CODEC_ID_ADPCM_IMA_MOFLEX) {    \
+                    /* one shared header (ch*4), then ch*128 nibbles per subframe */ \
+                    _dur = _ch > 0 ? ((p)->size - 4 * _ch) * 2 / _ch : 0;     \
+                } else if (_par->codec_id == AV_CODEC_ID_FASTAUDIO) {           \
+                    _dur = 256;                                                   \
+                }                                                                \
+                (p)->duration = _dur;                                             \
+                if ((si_idx) < FF_ARRAY_ELEMS(m->stream_pts))                    \
+                    m->stream_pts[(si_idx)] += _dur;                              \
+            }                                                                    \
+        } while (0)
+
             if (endframe && packet->size > 0) {
                 av_packet_move_ref(pkt, packet);
                 pkt->pos = m->pos;
                 pkt->stream_index = stream_index;
+                if (stream_index < FF_ARRAY_ELEMS(m->stream_pts)) {
+                    pkt->pts = m->stream_pts[stream_index];
+                    pkt->dts = pkt->pts;
+                }
                 if (s->streams[stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
                     pkt->duration = 1;
-                    if (pkt->data[0] & 0x80)
-                        pkt->flags |= AV_PKT_FLAG_KEY;
+                    /* Key-frame detection for MobiClip: the decoder applies
+                     * bswap16 before parsing, so the first decoded bit is
+                     * bit7 of pkt->data[1] (not data[0]).  A 1 there = I-frame.
+                     * For H.264 Annex-B streams scan for IDR/SPS NAL type. */
+                    if (s->streams[stream_index]->codecpar->codec_id == AV_CODEC_ID_MOBICLIP) {
+                        if (pkt->size >= 2 && (pkt->data[1] & 0x80))
+                            pkt->flags |= AV_PKT_FLAG_KEY;
+                    } else {
+                        /* Annex-B: find first non-zero byte past start codes */
+                        int si = 0;
+                        while (si < pkt->size - 1 && pkt->data[si] == 0) si++;
+                        if (si < pkt->size && pkt->data[si] == 0x01) si++;
+                        if (si < pkt->size) {
+                            int nal_type = pkt->data[si] & 0x1F;
+                            if (nal_type == 5 || nal_type == 7)
+                                pkt->flags |= AV_PKT_FLAG_KEY;
+                        }
+                    }
+                    if (stream_index < FF_ARRAY_ELEMS(m->stream_pts))
+                        m->stream_pts[stream_index] += 1;
                 } else {
-                    pkt->flags |= AV_PKT_FLAG_KEY;
+                    FILL_AUDIO_PKT(pkt, stream_index);
                 }
-                return ret;
+                return 0;
             }
         }
 
@@ -373,15 +437,15 @@ static int moflex_read_close(AVFormatContext *s)
 }
 
 const FFInputFormat ff_moflex_demuxer = {
-    .p.name         = "moflex",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("MobiClip MOFLEX"),
-    .p.extensions   = "moflex",
-    .p.flags        = AVFMT_GENERIC_INDEX,
+    .p.name           = "moflex",
+    .p.long_name      = NULL_IF_CONFIG_SMALL("MobiClip MOFLEX"),
     .priv_data_size = sizeof(MOFLEXDemuxContext),
     .read_probe     = moflex_probe,
     .read_header    = moflex_read_header,
     .read_packet    = moflex_read_packet,
     .read_seek      = moflex_read_seek,
     .read_close     = moflex_read_close,
+    .p.extensions     = "moflex",
+    .p.flags          = AVFMT_GENERIC_INDEX,
     .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
 };

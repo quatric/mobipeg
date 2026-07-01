@@ -1,6 +1,7 @@
 /*
  * H.26L/H.264/AVC/JVT/14496-10/... cavlc bitstream decoding
  * Copyright (c) 2003 Michael Niedermayer <michaelni@gmx.at>
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -1148,3 +1149,9 @@ decode_intra_mb:
 
     return 0;
 }
+
+const VLCElem **ff_actimagine_coeff_token_vlc = (const VLCElem **)coeff_token_vlc;
+const VLCElem **ff_actimagine_total_zeros_vlc = (const VLCElem **)total_zeros_vlc;
+const VLCElem **ff_actimagine_run_vlc = (const VLCElem **)run_vlc;
+const VLCElem *ff_actimagine_run7_vlc_table = run7_vlc_table;
+const uint8_t ff_actimagine_coeff_token_table_index[17] = {0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3};

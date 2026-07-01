@@ -56,3 +56,11 @@
 /libavfilter/vulkan/*.c
 /.*/
 !/.forgejo/
+!/.github/
+
+# Mobipeg build artifacts
+/deps/
+/dist/
+/pyinst_dist/
+/build/
+.DS_Store
