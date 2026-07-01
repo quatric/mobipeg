@@ -1,6 +1,7 @@
 /*
  * H.264 encoding using the x264 library
  * Copyright (C) 2005  Mans Rullgard <mans@mansr.com>
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -124,8 +125,12 @@ typedef struct X264Context {
      * encounter a frame with ROI side data.
      */
     int roi_warned;
-
     int mb_info;
+    int i_mobiclip;
+    int b_moflex;
+    int i_mobi_qyx;
+    int b_mobi_pktdbg;
+    int b_mobi_dbg;
 } X264Context;
 
 static void X264_log(void *p, int level, const char *fmt, va_list args)
@@ -161,7 +166,11 @@ static int encode_nals(AVCodecContext *ctx, AVPacket *pkt,
         return 0;
 
     for (int i = 0; i < nnal; i++) {
-        size += nals[i].i_payload;
+        int payload_size = nals[i].i_payload;
+        /* Keep all NAL units (including SPS/PPS/SEI) intact for mobiclip mode
+         * so the MO container stores standard H.264 and the demuxer can
+         * autodetect it and use the built-in H.264 decoder. */
+        size += payload_size;
         /* ff_get_encode_buffer() accepts an int64_t and
          * so we need to make sure that no overflow happens before
          * that. With 32bit ints this is automatically true. */
@@ -181,13 +190,15 @@ static int encode_nals(AVCodecContext *ctx, AVPacket *pkt,
         memcpy(p, x4->sei, x4->sei_size);
         p += x4->sei_size;
         size -= x4->sei_size;
-        /* Keep the value around in case of flush */
         x4->sei_size = -x4->sei_size;
     }
 
     /* x264 guarantees the payloads of the NALs
      * to be sequential in memory. */
-    memcpy(p, nals[0].p_payload, size);
+    for (int i = 0; i < nnal; i++) {
+        memcpy(p, nals[i].p_payload, nals[i].i_payload);
+        p += nals[i].i_payload;
+    }
 
     return 1;
 }
@@ -630,7 +641,9 @@ static int X264_frame(AVCodecContext *ctx, AVPacket *pkt, const AVFrame *frame,
 
             av_frame_unref(avci->recon_frame);
 
-            avci->recon_frame->format = csp_to_pixfmt(pic_out.img.i_csp);
+            avci->recon_frame->format = x4->i_mobiclip
+                ? AV_PIX_FMT_YUV420P
+                : csp_to_pixfmt(pic_out.img.i_csp);
             if (avci->recon_frame->format == AV_PIX_FMT_NONE) {
                 av_log(ctx, AV_LOG_ERROR,
                        "Unhandled reconstructed frame colorspace: %d\n",
@@ -1067,6 +1080,25 @@ static av_cold int X264_init(AVCodecContext *avctx)
     int sw,sh;
     int ret;
 
+    /* The "mobiclip" encoder is the libx264 wrapper registered under
+     * AV_CODEC_ID_MOBICLIP so that `ffmpeg -i in.mp4 out.mo/.moflex/.mods`
+     * works with no flags.  Turn on MobiClip mode (and the MOFLEX chroma
+     * order) by default, and pick a CQP that gives sensible sizes; users can
+     * still override -mobiclip/-moflex/-qp/-crf.
+     * B-frames are disabled because the mobiclip NAL stripping in
+     * encode_nals only emits I/P-slice data and the mobiclip decoder does
+     * not support B-frame reordering. */
+    if (avctx->codec_id == AV_CODEC_ID_MOBICLIP) {
+        if (x4->i_mobiclip == 0)
+            x4->i_mobiclip = 1;
+        if (x4->i_mobi_qyx == -1)
+            x4->i_mobi_qyx = 2;
+        if (avctx->bit_rate <= 0 && avctx->rc_max_rate <= 0 &&
+            x4->crf < 0 && x4->cqp < 0 && avctx->global_quality <= 0)
+            x4->cqp = 22;
+        avctx->max_b_frames = 0;
+    }
+
     if (avctx->global_quality > 0)
         av_log(avctx, AV_LOG_WARNING, "-qscale is ignored, -crf is recommended.\n");
 
@@ -1094,6 +1126,18 @@ static av_cold int X264_init(AVCodecContext *avctx)
             av_log(avctx, AV_LOG_INFO, "\n");
             return AVERROR(EINVAL);
         }
+
+    x4->params.i_mobiclip = x4->i_mobiclip;
+    /* Real Wii .mo keyframes are all encoded with the moflex bit set (verified
+     * across every retail/SDK reference clip: frame-header bit1 == 1). The
+     * `-c:v mobiclip` path forces it on, but `-c:v libx264 -mobiclip 1` left it
+     * at the option default 0, producing moflex=0 frames the Wii mobiclip.dll
+     * rejects. Default it on whenever mobiclip mode is active (unless the user
+     * explicitly set -moflex). */
+    if (x4->b_moflex < 0)
+        x4->b_moflex = x4->i_mobiclip ? 1 : 0;
+    x4->params.b_moflex   = x4->b_moflex;
+    x4->params.i_mobi_qyx = x4->i_mobi_qyx;
 
     if (avctx->level > 0)
         x4->params.i_level_idc = avctx->level;
@@ -1126,6 +1170,9 @@ static av_cold int X264_init(AVCodecContext *avctx)
         } else if (x4->cqp >= 0) {
             x4->params.rc.i_rc_method   = X264_RC_CQP;
             x4->params.rc.i_qp_constant = x4->cqp;
+        } else if (x4->i_mobiclip) {
+            x4->params.rc.i_rc_method   = X264_RC_CQP;
+            x4->params.rc.i_qp_constant = 18;
         }
 
         if (x4->crf_max >= 0)
@@ -1148,7 +1195,18 @@ static av_cold int X264_init(AVCodecContext *avctx)
     if (x4->chroma_offset)
         x4->params.analyse.i_chroma_qp_offset = x4->chroma_offset;
 
-    if (avctx->gop_size >= 0)
+    if (x4->i_mobiclip && (avctx->gop_size < 0 || avctx->gop_size == 12))
+        /* MobiClip keyframe default.  With no explicit -g, fftools leaves
+         * gop_size at -1 (and the legacy default was 12); either way x264 would
+         * fall back to its own 250-frame keyint, producing only a single
+         * keyframe on short clips.  The Nintendo moenc SDK rejects clips that
+         * lack periodic keyframes ("no keyframes").  Retail Wii .mo content
+         * keeps a hard keyframe roughly every ~90 frames (~3s @ 30fps) on top
+         * of scene-cut keyframes — measured on the Wii Internet Channel
+         * reference (testF.mo): 127 keyframes / 6890 frames, max gap 89.
+         * Match that; an explicit -g still wins via the branch below. */
+        x4->params.i_keyint_max = 90;
+    else if (avctx->gop_size >= 0)
         x4->params.i_keyint_max         = avctx->gop_size;
     if (avctx->max_b_frames >= 0)
         x4->params.i_bframe             = avctx->max_b_frames;
@@ -1237,7 +1295,25 @@ static av_cold int X264_init(AVCodecContext *avctx)
         x4->params.i_bframe_pyramid = x4->b_pyramid;
     if (x4->mixed_refs >= 0)
         x4->params.analyse.b_mixed_references = x4->mixed_refs;
-    if (x4->dct8x8 >= 0)
+    if (x4->i_mobiclip) {
+        /* MobiClip's 8x8 IDCT (even/odd butterfly) differs from x264's DCT8_1D
+         * for non-DC coefficients; force 4x4-only which uses the same inverse4
+         * butterfly in both encoder and decoder. */
+        x4->params.analyse.b_transform_8x8    = 0;
+        /* Cap the motion-search range.  At scene cuts x264 finds spurious
+         * far-away matches producing large motion vectors.  Such large MVs
+         * propagate through MobiClip's median MV predictor (a per-column ring
+         * buffer) down to the frame's bottom edge, where the real Wii decoder
+         * (and LibMobiClip) reconstruct a reference read that lands outside the
+         * frame -> garbled blocks on hardware.  (FFmpeg's own decoder happens to
+         * tolerate it, hiding the bug.)  Genuine Wii content keeps motion well
+         * under 32px/frame at 624x352, so this cap matches real content and is
+         * verified to eliminate the out-of-bounds reads without visible quality
+         * loss.  Overridable via -mv_range for experimentation. */
+        if (avctx->me_range <= 0 && x4->params.analyse.i_mv_range <= 0)
+            x4->params.analyse.i_mv_range = 32;
+    }
+    else if (x4->dct8x8 >= 0)
         x4->params.analyse.b_transform_8x8    = x4->dct8x8;
     if (x4->fast_pskip >= 0)
         x4->params.analyse.b_fast_pskip       = x4->fast_pskip;
@@ -1303,6 +1379,9 @@ static av_cold int X264_init(AVCodecContext *avctx)
             return AVERROR(EINVAL);
         }
 
+    if (x4->b_mobi_dbg)
+        av_log(avctx, AV_LOG_ERROR, "X264_init: avctx->width=%d height=%d coded_width=%d mobiclip=%d\n",
+               avctx->width, avctx->height, avctx->coded_width, x4->i_mobiclip);
     x4->params.i_width          = avctx->width;
     x4->params.i_height         = avctx->height;
     av_reduce(&sw, &sh, avctx->sample_aspect_ratio.num, avctx->sample_aspect_ratio.den, 4096);
@@ -1433,6 +1512,11 @@ static av_cold int X264_init(AVCodecContext *avctx)
     return 0;
 }
 
+static const enum AVPixelFormat pix_fmts_mobiclip[] = {
+    AV_PIX_FMT_YUV420P,
+    AV_PIX_FMT_YUVJ420P,
+    AV_PIX_FMT_NONE
+};
 static const enum AVPixelFormat pix_fmts_8bit[] = {
     AV_PIX_FMT_YUV420P,
     AV_PIX_FMT_YUVJ420P,
@@ -1570,6 +1654,11 @@ static const AVOption options[] = {
     { "udu_sei",      "Use user data unregistered SEI if available",      OFFSET(udu_sei),  AV_OPT_TYPE_BOOL,   { .i64 = 0 }, 0, 1, VE },
     { "x264-params",  "Override the x264 configuration using a :-separated list of key=value parameters", OFFSET(x264_params), AV_OPT_TYPE_DICT, { 0 }, 0, 0, VE },
     { "mb_info",      "Set mb_info data through AVSideData, only useful when used from the API", OFFSET(mb_info), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
+    { "mobiclip",     "MobiClip H.264 mode: 0=standard H.264, 1=MO/MOFLEX tables, 2=MODS tables, 3=MO table 2", OFFSET(i_mobiclip), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 3, VE },
+    { "moflex",       "MobiClip MOFLEX mode (flexible=1, standard=0, -1=auto: on when mobiclip)", OFFSET(b_moflex), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, VE },
+    { "mobi_qyx",     "MobiClip QY extension tier (0-15)", OFFSET(i_mobi_qyx), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 15, VE },
+    { "mobi_pktdbg",  "MobiClip Packet Debug", OFFSET(b_mobi_pktdbg), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
+    { "mobi_dbg",     "MobiClip Debug", OFFSET(b_mobi_dbg), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { NULL },
 };
 
@@ -1632,6 +1721,35 @@ const FFCodec ff_libx264_encoder = {
                       | FF_CODEC_CAP_NOT_INIT_THREADSAFE
 #endif
                       ,
+};
+#endif
+
+/* MobiClip encoder: the same libx264 wrapper, but registered under
+ * AV_CODEC_ID_MOBICLIP with mobiclip/moflex on by default, so that
+ * `ffmpeg -i in.mp4 out.mo` (or .moflex/.mods) "just works" — the muxers
+ * default their video codec to AV_CODEC_ID_MOBICLIP and this encoder is
+ * selected automatically with the right mode and sensible size defaults. */
+#if CONFIG_LIBX264_ENCODER
+const FFCodec ff_mobiclip_encoder = {
+    .p.name           = "mobiclip",
+    .p.long_name      = NULL_IF_CONFIG_SMALL("MobiClip (libx264-based)"),
+    .p.type           = AVMEDIA_TYPE_VIDEO,
+    .p.id             = AV_CODEC_ID_MOBICLIP,
+    .p.capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY |
+                        AV_CODEC_CAP_OTHER_THREADS,
+    .p.priv_class     = &x264_class,
+    .p.wrapper_name   = "libx264",
+    .priv_data_size   = sizeof(X264Context),
+    .init             = X264_init,
+    FF_CODEC_ENCODE_CB(X264_frame),
+    .close            = X264_close,
+    .defaults         = x264_defaults,
+    CODEC_PIXFMTS_ARRAY(pix_fmts_mobiclip),
+    .caps_internal    = FF_CODEC_CAP_INIT_CLEANUP | FF_CODEC_CAP_AUTO_THREADS
+#if X264_BUILD < 158
+                        | FF_CODEC_CAP_NOT_INIT_THREADSAFE
+#endif
+                        ,
 };
 #endif
 

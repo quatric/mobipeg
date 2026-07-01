@@ -1,6 +1,7 @@
 /*
  * Provide registration of all codecs, parsers and bitstream filters for libavcodec.
  * Copyright (c) 2002 Fabrice Bellard
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -78,7 +79,6 @@ extern const FFCodec ff_cfhd_encoder;
 extern const FFCodec ff_cfhd_decoder;
 extern const FFCodec ff_cinepak_encoder;
 extern const FFCodec ff_cinepak_decoder;
-extern const FFCodec ff_clearvideo_decoder;
 extern const FFCodec ff_cljr_encoder;
 extern const FFCodec ff_cljr_decoder;
 extern const FFCodec ff_cllc_decoder;
@@ -312,7 +312,6 @@ extern const FFCodec ff_sga_decoder;
 extern const FFCodec ff_sgi_encoder;
 extern const FFCodec ff_sgi_decoder;
 extern const FFCodec ff_sgirle_decoder;
-extern const FFCodec ff_sheervideo_decoder;
 extern const FFCodec ff_simbiosis_imx_decoder;
 extern const FFCodec ff_smacker_decoder;
 extern const FFCodec ff_smc_encoder;
@@ -675,7 +674,10 @@ extern const FFCodec ff_adpcm_ima_hvqm2_decoder;
 extern const FFCodec ff_adpcm_ima_hvqm4_decoder;
 extern const FFCodec ff_adpcm_ima_iss_decoder;
 extern const FFCodec ff_adpcm_ima_magix_decoder;
+extern const FFCodec ff_adpcm_ima_mobiclip_wii_decoder;
+extern const FFCodec ff_adpcm_ima_nds_decoder;
 extern const FFCodec ff_adpcm_ima_moflex_decoder;
+extern const FFCodec ff_adpcm_ima_moflex_encoder;
 extern const FFCodec ff_adpcm_ima_mtf_decoder;
 extern const FFCodec ff_adpcm_ima_oki_decoder;
 extern const FFCodec ff_adpcm_ima_pda_decoder;
@@ -926,7 +928,9 @@ extern const FFCodec ff_vnull_decoder;
 extern const FFCodec ff_vnull_encoder;
 extern const FFCodec ff_anull_decoder;
 extern const FFCodec ff_anull_encoder;
-
+extern const FFCodec ff_fastaudio_encoder;
+extern const FFCodec ff_adpcm_ima_hvqm4_decoder;
+extern const FFCodec ff_mobiclip_encoder;
 // The iterate API is not usable with ossfuzz due to the excessive size of binaries created
 #if CONFIG_OSSFUZZ
 const FFCodec * codec_list[] = {
@@ -935,6 +939,7 @@ const FFCodec * codec_list[] = {
     NULL
 };
 #else
+
 #include "libavcodec/codec_list.c"
 #endif
 

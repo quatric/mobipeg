@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2001-2003 The FFmpeg project
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * first version by Francois Revol (revol@free.fr)
  * fringe ADPCM codecs (e.g., DK3, DK4, Westwood)
@@ -359,7 +360,9 @@ static av_cold int adpcm_decode_init(AVCodecContext * avctx)
     case AV_CODEC_ID_ADPCM_SANYO:
     case AV_CODEC_ID_ADPCM_MTAF:
     case AV_CODEC_ID_ADPCM_ARGO:
+    case AV_CODEC_ID_ADPCM_IMA_NDS:
     case AV_CODEC_ID_ADPCM_IMA_MOFLEX:
+    case AV_CODEC_ID_ADPCM_IMA_MOBICLIP_WII:
     case AV_CODEC_ID_ADPCM_N64:
         avctx->sample_fmt = AV_SAMPLE_FMT_S16P;
         break;
@@ -1201,6 +1204,9 @@ static int get_nb_samples(AVCodecContext *avctx, GetByteContext *gb,
     case AV_CODEC_ID_ADPCM_IMA_OKI:
     case AV_CODEC_ID_ADPCM_IMA_WS:
     case AV_CODEC_ID_ADPCM_YAMAHA:
+        nb_samples = buf_size * 4;
+        break;
+
     case AV_CODEC_ID_ADPCM_AICA:
     case AV_CODEC_ID_ADPCM_IMA_SSI:
     case AV_CODEC_ID_ADPCM_IMA_APM:
@@ -1222,9 +1228,23 @@ static int get_nb_samples(AVCodecContext *avctx, GetByteContext *gb,
         case AV_CODEC_ID_ADPCM_IMA_MOFLEX:
         case AV_CODEC_ID_ADPCM_IMA_ISS:     header_size = 4 * ch;      break;
         case AV_CODEC_ID_ADPCM_IMA_SMJPEG:  header_size = 4 * ch;      break;
+        case AV_CODEC_ID_ADPCM_IMA_NDS:
+            header_size = (buf_size % (128 * ch)) == 0 ? 0 : 4 + 4 * ch;
+            return (buf_size - header_size) * 2 / ch;
     }
     if (header_size > 0)
         return (buf_size - header_size) * 2 / ch;
+
+    if (avctx->codec->id == AV_CODEC_ID_ADPCM_IMA_MOBICLIP_WII) {
+        int block_size = ch * 132;
+        int blocks;
+        if (buf_size <= 0)
+            return AVERROR_INVALIDDATA;
+        blocks = buf_size / block_size;
+        if (blocks <= 0)
+            return AVERROR_INVALIDDATA;
+        return blocks * 256;
+    }
 
     /* more complex formats */
     switch (avctx->codec->id) {
@@ -1477,6 +1497,127 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     st = channels == 2 ? 1 : 0;
 
     switch(avctx->codec->id) {
+    {
+        int step_table[90] = {
+            7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+            19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+            50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+            130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+            337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+            876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+            2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+            5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+            15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767, 0
+        };
+        int index_table_2bit[4] = {-1, 2, -1, 2};
+        int index_table_4bit[16] = {-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8};
+
+        int best_step_index = 40;
+
+        if (!c->status[0].step_index) {
+            double best_rms = 1e12;
+            for (int try_step = 0; try_step <= 40; try_step++) {
+                double rms = 0;
+                int pred = 0;
+                int st_idx = try_step;
+                int samples_count = 0;
+
+                for (int i = 0; i < buf_size && samples_count < 1000; i++) {
+                    int currByte = buf[i];
+                    for (int bit = 0; bit < 8; ) {
+                        int sample;
+                        if (st_idx < 18 || bit > 4) {
+                            sample = currByte & 3;
+                            int step = step_table[st_idx];
+                            int diff = step >> 3;
+                            if (sample & 1) diff += step;
+                            if (sample & 2) diff = -diff;
+                            pred += diff;
+                            st_idx += index_table_2bit[sample];
+                            currByte >>= 2;
+                            bit += 2;
+                        } else {
+                            sample = currByte & 15;
+                            int step = step_table[st_idx];
+                            int diff = step >> 3;
+                            if (sample & 1) diff += step >> 2;
+                            if (sample & 2) diff += step >> 1;
+                            if (sample & 4) diff += step;
+                            if (sample & 8) diff = -diff;
+                            pred += diff;
+                            st_idx += index_table_4bit[sample];
+                            currByte >>= 4;
+                            bit += 4;
+                        }
+                        if (st_idx < 0) st_idx = 0;
+                        if (st_idx > 79) st_idx = 79;
+                        if (pred < -2048) pred = -2048;
+                        if (pred > 2047) pred = 2047;
+                        
+                        double s = pred * 16.0;
+                        rms += s * s;
+                        samples_count++;
+                    }
+                }
+                if (samples_count > 0) {
+                    rms /= samples_count;
+                    if (rms < best_rms) {
+                        best_rms = rms;
+                        best_step_index = try_step;
+                    }
+                }
+            }
+            c->status[0].step_index = best_step_index;
+            c->status[0].step = best_step_index; // store it
+            c->status[0].predictor = 0;
+        }
+
+        int predictor = c->status[0].predictor;
+        int step_index = c->status[0].step_index;
+        short *samples_ptr = (short *)frame->data[0];
+        int samples_written = 0;
+
+        for (int i = 0; i < buf_size; i++) {
+            int currByte = buf[i];
+            for (int bit = 0; bit < 8; ) {
+                int sample;
+                if (step_index < 18 || bit > 4) {
+                    sample = currByte & 3;
+                    int step = step_table[step_index];
+                    int diff = step >> 3;
+                    if (sample & 1) diff += step;
+                    if (sample & 2) diff = -diff;
+                    predictor += diff;
+                    step_index += index_table_2bit[sample];
+                    currByte >>= 2;
+                    bit += 2;
+                } else {
+                    sample = currByte & 15;
+                    int step = step_table[step_index];
+                    int diff = step >> 3;
+                    if (sample & 1) diff += step >> 2;
+                    if (sample & 2) diff += step >> 1;
+                    if (sample & 4) diff += step;
+                    if (sample & 8) diff = -diff;
+                    predictor += diff;
+                    step_index += index_table_4bit[sample];
+                    currByte >>= 4;
+                    bit += 4;
+                }
+                if (step_index < 0) step_index = 0;
+                if (step_index > 79) step_index = 79;
+                if (predictor < -2048) predictor = -2048;
+                if (predictor > 2047) predictor = 2047;
+                
+                *samples_ptr++ = predictor * 16;
+                samples_written++;
+            }
+        }
+        c->status[0].predictor = predictor;
+        c->status[0].step_index = step_index;
+        frame->nb_samples = samples_written;
+        break;
+    }
     CASE(ADPCM_IMA_QT,
         /* In QuickTime, IMA is encoded by chunks of 34 bytes (=64 samples).
            Channel data is interleaved per-chunk. */
@@ -1864,6 +2005,54 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
                     int v = bytestream2_get_byteu(&gb);
                     *samples++ = adpcm_ima_expand_nibble(&c->status[channel], v & 0x0F, 3);
                     *samples++ = adpcm_ima_expand_nibble(&c->status[channel], v >> 4  , 3);
+                }
+            }
+        }
+        ) /* End of CASE */
+    CASE(ADPCM_IMA_NDS,
+        int has_header = (avpkt->size % (128 * channels)) != 0;
+        if (has_header) {
+            bytestream2_skip(&gb, 4);
+        }
+        int nblocks = nb_samples / 256;
+        for (int b = 0; b < nblocks; b++) {
+            for (int channel = 0; channel < channels; channel++) {
+                if (has_header && b == 0) {
+                    ADPCMChannelStatus *cs = &c->status[channel];
+                    cs->step_index = bytestream2_get_le16u(&gb);
+                    cs->predictor  = sign_extend(bytestream2_get_le16u(&gb), 16);
+                    if (cs->step_index > 88u) {
+                        av_log(avctx, AV_LOG_ERROR, "ERROR: step_index[%d] = %i\n",
+                               channel, cs->step_index);
+                        return AVERROR_INVALIDDATA;
+                    }
+                }
+                samples = samples_p[channel] + 256 * b;
+                for (int n = 0; n < 256; n += 2) {
+                    int v = bytestream2_get_byteu(&gb);
+                    *samples++ = adpcm_ima_expand_nibble(&c->status[channel], v & 0x0F, 3);
+                    *samples++ = adpcm_ima_expand_nibble(&c->status[channel], v >> 4  , 3);
+                }
+            }
+        }
+        ) /* End of CASE */
+    CASE(ADPCM_IMA_MOBICLIP_WII,
+        for (int subframe = 0; subframe < nb_samples / 256; subframe++) {
+            for (int channel = 0; channel < channels; channel++) {
+                ADPCMChannelStatus *cs = &c->status[channel];
+                cs->step_index = sign_extend(bytestream2_get_le16u(&gb), 16);
+                cs->predictor  = sign_extend(bytestream2_get_le16u(&gb), 16);
+                if (cs->step_index > 88u) {
+                    av_log(avctx, AV_LOG_ERROR, "ERROR: step_index[%d] = %i\n",
+                           channel, cs->step_index);
+                    return AVERROR_INVALIDDATA;
+                }
+
+                samples = samples_p[channel] + 256 * subframe;
+                for (int n = 0; n < 256; n += 2) {
+                    int v = bytestream2_get_byteu(&gb);
+                    *samples++ = adpcm_ima_expand_nibble(cs, v & 0x0F, 3);
+                    *samples++ = adpcm_ima_expand_nibble(cs, v >> 4,   3);
                 }
             }
         }
@@ -2999,6 +3188,7 @@ ADPCM_DECODER(ADPCM_IMA_HVQM4,   adpcm_ima_hvqm4,   "ADPCM IMA HVQM4")
 ADPCM_DECODER(ADPCM_IMA_ISS,     adpcm_ima_iss,     "ADPCM IMA Funcom ISS")
 ADPCM_DECODER(ADPCM_IMA_MAGIX,   adpcm_ima_magix,   "ADPCM IMA Magix")
 ADPCM_DECODER(ADPCM_IMA_MOFLEX,  adpcm_ima_moflex,  "ADPCM IMA MobiClip MOFLEX")
+ADPCM_DECODER(ADPCM_IMA_MOBICLIP_WII, adpcm_ima_mobiclip_wii, "ADPCM IMA MobiClip Wii")
 ADPCM_DECODER(ADPCM_IMA_MTF,     adpcm_ima_mtf,     "ADPCM IMA Capcom's MT Framework")
 ADPCM_DECODER(ADPCM_IMA_OKI,     adpcm_ima_oki,     "ADPCM IMA Dialogic OKI")
 ADPCM_DECODER(ADPCM_IMA_PDA,     adpcm_ima_pda,     "ADPCM IMA PlayDate")
@@ -3026,3 +3216,5 @@ ADPCM_DECODER(ADPCM_XA,          adpcm_xa,          "ADPCM CDROM XA")
 ADPCM_DECODER(ADPCM_XMD,         adpcm_xmd,         "ADPCM Konami XMD")
 ADPCM_DECODER(ADPCM_YAMAHA,      adpcm_yamaha,      "ADPCM Yamaha")
 ADPCM_DECODER(ADPCM_ZORK,        adpcm_zork,        "ADPCM Zork")
+
+ADPCM_DECODER(ADPCM_IMA_NDS,        adpcm_ima_nds,     "ADPCM IMA Nintendo DS")

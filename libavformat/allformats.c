@@ -1,6 +1,7 @@
 /*
  * Register all the formats and protocols
  * Copyright (c) 2000, 2001, 2002 Fabrice Bellard
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -110,8 +111,6 @@ extern const FFInputFormat  ff_bit_demuxer;
 extern const FFOutputFormat ff_bit_muxer;
 extern const FFInputFormat  ff_bitpacked_demuxer;
 extern const FFInputFormat  ff_bmv_demuxer;
-extern const FFInputFormat  ff_bfstm_demuxer;
-extern const FFInputFormat  ff_brstm_demuxer;
 extern const FFInputFormat  ff_boa_demuxer;
 extern const FFInputFormat  ff_bonk_demuxer;
 extern const FFInputFormat  ff_c93_demuxer;
@@ -586,7 +585,14 @@ extern const FFInputFormat  ff_libmodplug_demuxer;
 extern const FFInputFormat  ff_libopenmpt_demuxer;
 extern const FFInputFormat  ff_vapoursynth_demuxer;
 
+/* custom formats */
+extern const FFInputFormat  ff_mo_demuxer;
+extern const FFOutputFormat ff_mo_muxer;
+extern const FFOutputFormat ff_mods_muxer;
+extern const FFOutputFormat ff_moflex_muxer;
+
 #include "libavformat/muxer_list.c"
+
 #include "libavformat/demuxer_list.c"
 
 static atomic_uintptr_t indev_list_intptr  = 0;

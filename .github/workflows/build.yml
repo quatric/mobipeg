@@ -1,0 +1,572 @@
+name: Build FFmpeg
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  NASM_VERSION: "2.16.03"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Linux — native x86_64, native 32-bit x86, cross arm64 and armhf
+  # ─────────────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            ffarch: x86_64
+            triplet: x86_64-linux-gnu
+
+          - target: linux-x86
+            ffarch: x86
+            triplet: i386-linux-gnu
+            foreign_arch: i386
+            # No separate cross-compiler needed; gcc-multilib handles -m32
+            extra_configure: "--extra-cflags=-m32 --extra-ldflags=-m32 --cpu=generic"
+
+          - target: linux-arm64
+            ffarch: aarch64
+            triplet: aarch64-linux-gnu
+            foreign_arch: arm64
+            cross_prefix: aarch64-linux-gnu-
+            cross_pkgs: crossbuild-essential-arm64
+
+          - target: linux-armhf
+            ffarch: arm
+            triplet: arm-linux-gnueabihf
+            foreign_arch: armhf
+            cross_prefix: arm-linux-gnueabihf-
+            cross_pkgs: crossbuild-essential-armhf
+
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache nasm
+        id: cache-nasm
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/nasm
+          key: nasm-${{ env.NASM_VERSION }}
+
+      - name: Build and install nasm
+        if: steps.cache-nasm.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://www.nasm.us/pub/nasm/releasebuilds/${{ env.NASM_VERSION }}/nasm-${{ env.NASM_VERSION }}.tar.xz" | tar -xJ
+          cd nasm-${{ env.NASM_VERSION }}
+          ./configure && make -j$(nproc) && sudo make install
+
+      - name: Add foreign dpkg architecture
+        if: matrix.foreign_arch != ''
+        run: |
+          sudo dpkg --add-architecture ${{ matrix.foreign_arch }}
+          # Restrict existing sources to amd64/i386 only; add ports for ARM
+          sudo sed -i 's/^deb /deb [arch=amd64,i386] /' /etc/apt/sources.list
+          if [[ "${{ matrix.foreign_arch }}" == "arm64" || "${{ matrix.foreign_arch }}" == "armhf" ]]; then
+            cat <<'EOF' | sudo tee -a /etc/apt/sources.list
+          deb [arch=arm64,armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe
+          deb [arch=arm64,armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe
+          deb [arch=arm64,armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe
+          EOF
+          fi
+          sudo apt-get update -qq
+
+      - name: Install build tools and libraries
+        run: |
+          FOREIGN="${{ matrix.foreign_arch && format(':{0}', matrix.foreign_arch) || '' }}"
+          CROSS_CC="${{ matrix.cross_pkgs || '' }}"
+          MULTILIB="${{ matrix.foreign_arch == 'i386' && 'gcc-multilib g++-multilib' || '' }}"
+
+          sudo apt-get remove -y "libx264-dev*" || true
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config nasm \
+            libc6-dev${FOREIGN} \
+            zlib1g-dev${FOREIGN} \
+            ${CROSS_CC} \
+            ${MULTILIB}
+
+      - name: Set up pkg-config for cross target
+        if: matrix.foreign_arch != ''
+        run: |
+          TRIPLET="${{ matrix.triplet }}"
+          PKGDIR="/usr/lib/${TRIPLET}/pkgconfig"
+          echo "PKG_CONFIG_LIBDIR=${PKGDIR}:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=${PKGDIR}" >> "$GITHUB_ENV"
+          # FFmpeg's configure uses $(CROSS_PREFIX)pkg-config — create a shim
+          SHIM="/usr/local/bin/${{ matrix.cross_prefix }}pkg-config"
+          printf '#!/bin/sh\nexec env PKG_CONFIG_LIBDIR=%s /usr/bin/pkg-config "$@"\n' "$PKGDIR" | sudo tee "$SHIM"
+          sudo chmod +x "$SHIM"
+
+      - name: Cache libogg + libvorbis
+        id: cache-vorbis
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/deps/${{ matrix.target }}
+          key: vorbis-1.3.7-linux-${{ matrix.target }}-v1
+
+      - name: Build libogg + libvorbis
+        if: steps.cache-vorbis.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          mkdir -p "$DEPS"
+          
+          # libogg
+          [ ! -d libogg-1.3.5 ] && curl -fsSL https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz
+          cd libogg-1.3.5
+          CROSS="--host=${{ matrix.triplet }}"
+          # For 32-bit x86 on 64-bit host
+          if [ "${{ matrix.target }}" = "linux-x86" ]; then
+            export CFLAGS="-m32"
+            export LDFLAGS="-m32"
+          fi
+          ./configure --prefix="$DEPS" $CROSS --enable-static --disable-shared
+          make -j$(nproc) && make install
+          cd ..
+          
+          # libvorbis
+          [ ! -d libvorbis-1.3.7 ] && curl -fsSL https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz
+          cd libvorbis-1.3.7
+          export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig"
+          ./configure --prefix="$DEPS" $CROSS --with-ogg-includes="$DEPS/include" --with-ogg-libraries="$DEPS/lib" --enable-static --disable-shared
+          make -j$(nproc) && make install
+          cd ..
+
+      - name: Cache x264
+        id: cache-x264
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/deps/${{ matrix.target }}
+          key: x264-linux-${{ matrix.target }}-v7
+
+      - name: Build x264
+        if: steps.cache-x264.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          mkdir -p "$DEPS"
+          git clone --depth=1 https://github.com/quatric/x264.git x264-src
+          cd x264-src
+          CROSS="--host=${{ matrix.triplet }} ${{ matrix.cross_prefix && format('--cross-prefix={0}', matrix.cross_prefix) || '' }}"
+          ./configure \
+            --prefix="$DEPS" \
+            --enable-static \
+            --enable-pic \
+            --disable-cli \
+            --disable-opencl \
+            --disable-asm \
+            $CROSS || { cat config.log; exit 1; }
+          make -j$(nproc) && make install
+
+      - name: Configure FFmpeg
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig:$PKG_CONFIG_PATH"
+          CROSS="${{ matrix.cross_prefix && format('--cross-prefix={0} --target-os=linux', matrix.cross_prefix) || '' }}"
+          ./configure \
+            --prefix="$PWD/dist" \
+            --arch=${{ matrix.ffarch }} \
+            --enable-gpl \
+            --enable-static \
+            --disable-shared \
+            --disable-doc \
+            --disable-debug \
+            --disable-x86asm \
+            --disable-sdl2 \
+            --disable-bzlib \
+            --disable-lzma \
+            --disable-iconv \
+            --disable-xlib \
+            --enable-libx264 \
+            --enable-libvorbis \
+            --pkg-config-flags="--static" \
+            $CROSS \
+            --extra-cflags="-I$DEPS/include ${{ matrix.target_flag }}" \
+            --extra-ldflags="-L$DEPS/lib ${{ matrix.target_flag }}" \
+            ${{ matrix.extra_configure }} || { cat ffbuild/config.log; exit 1; }
+
+      - name: Build
+        run: make -j$(nproc)
+
+      - name: Install
+        run: make install
+
+      - name: Package
+        run: |
+          cd dist/bin
+          # ffplay may not exist for all cross targets
+          FILES="ffmpeg ffprobe"
+          [ -f ffplay ] && FILES="$FILES ffplay"
+          tar -czf "../../mobipeg-${{ matrix.target }}.tar.gz" $FILES
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobipeg-${{ matrix.target }}
+          path: mobipeg-${{ matrix.target }}.tar.gz
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Windows x86 and x86_64 — cross-compiled from Ubuntu with mingw-w64
+  # (Windows arm64 is not officially supported by FFmpeg configure)
+  # ─────────────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x86_64
+            ffarch: x86_64
+            cross_prefix: x86_64-w64-mingw32
+
+          - target: windows-x86
+            ffarch: x86
+            cross_prefix: i686-w64-mingw32
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache nasm
+        id: cache-nasm
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/nasm
+          key: nasm-${{ env.NASM_VERSION }}
+
+      - name: Build and install nasm
+        if: steps.cache-nasm.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://www.nasm.us/pub/nasm/releasebuilds/${{ env.NASM_VERSION }}/nasm-${{ env.NASM_VERSION }}.tar.xz" | tar -xJ
+          cd nasm-${{ env.NASM_VERSION }}
+          ./configure && make -j$(nproc) && sudo make install
+
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config nasm mingw-w64 mingw-w64-tools
+
+      # x264 has no mingw apt package — build it from source
+      - name: Cache x264 for ${{ matrix.target }}
+        id: cache-x264
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/deps/${{ matrix.target }}
+          key: x264-${{ matrix.target }}-v9-${{ hashFiles('x264-src/**') }}
+          restore-keys: |
+            x264-${{ matrix.target }}-v9-
+
+      - name: Build x264 for ${{ matrix.target }}
+        if: steps.cache-x264.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          mkdir -p "$DEPS"
+          git clone --depth=1 https://github.com/quatric/x264.git x264-src
+          cd x264-src
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --cross-prefix=${{ matrix.cross_prefix }}- \
+            --enable-static \
+            --enable-pic \
+            --disable-cli \
+            --disable-opencl \
+            --disable-asm
+          make -j$(nproc) && make install
+
+      - name: Install SDL2 for Windows
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          mkdir -p "$DEPS/include" "$DEPS/lib"
+          wget -q https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-mingw.tar.gz
+          tar -xzf SDL2-devel-2.30.0-mingw.tar.gz
+          cp -a SDL2-2.30.0/${{ matrix.cross_prefix }}/include/SDL2 "$DEPS/include/"
+          cp -a SDL2-2.30.0/${{ matrix.cross_prefix }}/lib/* "$DEPS/lib/"
+          mkdir -p "$DEPS/bin"
+          cp -a SDL2-2.30.0/${{ matrix.cross_prefix }}/bin/SDL2.dll "$DEPS/bin/"
+          sed -i "s|^prefix=.*|prefix=$DEPS|" "$DEPS/lib/pkgconfig/sdl2.pc"
+
+
+      - name: Cache libogg + libvorbis for ${{ matrix.target }}
+        id: cache-vorbis
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/deps/${{ matrix.target }}
+          key: vorbis-1.3.7-mingw-${{ matrix.target }}-v4
+
+      - name: Build libogg + libvorbis for ${{ matrix.target }}
+        if: steps.cache-vorbis.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          mkdir -p "$DEPS"
+
+          # libogg
+          curl -fsSL https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz
+          cd libogg-1.3.5
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --enable-static --disable-shared
+          make -j$(nproc) && make install
+          cd ..
+
+          # libvorbis
+          curl -fsSL https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz
+          cd libvorbis-1.3.7
+          PKG_CONFIG_PATH="$DEPS/lib/pkgconfig" \
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --with-ogg-includes="$DEPS/include" \
+            --with-ogg-libraries="$DEPS/lib" \
+            --enable-static --disable-shared
+          make -j$(nproc) && make install
+
+      - name: Configure FFmpeg
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig"
+          ./configure \
+            --prefix="$PWD/dist" \
+            --arch=${{ matrix.ffarch }} \
+            --target-os=mingw32 \
+            --cross-prefix=${{ matrix.cross_prefix }}- \
+            --disable-x86asm \
+            --enable-gpl \
+            --enable-libx264 \
+            --enable-libvorbis \
+            --enable-static \
+            --disable-shared \
+            --disable-doc \
+            --disable-debug \
+            --disable-outdev=sdl2 \
+            --pkg-config-flags="--static" \
+            --extra-cflags="-I$DEPS/include" \
+            --extra-ldflags="-L$DEPS/lib -static"
+
+      - name: Build
+        run: make -j$(nproc)
+
+      - name: Install
+        run: make install
+
+      - name: Package
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          cd dist/bin
+          FILES=""
+          for f in ffmpeg.exe ffprobe.exe ffplay.exe; do
+            [ -f "$f" ] && FILES="$FILES $f"
+          done
+          # Include SDL2.dll for ffplay if it exists
+          [ -f "$DEPS/bin/SDL2.dll" ] && cp "$DEPS/bin/SDL2.dll" . && FILES="$FILES SDL2.dll"
+          zip "../../mobipeg-${{ matrix.target }}.zip" $FILES
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobipeg-${{ matrix.target }}
+          path: mobipeg-${{ matrix.target }}.zip
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # macOS — arm64 on macos-14, x86_64 on macos-13, then lipo into universal
+  # ─────────────────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install yasm pkg-config nasm sdl2
+
+      - name: Cache dependencies
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/deps
+          key: deps-macos-universal-v7
+
+      - name: Build dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps"
+          
+          build_arch() {
+            local ARCH=$1
+            local TARGET_FLAG=$2
+            local HOST_FLAG=$3
+            local PREFIX="$DEPS/$ARCH"
+            mkdir -p "$PREFIX"
+            
+            cd "$GITHUB_WORKSPACE"
+            # libogg
+            [ ! -d libogg-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz && mv libogg-1.3.5 libogg-$ARCH
+            cd libogg-$ARCH
+            ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+            
+            # libvorbis
+            [ ! -d libvorbis-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz && mv libvorbis-1.3.7 libvorbis-$ARCH
+            cd libvorbis-$ARCH
+            sed -i.bak 's/-force_cpusubtype_ALL//g' configure
+            PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --with-ogg-includes="$PREFIX/include" --with-ogg-libraries="$PREFIX/lib" --enable-static --disable-shared
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+            
+            # x264
+            [ ! -d x264-$ARCH ] && git clone --depth=1 https://github.com/quatric/x264.git x264-$ARCH
+            cd x264-$ARCH
+            ./configure --prefix="$PREFIX" $HOST_FLAG --extra-cflags="$TARGET_FLAG" --extra-ldflags="$TARGET_FLAG" --enable-static --enable-pic --disable-cli --disable-opencl
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+          }
+
+          build_arch "arm64" "" ""
+          build_arch "x86_64" "-target x86_64-apple-macos11.0" "--host=x86_64-apple-darwin"
+
+      - name: Build FFmpeg
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps"
+          
+          build_ffmpeg() {
+            local ARCH=$1
+            local TARGET_FLAG=$2
+            local PREFIX="$DEPS/$ARCH"
+            local OUTDIR="$PWD/dist/$ARCH"
+            
+            mkdir -p build_ffmpeg_$ARCH
+            cd build_ffmpeg_$ARCH
+            
+            export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+            ../configure \
+              --prefix="$OUTDIR" \
+              --arch=$ARCH \
+              --enable-gpl \
+              --enable-libx264 \
+              --enable-libvorbis \
+              --disable-doc \
+              --disable-debug \
+              --disable-outdev=sdl2 \
+              --pkg-config-flags="--static" \
+              --extra-cflags="-I$PREFIX/include $TARGET_FLAG" \
+              --extra-ldflags="-L$PREFIX/lib $TARGET_FLAG" || { cat ffbuild/config.log; exit 1; }
+            
+            make -j$(sysctl -n hw.logicalcpu)
+            make install
+            cd ..
+          }
+          
+          build_ffmpeg "arm64" ""
+          build_ffmpeg "x86_64" "-target x86_64-apple-macos11.0"
+
+      - name: lipo into universal binaries
+        run: |
+          mkdir -p dist/universal
+          for bin in ffmpeg ffprobe ffplay; do
+            arm="dist/arm64/bin/$bin"
+            x64="dist/x86_64/bin/$bin"
+            if [[ -f "$arm" && -f "$x64" ]]; then
+              chmod +x "$arm" "$x64"
+              lipo -create -output "dist/universal/$bin" "$arm" "$x64"
+              echo "Created universal $bin: $(lipo -info dist/universal/$bin)"
+            elif [[ -f "$arm" ]]; then
+              cp "$arm" "dist/universal/$bin"
+            fi
+          done
+
+      - name: Package
+        run: |
+          cd dist/universal
+          FILES="ffmpeg ffprobe"
+          [ -f ffplay ] && FILES="$FILES ffplay"
+          tar -czf "../../mobipeg-macos-universal.tar.gz" $FILES
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobipeg-macos-universal
+          path: mobipeg-macos-universal.tar.gz
+          retention-days: 7
+
+
+  # Build GUI App using PyInstaller
+  # ─────────────────────────────────────────────────────────────────────────
+  build-gui:
+    needs: [build-linux, build-windows, build-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-22.04
+            ext: tar.gz
+          - target: windows-x86_64
+            os: windows-latest
+            ext: zip
+          - target: macos-universal
+            os: macos-14
+            ext: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download FFmpeg artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mobipeg-${{ matrix.target }}
+          path: artifact
+
+      - name: Extract artifact
+        shell: bash
+        run: |
+          cd artifact
+          if [[ "${{ matrix.ext }}" == "tar.gz" ]]; then
+            tar -xzf mobipeg-*.tar.gz
+          else
+            unzip mobipeg-*.zip
+          fi
+
+      - name: Build PyInstaller App
+        shell: bash
+        run: |
+          python -m pip install pyinstaller Pillow
+          if [[ "${{ matrix.target }}" == windows* ]]; then
+            FFMPEG_BIN="artifact/ffmpeg.exe"
+            SDL2_BIN="artifact/SDL2.dll"
+            # Pyinstaller on Windows uses semicolon for add-data/binary
+            pyinstaller --name "mobipeg-gui" --windowed --add-binary "$FFMPEG_BIN;." --add-binary "$SDL2_BIN;." --add-data "logo.png;." --icon=logo.png --distpath pyinst_dist encode_gui.py
+            cd pyinst_dist
+            7z a ../mobipeg-gui-${{ matrix.target }}.zip mobipeg-gui
+          elif [[ "${{ matrix.target }}" == "macos-universal" ]]; then
+            FFMPEG_BIN="artifact/ffmpeg"
+            pyinstaller --name "mobipeg-gui" --windowed --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." --icon=logo.png --distpath pyinst_dist --target-architecture universal2 encode_gui.py
+            cd pyinst_dist
+            zip -r ../mobipeg-gui-${{ matrix.target }}.zip mobipeg-gui.app
+          else
+            sudo apt-get install python3-tk -y || true
+            FFMPEG_BIN="artifact/ffmpeg"
+            pyinstaller --name "mobipeg-gui" --windowed --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." --icon=logo.png --distpath pyinst_dist encode_gui.py
+            cd pyinst_dist
+            tar -czf ../mobipeg-gui-${{ matrix.target }}.tar.gz mobipeg-gui
+          fi
+
+      - name: Upload GUI App
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobipeg-gui-${{ matrix.target }}
+          path: mobipeg-gui-${{ matrix.target }}.*
+          retention-days: 7

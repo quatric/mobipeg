@@ -1,3 +1,4 @@
+# Copyright (c) 2026 quatric - quatricsoftware@gmail.com
 NAME = avformat
 DESC = FFmpeg container format library
 
@@ -169,8 +170,6 @@ OBJS-$(CONFIG_BITPACKED_DEMUXER)         += rawvideodec.o
 OBJS-$(CONFIG_BMV_DEMUXER)               += bmv.o
 OBJS-$(CONFIG_BOA_DEMUXER)               += boadec.o
 OBJS-$(CONFIG_BONK_DEMUXER)              += bonk.o rawdec.o
-OBJS-$(CONFIG_BFSTM_DEMUXER)             += brstm.o
-OBJS-$(CONFIG_BRSTM_DEMUXER)             += brstm.o
 OBJS-$(CONFIG_C93_DEMUXER)               += c93.o voc_packet.o voc.o
 OBJS-$(CONFIG_CAF_DEMUXER)               += cafdec.o caf.o mov_chan.o mov_esds.o
 OBJS-$(CONFIG_CAF_MUXER)                 += cafenc.o caf.o riff.o
@@ -385,8 +384,12 @@ OBJS-$(CONFIG_MLV_DEMUXER)               += mlvdec.o riffdec.o
 OBJS-$(CONFIG_MM_DEMUXER)                += mm.o
 OBJS-$(CONFIG_MMF_DEMUXER)               += mmf.o
 OBJS-$(CONFIG_MMF_MUXER)                 += mmf.o rawenc.o
+OBJS-$(CONFIG_MO_DEMUXER)                += modec.o
+OBJS-$(CONFIG_MO_MUXER)                  += moenc.o
 OBJS-$(CONFIG_MODS_DEMUXER)              += mods.o
+OBJS-$(CONFIG_MODS_MUXER)                += modsenc.o
 OBJS-$(CONFIG_MOFLEX_DEMUXER)            += moflex.o
+OBJS-$(CONFIG_MOFLEX_MUXER)              += moflexenc.o
 OBJS-$(CONFIG_MOV_DEMUXER)               += mov.o mov_chan.o mov_esds.o \
                                             qtpalette.o replaygain.o dovi_isom.o \
                                             dvdclut.o
