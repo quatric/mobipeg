@@ -935,6 +935,8 @@ following image formats are supported:
 @item 8088flex TMV           @tab     @tab  X
 @item A64 multicolor         @tab  X  @tab
     @tab Creates video suitable to be played on a commodore 64 (multicolor mode).
+ at item Actimagine VX Video    @tab     @tab  X
+    @tab fourcc: vxs1, VXS1
 @item Amazing Studio PAF Video @tab     @tab  X
 @item American Laser Games MM  @tab    @tab X
     @tab Used in games like Mad Dog McCree.
@@ -1273,7 +1275,7 @@ following image formats are supported:
 @item ADPCM IMA Electronic Arts SEAD  @tab     @tab  X
 @item ADPCM IMA Funcom       @tab     @tab  X
 @item ADPCM IMA High Voltage Software ALP      @tab  X  @tab  X
-@item ADPCM IMA Mobiclip MOFLEX  @tab     @tab  X
+@item ADPCM IMA MobiClip MOFLEX  @tab     @tab  X
 @item ADPCM IMA QuickTime    @tab  X  @tab  X
 @item ADPCM IMA Simon & Schuster Interactive   @tab  X  @tab  X
 @item ADPCM IMA Ubisoft APM  @tab  X  @tab  X
