@@ -208,7 +208,8 @@ static void print_program_info(int flags, int level)
     av_log(NULL, level, "\n");
     av_log(NULL, level, "%sbuilt with %s\n", indent, CC_IDENT);
 
-    av_log(NULL, level, "%sconfiguration: %s\n", indent, FFMPEG_CONFIGURATION);
+    av_log(NULL, level, "%sconfiguration: " FFMPEG_CONFIGURATION "\n", indent);
+    av_log(NULL, level, "%smobipeg - Copyright (c) 2026 quatric\n", indent);
 }
 
 static void print_buildconf(int flags, int level)

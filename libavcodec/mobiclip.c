@@ -3,6 +3,7 @@
  * Copyright (c) 2015-2016 Florian Nouwt
  * Copyright (c) 2017 Adib Surani
  * Copyright (c) 2020 Paul B Mahol
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -27,6 +28,7 @@
 #include "libavutil/avassert.h"
 #include "libavutil/mem.h"
 #include "libavutil/thread.h"
+#include "libavutil/dict.h"
 
 #include "avcodec.h"
 #include "bswapdsp.h"
@@ -38,6 +40,11 @@
 
 #define MOBI_RL_VLC_BITS 12
 #define MOBI_MV_VLC_BITS 6
+
+/* Bytes consumed by the most recently decoded MobiClip video frame.
+ * Used by the DS .mods Sx audio demuxer to locate audio data within
+ * the same packet.  Single-threaded sequential decode only. */
+int ff_mobiclip_last_video_bytes = 0;
 
 static const uint8_t zigzag4x4_tab[] =
 {
@@ -1257,13 +1264,17 @@ static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
         frame->flags &= ~AV_FRAME_FLAG_KEY;
         s->dct_tab_idx = 0;
 
-        ret = setup_qtables(avctx, s->quantizer + (int64_t)get_se_golomb(gb));
-        if (ret < 0)
+        int se_delta = get_se_golomb(gb);
+        ret = setup_qtables(avctx, s->quantizer + (int64_t)se_delta);
+        if (ret < 0) {
+            av_log(avctx, AV_LOG_ERROR, "P-frame setup_qtables failed: q=%d delta=%d\n", s->quantizer, se_delta);
             return ret;
+        }
 
         for (int y = 0; y < avctx->height; y += 16) {
             for (int x = 0; x < avctx->width; x += 16) {
                 int idx;
+                int mb_bit_pos = get_bits_count(gb);
 
                 motion[0].x = mid_pred(motion[x / 16 + 1].x, motion[x / 16 + 2].x, motion[x / 16 + 3].x);
                 motion[0].y = mid_pred(motion[x / 16 + 1].y, motion[x / 16 + 2].y, motion[x / 16 + 3].y);
@@ -1272,18 +1283,28 @@ static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
 
                 idx = get_vlc2(gb, mv_vlc[s->moflex][0], MOBI_MV_VLC_BITS, 1);
 
+                if (getenv("MOBI_DECDBG"))
+                    av_log(avctx, AV_LOG_INFO, "[DEC] MB(%d,%d) bitpos=%d idx=%d\n",
+                           x, y, mb_bit_pos, idx);
+
                 if (idx == 6 || idx == 7) {
                     ret = decode_macroblock(avctx, frame, x, y, idx == 7);
-                    if (ret < 0)
+                    if (ret < 0) {
+                        av_log(avctx, AV_LOG_ERROR, "P-frame decode_macroblock failed at %d,%d idx=%d\n", x, y, idx);
                         return ret;
+                    }
                 } else {
                     int flags, idx2;
                     ret = predict_motion(avctx, 16, 16, idx, x / 16 + 2, x, y);
-                    if (ret < 0)
+                    if (ret < 0) {
+                        av_log(avctx, AV_LOG_ERROR, "P-frame predict_motion failed at %d,%d idx=%d\n", x, y, idx);
                         return ret;
+                    }
                     idx2 = get_ue_golomb(gb);
-                    if (idx2 >= FF_ARRAY_ELEMS(pframe_block8x8_coefficients_tab))
+                    if (idx2 >= FF_ARRAY_ELEMS(pframe_block8x8_coefficients_tab)) {
+                        av_log(avctx, AV_LOG_ERROR, "P-frame invalid idx2=%d at %d,%d\n", idx2, x, y);
                         return AVERROR_INVALIDDATA;
+                    }
                     flags = pframe_block8x8_coefficients_tab[idx2];
 
                     for (int sy = y; sy < y + 16; sy += 8) {
@@ -1304,8 +1325,10 @@ static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
         }
     }
 
-    if (!s->moflex)
+    if (!s->moflex) {
         avctx->colorspace = AVCOL_SPC_YCGCO;
+        frame->colorspace = AVCOL_SPC_YCGCO;
+    }
 
     s->current_pic = (s->current_pic + 1) % 6;
     ret = av_frame_ref(rframe, frame);
@@ -1313,6 +1336,16 @@ static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
         return ret;
     *got_frame = 1;
 
+    /* For DS .mods retail audio extraction: record how many bytes of the
+     * bswap16'd bitstream the video decoder consumed.  The audio Sx blocks
+     * follow immediately in the original (non-bswapped) byte stream at the
+     * same byte offset. */
+    {
+        int consumed = (get_bits_count(gb) + 15) / 16 * 2;
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", consumed);
+        av_dict_set(&rframe->metadata, "mobiclip_consumed_bytes", buf, 0);
+    }
     return 0;
 }
 

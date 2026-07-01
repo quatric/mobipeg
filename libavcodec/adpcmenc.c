@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2001-2003 The FFmpeg project
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * first version by Francois Revol (revol@free.fr)
  * fringe ADPCM codecs (e.g., DK3, DK4, Westwood)
@@ -24,6 +25,7 @@
 
 #include "config_components.h"
 
+#include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 
@@ -34,6 +36,22 @@
 #include "adpcm_data.h"
 #include "codec_internal.h"
 #include "encode.h"
+
+static const int16_t afc_coeffs[2][16] = {
+    { 0, 2048, 0, 1024, 4096, 3584, 3072, 4608, 4200, 4800, 5120, 2048, 1024, -1024, -1024, -2048 },
+    { 0, 0, 2048, 1024, -2048, -1536, -1024, -2560, -2248, -2300, -3072, -2048, -1024, 1024, 0, 0 }
+};
+
+static const int16_t thp_coeffs[16] = {
+    0, 0,
+    2048, 0,
+    0, 2048,
+    1024, 1024,
+    4096, -2048,
+    3584, -1536,
+    3072, -1024,
+    4608, -2560,
+};
 
 /**
  * @file
@@ -75,6 +93,13 @@ typedef struct ADPCMEncodeContext {
     TrellisNode *node_buf;
     TrellisNode **nodep_buf;
     uint8_t *trellis_hash;
+
+    /* THP: per-channel DSP-ADPCM coefficients (8 pairs, Q11) derived from the
+     * audio via ff_DSPCorrelateCoefs on the first frame, replacing the broken
+     * fixed thp_coeffs table. Emitted as side data so the muxer writes them
+     * into the file header for the decoder. */
+    int16_t thp_dsp_coeffs[6][16];
+    int     thp_coeffs_ready;
 } ADPCMEncodeContext;
 
 #define FREEZE_INTERVAL 128
@@ -194,6 +219,14 @@ static av_cold int adpcm_encode_init(AVCodecContext *avctx)
         avctx->frame_size = s->block_size * 2 / channels;
         avctx->block_align = s->block_size;
         ) /* End of CASE */
+    CASE(ADPCM_IMA_MOFLEX,
+        /* One subframe = 256 samples; header 4 bytes/ch + 128 bytes/ch of nibbles */
+        avctx->frame_size  = 256;
+        avctx->block_align = channels * 132;
+        ) /* End of CASE */
+    
+    case AV_CODEC_ID_ADPCM_THP_LE:
+    
     default:
         av_unreachable("there is a case for every codec using adpcm_encode_init()");
     }
@@ -217,9 +250,9 @@ static inline uint8_t adpcm_ima_compress_sample(ADPCMChannelStatus *c,
                                                 int16_t sample)
 {
     int delta  = sample - c->prev_sample;
-    int nibble = FFMIN(7, abs(delta) * 4 /
-                       ff_adpcm_step_table[c->step_index]) + (delta < 0) * 8;
-    c->prev_sample += ((ff_adpcm_step_table[c->step_index] *
+    int step   = ff_adpcm_step_table[c->step_index];
+    int nibble = FFMIN(7, (abs(delta) * 8 + step) / (step * 2)) + (delta < 0) * 8;
+    c->prev_sample += ((step *
                         ff_adpcm_yamaha_difflookup[nibble]) / 8);
     c->prev_sample = av_clip_int16(c->prev_sample);
     c->step_index  = av_clip(c->step_index + ff_adpcm_index_table[nibble], 0, 88);
@@ -614,8 +647,7 @@ static int adpcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
         for (int ch = 0; ch < channels; ch++) {
             ADPCMChannelStatus *status = &c->status[ch];
             status->prev_sample = samples_p[ch][0];
-            /* status->step_index = 0;
-               XXX: not sure how to init the state machine */
+            status->step_index = 0;
             bytestream_put_le16(&dst, status->prev_sample);
             *dst++ = status->step_index;
             *dst++ = 0; /* unknown */
@@ -659,6 +691,7 @@ static int adpcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
 
         for (int ch = 0; ch < channels; ch++) {
             ADPCMChannelStatus *status = &c->status[ch];
+            status->prev_sample = samples_p[ch][0];
             put_bits(&pb, 9, (status->prev_sample & 0xFFFF) >> 7);
             put_bits(&pb, 7,  status->step_index);
             if (avctx->trellis > 0) {
@@ -937,6 +970,27 @@ static int adpcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
         }
         flush_put_bits(&pb);
         ) /* End of CASE */
+    
+    case AV_CODEC_ID_ADPCM_THP_LE:
+    
+    CASE(ADPCM_IMA_MOFLEX,
+        /* Header: [LE16 step_index][LE16 predictor] per channel */
+        for (int ch = 0; ch < channels; ch++) {
+            ADPCMChannelStatus *cs = &c->status[ch];
+            bytestream_put_le16(&dst, cs->step_index);
+            bytestream_put_le16(&dst, cs->prev_sample);
+        }
+        /* 256 IMA ADPCM nibble samples per channel, interleaved by channel */
+        for (int ch = 0; ch < channels; ch++) {
+            ADPCMChannelStatus *cs = &c->status[ch];
+            for (int n = 0; n < 256; n += 2) {
+                uint8_t nibble;
+                nibble  = adpcm_ima_compress_sample(cs, samples_p[ch][n])     & 0x0F;
+                nibble |= adpcm_ima_compress_sample(cs, samples_p[ch][n + 1]) << 4;
+                *dst++ = nibble;
+            }
+        }
+        ) /* End of CASE */
     default:
         return AVERROR(EINVAL);
     }
@@ -1014,7 +1068,8 @@ ADPCM_ENCODER(ADPCM_IMA_APM, adpcm_ima_apm, sample_fmts,   AV_CODEC_CAP_SMALL_LA
 ADPCM_ENCODER(ADPCM_IMA_ALP, adpcm_ima_alp, sample_fmts,   AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM IMA High Voltage Software ALP",    MONO_STEREO, AVCLASS)
 ADPCM_ENCODER(ADPCM_IMA_QT,  adpcm_ima_qt,  sample_fmts_p, 0,                             "ADPCM IMA QuickTime",                    MONO_STEREO)
 ADPCM_ENCODER(ADPCM_IMA_SSI, adpcm_ima_ssi, sample_fmts,   AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM IMA Simon & Schuster Interactive", MONO_STEREO, AVCLASS)
-ADPCM_ENCODER(ADPCM_IMA_WAV, adpcm_ima_wav, sample_fmts_p, 0,                             "ADPCM IMA WAV",                          MONO_STEREO, AVCLASS)
+ADPCM_ENCODER(ADPCM_IMA_WAV,    adpcm_ima_wav,    sample_fmts_p, 0, "ADPCM IMA WAV",              MONO_STEREO, AVCLASS)
+ADPCM_ENCODER(ADPCM_IMA_MOFLEX, adpcm_ima_moflex, sample_fmts_p, 0, "ADPCM IMA MobiClip MOFLEX", MONO_STEREO)
 ADPCM_ENCODER(ADPCM_IMA_WS,  adpcm_ima_ws,  sample_fmts,   AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM IMA Westwood",                     MONO_STEREO, AVCLASS)
 ADPCM_ENCODER(ADPCM_MS,      adpcm_ms,      sample_fmts,   0,                             "ADPCM Microsoft",                        MONO_STEREO, AVCLASS)
 ADPCM_ENCODER(ADPCM_SWF,     adpcm_swf,     sample_fmts,   0,                             "ADPCM Shockwave Flash",                  MONO_STEREO, CODEC_SAMPLERATES(11025, 22050, 44100))
