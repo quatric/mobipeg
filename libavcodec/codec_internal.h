@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * This file is part of FFmpeg.
  *
  * FFmpeg is free software; you can redistribute it and/or
@@ -88,6 +89,16 @@
  * encoders do.
  */
 #define FF_CODEC_CAP_EOF_FLUSH              (1 << 10)
+
+/**
+ * The decoder's decode callback returns the actual number of bytes consumed
+ * from the input packet, which may be less than pkt->size.  decode.c must
+ * not override the returned value with pkt->size, so that the residual bytes
+ * are re-fed on the next avcodec_receive_frame() call.
+ * Only for video decoders where multiple frames may share a single demuxer
+ * packet (e.g. raw bitstream codecs with self-delimiting frames).
+ */
+#define FF_CODEC_CAP_SUBFRAME               (1 << 11)
 
 /**
  * FFCodec.codec_tags termination value
