@@ -3,6 +3,7 @@ releases are sorted from youngest to oldest.
 
 version <next>:
 - extensively improved AAC encoder
+- APV Vulkan encoder
 
 
 version 9.0:
