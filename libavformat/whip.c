@@ -396,6 +396,8 @@ static av_cold int dtls_initialize(AVFormatContext *s)
     av_dict_set_int(&opts, "external_sock", 1, 0);
     av_dict_set_int(&opts, "use_srtp", 1, 0);
     av_dict_set_int(&opts, "listen", is_dtls_active ? 0 : 1, 0);
+    // Do not verify CA
+    av_dict_set_int(&opts, "verify", 0, 0);
     ret = ffurl_open_whitelist(&whip->dtls_uc, buf, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     av_dict_free(&opts);
