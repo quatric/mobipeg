@@ -8,7 +8,7 @@
 #codec_id 1: ac3
 #sample_rate 1: 44100
 #channel_layout_name 1: mono
-1,       -256,       -256,     1536,      416, 0xcedecce4
+1,       -256,       -256,     1536,      416, 0xcedecce4, S=1, Skip Samples,       10, 0x00090001
 0,          0,          0,        1,    27867, 0x1426a0d6, S=1, Quality stats,        8, 0x050000a1
 1,       1280,       1280,     1536,      418, 0x4ebabf82
 0,          1,          1,        1,     9806, 0xbebc2826, F=0x0, S=1, Quality stats,        8, 0x050400a2
