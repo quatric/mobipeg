@@ -52,7 +52,8 @@ typedef struct THInferRequest {
 
 typedef struct THRequestItem {
     THInferRequest *infer_request;
-    LastLevelTaskItem *lltask;
+    LastLevelTaskItem **lltasks;
+    uint32_t lltask_count;
     DNNAsyncExecModule exec_module;
 } THRequestItem;
 
@@ -108,7 +109,7 @@ static inline void destroy_request_item(THRequestItem **arg)
     item = *arg;
     th_free_request(item->infer_request);
     av_freep(&item->infer_request);
-    av_freep(&item->lltask);
+    av_freep(&item->lltasks);
     ff_dnn_async_module_cleanup(&item->exec_module);
     av_freep(arg);
 }
@@ -166,53 +167,75 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     DNNData input = { 0 };
     DnnContext *ctx = th_model->ctx;
     int ret, width_idx, height_idx, channel_idx;
+    int batch_size = ctx->batch_size;
+    float *batch_data = NULL;
+    int frame_size = 0;
 
-    lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
-    if (!lltask) {
-        ret = AVERROR(EINVAL);
-        goto err;
-    }
-    request->lltask = lltask;
-    task = lltask->task;
     infer_request = request->infer_request;
 
     ret = get_input_th(&th_model->model, &input, NULL);
-    if ( ret != 0) {
+    if (ret != 0) {
         goto err;
     }
     width_idx = dnn_get_width_idx_by_layout(input.layout);
     height_idx = dnn_get_height_idx_by_layout(input.layout);
     channel_idx = dnn_get_channel_idx_by_layout(input.layout);
+
+    lltask = (LastLevelTaskItem *)ff_queue_peek_front(th_model->lltask_queue);
+    if (!lltask) {
+        ret = AVERROR(EINVAL);
+        goto err;
+    }
+    task = lltask->task;
     input.dims[height_idx] = task->in_frame->height;
     input.dims[width_idx] = task->in_frame->width;
-    input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
-                           input.dims[channel_idx] * sizeof(float));
-    if (!input.data)
-        return AVERROR(ENOMEM);
+
+    frame_size = input.dims[height_idx] * input.dims[width_idx] * input.dims[channel_idx];
+    batch_data = (float *)av_malloc(batch_size * frame_size * sizeof(float));
+    if (!batch_data) {
+        ret = AVERROR(ENOMEM);
+        goto err;
+    }
+
+    for (int i = 0; i < batch_size; i++) {
+        lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
+        if (!lltask)
+            break;
+
+        request->lltasks[i] = lltask;
+        request->lltask_count = i + 1;
+        task = lltask->task;
+
+        input.data = batch_data + i * frame_size;
+
+        switch (th_model->model.func_type) {
+        case DFT_PROCESS_FRAME:
+            input.scale = 255;
+            if (task->do_ioproc) {
+                if (th_model->model.frame_pre_proc != NULL) {
+                    th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
+                } else {
+                    ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
+                }
+            }
+            break;
+        default:
+            avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
+            break;
+        }
+    }
+
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
-
-    switch (th_model->model.func_type) {
-    case DFT_PROCESS_FRAME:
-        input.scale = 255;
-        if (task->do_ioproc) {
-            if (th_model->model.frame_pre_proc != NULL) {
-                th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
-            } else {
-                ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
-            }
-        }
-        break;
-    default:
-        avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
-        break;
-    }
-    *infer_request->input_tensor = torch::from_blob(input.data,
-        {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
+    *infer_request->input_tensor = torch::from_blob(batch_data,
+        {request->lltask_count, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
         deleter, torch::kFloat32);
+
     return 0;
 
 err:
+    if (batch_data)
+        av_freep(&batch_data);
     th_free_request(infer_request);
     return ret;
 }
@@ -233,7 +256,7 @@ static int th_start_inference(void *args)
         return AVERROR(EINVAL);
     }
     infer_request = request->infer_request;
-    lltask = request->lltask;
+    lltask = request->lltasks[0];
     task = lltask->task;
     th_model = (THModel *)task->model;
     ctx = th_model->ctx;
@@ -260,54 +283,66 @@ static int th_start_inference(void *args)
 
 static void infer_completion_callback(void *args) {
     THRequestItem *request = (THRequestItem*)args;
-    LastLevelTaskItem *lltask = request->lltask;
-    TaskItem *task = lltask->task;
-    DNNData outputs = { 0 };
     THInferRequest *infer_request = request->infer_request;
-    THModel *th_model = (THModel *)task->model;
+    LastLevelTaskItem *lltask = request->lltasks[0];
+    THModel *th_model = (THModel *)lltask->task->model;
     torch::Tensor *output = infer_request->output;
+    DNNData outputs = { 0 };
 
-    c10::IntArrayRef sizes = output->sizes();
-    outputs.order = DCO_RGB;
-    outputs.layout = DL_NCHW;
-    outputs.dt = DNN_FLOAT;
-    if (sizes.size() == 4) {
-        // 4 dimensions: [batch_size, channel, height, width]
-        // this format of data is normally used for video frame SR
-        outputs.dims[0] = sizes.at(0); // N
-        outputs.dims[1] = sizes.at(1); // C
-        outputs.dims[2] = sizes.at(2); // H
-        outputs.dims[3] = sizes.at(3); // W
-    } else {
-        avpriv_report_missing_feature(th_model->ctx, "Support of this kind of model");
-        goto err;
-    }
+    auto slices = torch::split(*output, /*split_size=*/1, /*dim=*/0);
+    for (uint32_t i = 0; i < request->lltask_count; i++) {
+        lltask = request->lltasks[i];
+        TaskItem *task = lltask->task;
+        torch::Tensor out_slice = slices[i];
+        c10::IntArrayRef sizes = out_slice.sizes();
 
-    switch (th_model->model.func_type) {
-    case DFT_PROCESS_FRAME:
-        if (task->do_ioproc) {
-            // Post process can only deal with CPU memory.
-            if (output->device() != torch::kCPU)
-                *output = output->to(torch::kCPU);
-            outputs.scale = 255;
-            outputs.data = output->data_ptr();
-            if (th_model->model.frame_post_proc != NULL) {
-                th_model->model.frame_post_proc(task->out_frame, &outputs, th_model->model.filter_ctx);
-            } else {
-                ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
-            }
+        outputs.order = DCO_RGB;
+        outputs.layout = DL_NCHW;
+        outputs.dt = DNN_FLOAT;
+
+        if (sizes.size() == 4) {
+            // 4 dimensions: [batch_size, channel, height, width]
+            // this format of data is normally used for video frame SR
+            outputs.dims[0] = sizes.at(0); // N
+            outputs.dims[1] = sizes.at(1); // C
+            outputs.dims[2] = sizes.at(2); // H
+            outputs.dims[3] = sizes.at(3); // W
         } else {
-            task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
-            task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
+            avpriv_report_missing_feature(th_model->ctx, "Support of this kind of model");
+            goto err;
         }
-        break;
-    default:
-        avpriv_report_missing_feature(th_model->ctx, "model function type %d", th_model->model.func_type);
-        goto err;
+
+        switch (th_model->model.func_type) {
+        case DFT_PROCESS_FRAME:
+            if (task->do_ioproc) {
+                // Post process can only deal with CPU memory.
+                if (out_slice.device() != torch::kCPU)
+                    out_slice = out_slice.to(torch::kCPU);
+                outputs.scale = 255;
+                outputs.data = out_slice.data_ptr();
+                if (th_model->model.frame_post_proc != NULL) {
+                    th_model->model.frame_post_proc(task->out_frame, &outputs, th_model->model.filter_ctx);
+                } else {
+                    ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
+                }
+            } else {
+                task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
+                task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
+            }
+            break;
+        default:
+            avpriv_report_missing_feature(th_model->ctx, "model function type %d", th_model->model.func_type);
+            goto err;
+        }
+        task->inference_done++;
     }
-    task->inference_done++;
-    av_freep(&request->lltask);
+
 err:
+    for (uint32_t i = 0; i < request->lltask_count; i++) {
+        av_freep(&request->lltasks[i]);
+    }
+    request->lltask_count = 0;
+
     th_free_request(infer_request);
 
     if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
@@ -483,6 +518,11 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         if (!item->infer_request) {
             goto fail;
         }
+        item->lltasks = (LastLevelTaskItem **)av_malloc_array(ctx->batch_size, sizeof(*item->lltasks));
+        if (!item->lltasks) {
+            goto fail;
+        }
+        item->lltask_count = 0;
 
         item->exec_module.start_inference = &th_start_inference;
         item->exec_module.callback = &infer_completion_callback;
@@ -551,13 +591,20 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         return ret;
     }
 
-    request = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
-    if (!request) {
-        av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
-        return AVERROR(EINVAL);
+    while (ff_queue_size(th_model->lltask_queue) >= ctx->batch_size) {
+        request = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
+        if (!request) {
+            av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
+            return AVERROR(EINVAL);
+        }
+
+        ret = execute_model_th(request, th_model->lltask_queue);
+        if (ret != 0) {
+            return ret;
+        }
     }
 
-    return execute_model_th(request, th_model->lltask_queue);
+    return 0;
 }
 
 static DNNAsyncStatusType dnn_get_result_th(const DNNModel *model, AVFrame **in, AVFrame **out)

@@ -165,6 +165,7 @@ typedef struct DnnContext {
     const DNNModule *dnn_module;
 
     int nireq;
+    int batch_size;
     char *device;
     int device_id;
 
