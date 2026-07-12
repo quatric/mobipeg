@@ -227,9 +227,6 @@ AArch64 NEON kernels.
 @item spirv
 Vulkan SPIR-V backend.
 
-@item glsl
-Vulkan GLSL backend.
-
 @end table
 
 @end table
