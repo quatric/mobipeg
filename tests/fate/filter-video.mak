@@ -558,6 +558,14 @@ fate-filter-colorbalance-gbrap: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,f
 fate-filter-colorbalance-rgba64: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=rgba64,colorbalance=rm=.2,scale -pix_fmt rgba64le -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 3
 fate-filter-colorbalance-gbrap-16: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=gbrap,colorbalance=bh=.2 -pix_fmt gbrap -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 3
 
+FATE_FILTER_VSYNTH_PGMYUV-$(call ALLYES, SCALE_FILTER FORMAT_FILTER LATTICEPAL_FILTER) += fate-filter-latticepal fate-filter-latticepal-bayer fate-filter-latticepal-maxcolors fate-filter-latticepal-refine fate-filter-latticepal-residual fate-filter-latticepal-batched
+fate-filter-latticepal: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=rgb24,latticepal=density=32:dither=floyd_steinberg -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 5
+fate-filter-latticepal-bayer: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=rgb24,latticepal=density=7:dither=bayer -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 5
+fate-filter-latticepal-maxcolors: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=rgb24,latticepal=density=32:max_colors=100:dither=none -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 5
+fate-filter-latticepal-refine: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=rgb24,latticepal=density=32:dither=none:refine=full -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 5
+fate-filter-latticepal-residual: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=rgb24,latticepal=density=32:dither=bayer:refine=residual -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 5
+fate-filter-latticepal-batched: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf scale,format=rgb24,latticepal=density=32:dither=floyd_steinberg:refine=batched -flags +bitexact -sws_flags +accurate_rnd+bitexact -frames:v 5
+
 FATE_FILTER_VSYNTH_VIDEO_FILTER-$(CONFIG_COLORMATRIX_FILTER) += fate-filter-colormatrix1 fate-filter-colormatrix2
 fate-filter-colormatrix1: CMD = video_filter "colormatrix=bt601:smpte240m,colormatrix=smpte240m:fcc,colormatrix=fcc:bt601,colormatrix=bt601:fcc,colormatrix=fcc:smpte240m,colormatrix=smpte240m:bt709"
 fate-filter-colormatrix2: CMD = video_filter "colormatrix=bt709:fcc,colormatrix=fcc:bt709,colormatrix=bt709:bt601,colormatrix=bt601:bt709,colormatrix=bt709:smpte240m,colormatrix=smpte240m:bt601"

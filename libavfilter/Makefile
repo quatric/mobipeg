@@ -371,6 +371,7 @@ OBJS-$(CONFIG_KIRSCH_FILTER)                 += vf_convolution.o
 OBJS-$(CONFIG_LAGFUN_FILTER)                 += vf_lagfun.o
 OBJS-$(CONFIG_LCEVC_FILTER)                  += vf_lcevc.o
 OBJS-$(CONFIG_LATENCY_FILTER)                += f_latency.o
+OBJS-$(CONFIG_LATTICEPAL_FILTER)             += vf_latticepal.o
 OBJS-$(CONFIG_LENSCORRECTION_FILTER)         += vf_lenscorrection.o
 OBJS-$(CONFIG_LENSFUN_FILTER)                += vf_lensfun.o
 OBJS-$(CONFIG_LIBPLACEBO_FILTER)             += vf_libplacebo.o vulkan.o vulkan_filter.o
