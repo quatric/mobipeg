@@ -344,6 +344,7 @@ extern const FFFilter ff_vf_kerndeint;
 extern const FFFilter ff_vf_kirsch;
 extern const FFFilter ff_vf_lagfun;
 extern const FFFilter ff_vf_latency;
+extern const FFFilter ff_vf_latticepal;
 extern const FFFilter ff_vf_lcevc;
 extern const FFFilter ff_vf_lenscorrection;
 extern const FFFilter ff_vf_lensfun;
