@@ -16538,6 +16538,92 @@ Set which planes to filter. Default is all. Allowed range is from 0 to 15.
 
 This filter supports the all above options as @ref{commands}.
 
+@section latticepal
+
+Convert packed RGB/BGR input to PAL8 with a per-frame palette whose colors
+are placed on a face-centered cubic (FCC) lattice spanning the RGB cube.
+
+Each frame gets its own palette, built only from the lattice colors actually
+used by that frame. If a frame uses more than 256 lattice colors, they are
+reduced by iteratively dropping the color whose removal has the least
+impact (its pixel count times the squared distance to the nearest remaining
+color) and mapping its pixels to that nearest remaining color. The alpha
+channel, if present, is ignored unless the @option{alpha} option is set.
+
+The filter accepts the following options:
+
+@table @option
+@item density
+Set the lattice density as the number of lattice steps spanning one color
+axis (0 to 255). Higher values give a finer lattice and thus more possible
+colors, making it more likely that the per-frame color reduction has to
+drop some of them. At a density of @code{7} with 256 palette entries no
+reduction ever happens since the whole lattice then holds exactly 256
+points. Allowed range is @code{1} to @code{255}. Default is @code{20}.
+
+@item max_colors
+Set the maximum number of palette entries to use. Frames using more lattice
+colors than this are reduced accordingly. Allowed range is @code{2} to
+@code{256}. Default is @code{256}.
+
+@item alpha
+Quantize the alpha channel too, placing the palette colors on a 4
+dimensional D4 lattice over RGBA instead of the FCC lattice over RGB.
+Inputs without an alpha channel are treated as opaque. With this option
+the density is limited to @code{64}. Default is @code{0} (alpha is
+ignored and the palette is fully opaque).
+
+@item refine
+Redistribute the error introduced by dropping colors, which is otherwise
+uncompensated and can show as discolored patches. Frames that needed no
+reduction are not changed by this option.
+@table @samp
+@item none
+No refinement.
+
+@item full
+Run a Floyd-Steinberg error diffusion pass over the whole frame against
+the final palette. Most accurate on average, but re-dithers everything,
+including regions whose colors survived.
+
+@item residual
+Diffuse only the residual between each pixel's first pass quantized color
+and its final palette color. Pixels of surviving colors that receive no
+residual are unchanged, keeping the character of the selected dither mode
+outside the reduced regions.
+
+@item batched
+Interleave color removal and rediffusion: drop half of the excess colors,
+rediffuse the whole frame against the survivors, recount the colors from
+the actual assignments and repeat. Colors that the dithering can
+reproduce by mixing become free to drop while extreme colors keep their
+pixels and are protected; this gives the best quality at the cost of
+about log2 of the number of dropped colors rediffusion passes.
+@end table
+
+Default is @code{none}.
+
+@item dither
+Select the dithering mode. Available algorithms are:
+@table @samp
+@item none
+No dithering.
+
+@item bayer
+Ordered 8x8 dithering using the classic swscale dither matrix with its
+per-channel decorrelation, offsets spanning one lattice period.
+
+@item blue_noise
+Void-and-cluster blue noise dithering using three 64x64 masks generated at
+initialization, one per color channel.
+
+@item floyd_steinberg
+Floyd-Steinberg error diffusion.
+@end table
+
+Default is @code{floyd_steinberg}.
+@end table
+
 @section lenscorrection
 
 Correct radial lens distortion
