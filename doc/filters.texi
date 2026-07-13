@@ -14857,6 +14857,43 @@ Boolean value: enable dependency on future frame, improves quality for the cost
 of latency (Default value: enabled).
 @end table
 
+@section vqe_amf
+
+AMD AMF VQ Enhancer filter.
+This filter applies AMD AMF VQ Enhancement to the input video.
+
+This filter accepts the following option:
+
+@table @option
+
+@item attenuation
+Set VQ Enhancer strength. Allowed range is from @code{0.02} to @code{0.4}.
+Default is @code{0.1}.
+
+@item engine_type
+Set AMF memory type used by the filter.
+
+Possible values:
+
+@table @samp
+@item dx11
+DirectX 11
+@item dx12
+DirectX 12
+@item vulkan
+Vulkan
+@item opencl
+OpenCL
+@end table
+
+@end table
+
+Example:
+
+@example
+ffmpeg -i input.mp4 -vf vqe_amf=attenuation=0.4 -c:v hevc_amf output.mp4
+@end example
+
 @section framestep
 
 Select one frame every N-th frame.
