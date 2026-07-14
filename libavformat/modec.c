@@ -139,19 +139,17 @@ static int mo_read_header(AVFormatContext *s)
     AVIOContext *pb = s->pb;
     AVRational fps;
 
-    // Wii MobiClips must have audio and video.
-    // Though the format appears to support an audioless type
-    // on some platforms, the library for the Wii does not.
+    // Video is mandatory; audio is optional. Files muxed with the A0
+    // (no-audio) tag carry no audio format marker, so the audio stream is
+    // created lazily only when an audio marker is actually seen.
     AVStream *vst = avformat_new_stream(s, NULL);
     if (!vst)
         return AVERROR(ENOMEM);
-    
+
     vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     vst->codecpar->codec_id   = AV_CODEC_ID_MOBICLIP;
 
-    AVStream *ast = avformat_new_stream(s, NULL);
-    if (!ast)
-        return AVERROR(ENOMEM);
+    AVStream *ast = NULL;
 
     avio_skip(pb, 4);
     // Add 8 to account for magic and header length
@@ -227,6 +225,11 @@ static int mo_read_header(AVFormatContext *s)
         case FORMAT_PCM:
         case FORMAT_ADPCM:
         case FORMAT_ADPCM_STEREO:
+            if (!ast) {
+                ast = avformat_new_stream(s, NULL);
+                if (!ast)
+                    return AVERROR(ENOMEM);
+            }
             result = mo_handle_audio(ast, format_marker, pb);
             if (result == -1) { // Unknown audio type
                 return AVERROR_PATCHWELCOME;
@@ -236,6 +239,11 @@ static int mo_read_header(AVFormatContext *s)
             return AVERROR_PATCHWELCOME;
         case FORMAT_VORBIS:
         {
+            if (!ast) {
+                ast = avformat_new_stream(s, NULL);
+                if (!ast)
+                    return AVERROR(ENOMEM);
+            }
             ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
             ast->codecpar->codec_id = AV_CODEC_ID_VORBIS;
             /* Tag this as MobiClip vorbis so the (patched) vorbis decoder

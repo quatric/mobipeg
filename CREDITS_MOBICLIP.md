@@ -6,3 +6,6 @@ The implementation of Mobiclip support in this software was made possible thanks
 * [MobiclipDecoder](https://github.com/Gericom/MobiclipDecoder)
 * [Gericom's x264 fork](https://github.com/Gericom/x264)
 * [WiiLink24 FFmpeg fork](https://github.com/WiiLink24/FFmpeg)
+* [actimagine](https://github.com/CharlesVanEeckhout/actimagine/)
+* [flipnote.js](https://github.com/jaames/flipnote.js/)
+* [RocketVideoPlayer](https://github.com/RocketRobz/RocketVideoPlayer)
