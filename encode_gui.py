@@ -11,7 +11,7 @@ ENCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode
 class EncodeGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("mobipeg")
+        self.title("mobipeg v1.1")
         self.geometry("750x600")
         self.minsize(600, 450)
         self.configure(padx=15, pady=15)
@@ -70,7 +70,22 @@ class EncodeGUI(tk.Tk):
             "Wii Mobiclip .mo": "mo",
             "3DS Mobiclip .moflex (2D)": "moflex",
             "3DS Mobiclip .moflex (3D)": "moflex3d",
-            "DS Mobiclip .mods": "mods"
+            "DS Mobiclip .mods": "mods",
+            "DS ActImagine .vx": "vx",
+            "GameCube/Wii THP .thp": "thp"
+        }
+        # Audio codecs each format actually supports (see encode.py):
+        #  - vorbis is Wii (.mo) only
+        #  - codebook (SX / vx_audio) is DS only (.mods, .vx)
+        #  - .vx carries only its own vx_audio codec, so codebook or none
+        #  - .thp is always adpcm_thp
+        self.audio_options = {
+            "mo":       ["adpcm", "fastaudio", "pcm", "vorbis", "none"],
+            "moflex":   ["adpcm", "fastaudio", "pcm", "none"],
+            "moflex3d": ["adpcm", "fastaudio", "pcm", "none"],
+            "mods":     ["adpcm", "fastaudio", "pcm", "codebook", "none"],
+            "vx":       ["codebook", "none"],
+            "thp":      ["adpcm", "none"],
         }
         self.enc_fmt_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_fmt_var, values=list(self.formats_map.keys()), state="readonly", width=25)
         self.enc_fmt_cb.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
@@ -79,7 +94,7 @@ class EncodeGUI(tk.Tk):
         # Audio Codec
         ttk.Label(self.encode_frame, text="Audio Codec:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
         self.enc_audio_var = tk.StringVar(value="adpcm")
-        self.enc_audio_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_audio_var, values=["adpcm", "fastaudio", "pcm", "vorbis"])
+        self.enc_audio_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_audio_var, state="readonly")
         self.enc_audio_cb.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
         
         # Input 1
@@ -107,11 +122,54 @@ class EncodeGUI(tk.Tk):
         ttk.Label(self.encode_frame, text="Scale (e.g. 384x288):").grid(row=5, column=0, sticky="e", padx=5, pady=5)
         self.enc_scale_var = tk.StringVar()
         ttk.Entry(self.encode_frame, textvariable=self.enc_scale_var).grid(row=5, column=1, sticky="ew", padx=5, pady=5)
-        
+
+        # Quantizer (vx only) — retail-safe default keeps frames small enough
+        # for the DS decode buffer.
+        self.enc_quant_label = ttk.Label(self.encode_frame, text="Quantizer (12-161):")
+        self.enc_quant_label.grid(row=6, column=0, sticky="e", padx=5, pady=5)
+        self.enc_quant_var = tk.StringVar(value="32")
+        self.enc_quant_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_quant_var, width=8)
+        self.enc_quant_entry.grid(row=6, column=1, sticky="w", padx=5, pady=5)
+
+        # Audio rate (vx / mods codebook) — match the clip you're replacing.
+        self.enc_arate_label = ttk.Label(self.encode_frame, text="Audio rate (Hz, 0=source):")
+        self.enc_arate_label.grid(row=7, column=0, sticky="e", padx=5, pady=5)
+        self.enc_audio_rate_var = tk.StringVar(value="0")
+        self.enc_arate_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_audio_rate_var, width=8)
+        self.enc_arate_entry.grid(row=7, column=1, sticky="w", padx=5, pady=5)
+
+        # FPS (vx only) — match the clip you're replacing (e.g. 15 or 60000/1001).
+        self.enc_fps_label = ttk.Label(self.encode_frame, text="FPS (blank=source):")
+        self.enc_fps_label.grid(row=8, column=0, sticky="e", padx=5, pady=5)
+        self.enc_fps_var = tk.StringVar(value="")
+        self.enc_fps_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_fps_var, width=12)
+        self.enc_fps_entry.grid(row=8, column=1, sticky="w", padx=5, pady=5)
+
+        # Fast audio (skip vx/SX LTP search) — only relevant for vx + mods codebook
+        self.enc_fast_audio_var = tk.BooleanVar(value=False)
+        self.enc_fast_audio_chk = ttk.Checkbutton(
+            self.encode_frame,
+            text="Fast audio (skip LTP search — ~90x faster, ~2 dB lower quality)",
+            variable=self.enc_fast_audio_var)
+        self.enc_fast_audio_chk.grid(row=9, column=1, sticky="w", padx=5, pady=5)
+
+
+
         # Run Button
         self.enc_run_btn = ttk.Button(self.encode_frame, text="▶ Run Encoding", command=self.run_encoding)
-        self.enc_run_btn.grid(row=6, column=1, pady=15)
-        
+        self.enc_run_btn.grid(row=18, column=1, pady=15)
+
+        # Widgets that only appear for certain formats, keyed by the formats
+        # that should show them. Hiding uses grid_remove() (not state=disabled)
+        # so rows collapse instead of sitting there greyed out.
+        self.enc_conditional_widgets = [
+            ({"moflex3d"}, (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn)),
+            ({"vx"}, (self.enc_quant_label, self.enc_quant_entry)),
+            ({"vx", "mods"}, (self.enc_arate_label, self.enc_arate_entry)),
+            ({"vx"}, (self.enc_fps_label, self.enc_fps_entry)),
+            ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
+        ]
+
         self.enc_input_var.trace_add("write", lambda *a: self.on_input_changed(self.enc_input_var, self.enc_outdir_var))
         self.on_enc_format_change()
 
@@ -119,7 +177,7 @@ class EncodeGUI(tk.Tk):
         self.decode_frame.columnconfigure(1, weight=1)
         
         # Input File
-        ttk.Label(self.decode_frame, text="Input (.mo/.moflex/.mods):").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="Input (.mo/.moflex/.mods/.vx/.thp/.rvid/.ppm/.kwz):").grid(row=0, column=0, sticky="e", padx=5, pady=5)
         self.dec_input_var = tk.StringVar()
         ttk.Entry(self.decode_frame, textvariable=self.dec_input_var).grid(row=0, column=1, sticky="ew", padx=5, pady=5)
         ttk.Button(self.decode_frame, text="Browse...", command=lambda: self.browse_file(self.dec_input_var)).grid(row=0, column=2, padx=5, pady=5)
@@ -147,12 +205,21 @@ class EncodeGUI(tk.Tk):
             
     def on_enc_format_change(self, event=None):
         fmt = self.formats_map.get(self.enc_fmt_var.get())
-        if fmt == "moflex3d":
-            self.enc_input2_entry.config(state="normal")
-            self.enc_input2_btn.config(state="normal")
-        else:
-            self.enc_input2_entry.config(state="disabled")
-            self.enc_input2_btn.config(state="disabled")
+
+        self.enc_input2_label.config(text="Right Eye (3D):")
+
+        # Show only the fields relevant to the selected format; hidden rows
+        # collapse instead of sitting around greyed out.
+        for formats, widgets in self.enc_conditional_widgets:
+            show = fmt in formats
+            for w in widgets:
+                w.grid() if show else w.grid_remove()
+
+        # Restrict the audio dropdown to what the selected format supports.
+        options = self.audio_options.get(fmt, ["adpcm"])
+        self.enc_audio_cb.config(values=options)
+        if self.enc_audio_var.get() not in options:
+            self.enc_audio_var.set(options[0])
 
     def browse_file(self, var):
         filename = filedialog.askopenfilename()
@@ -212,14 +279,27 @@ class EncodeGUI(tk.Tk):
             
         cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
         cmd.extend([fmt, audio, inp1])
-        
+
         if fmt == "moflex3d" and inp2:
             cmd.append(inp2)
         if scale:
             cmd.extend(["--scale", scale])
         if outdir:
             cmd.extend(["--outdir", outdir])
-            
+        if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
+            cmd.append("--fast-audio")
+        if fmt == "vx":
+            q = self.enc_quant_var.get().strip()
+            if q:
+                cmd.extend(["--quantizer", q])
+            fps = self.enc_fps_var.get().strip()
+            if fps:
+                cmd.extend(["--fps", fps])
+        if fmt in ("vx", "mods"):
+            arate = self.enc_audio_rate_var.get().strip()
+            if arate and arate != "0":
+                cmd.extend(["--audio-rate", arate])
+
         self.execute_cmd(cmd, self.enc_run_btn)
 
     def run_decoding(self):
