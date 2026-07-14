@@ -44,6 +44,8 @@
 #include "internal.h"
 #include "mo.h"
 #include "mo_audioenc.h"
+#include "libavcodec/avcodec.h"
+#include "libavutil/dict.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 
@@ -59,9 +61,12 @@ enum {
 /* Fixed header field offsets we patch in the trailer. */
 #define MODS_OFF_FRAME_COUNT  0x08
 #define MODS_OFF_MAX_FRAME    0x20
+#define MODS_OFF_ACODEC_INFO  0x24
 #define MODS_OFF_KF_OFF       0x28
 #define MODS_OFF_KF_COUNT     0x2C
 #define MODS_FRAME_DATA_START 0x34
+
+#define SX_CODEBOOK_SIZE_1CH  0xC34   /* per-channel SX codebook bytes */
 
 typedef struct MODSMuxContext {
     const AVClass *class;   /* MUST be first (the muxer has a priv_class) */
@@ -115,6 +120,21 @@ typedef struct MODSMuxContext {
     int       kf_cap;
 
     uint32_t max_chunk;     /* largest chunk size written (excl. the 4-byte word) */
+
+    /* SX (FastAudio-codebook) path. The vx_audio encoder trains its
+     * codebooks over the whole stream and only delivers packets at EOF flush,
+     * so this mode buffers the video frames too and assembles every chunk in
+     * the trailer. Audio packets are one 128-sample period each (channels'
+     * blocks concatenated ch0,ch1), appended to abuf. */
+    int       sx_mode;
+    uint8_t **sxv;          /* queued video frame payloads (annexb-stripped) */
+    int      *sxv_size;
+    uint8_t  *sxv_kf;
+    int       sxv_n, sxv_cap;
+    uint8_t  *sx_cbk;       /* trained codebooks from encoder side data */
+    int       sx_cbk_size;
+    int       sx_periods;   /* buffered 128-sample audio periods in abuf */
+    int       sx_rate;
 } MODSMuxContext;
 
 /* Standard IMA-ADPCM tables (the DS uses the canonical IMA codec). */
@@ -527,21 +547,40 @@ static int mods_write_header(AVFormatContext *s)
     st = s->streams[m->video_index];
 
     /* -mo_audio selection: fastaudio=0 adpcm=1 pcm=2 none=3 codebook=4.
-     * codebook (retail SX) needs a per-channel codebook we cannot yet
-     * generate (FFmpeg ships an SX decoder but no encoder). Reject early
-     * rather than emit a file the DS will choke on. */
+     * codebook = retail SX = the ActImagine VX audio codec; the audio stream
+     * must be pre-encoded with -c:a vx_audio (which trains the
+     * per-channel codebooks over the whole stream and reports them via
+     * packet side data). */
     if (m->audio_codec == 4) {
-        av_log(s, AV_LOG_ERROR,
-               "mods: -mo_audio codebook (FastAudio/SX) is not supported by "
-               "this muxer yet (no SX encoder / codebook generator). Use "
-               "adpcm, fastaudio, pcm, or none.\n");
-        return AVERROR(ENOSYS);
+        AVCodecParameters *ap;
+        if (m->audio_index < 0 ||
+            s->streams[m->audio_index]->codecpar->codec_id != AV_CODEC_ID_VX_AUDIO) {
+            av_log(s, AV_LOG_ERROR,
+                   "mods: -mo_audio codebook requires the audio stream to be "
+                   "encoded with -c:a vx_audio\n");
+            return AVERROR(EINVAL);
+        }
+        ap = s->streams[m->audio_index]->codecpar;
+        m->sx_mode  = 1;
+        m->channels = ap->ch_layout.nb_channels;
+        m->sx_rate  = ap->sample_rate ? ap->sample_rate : 32000;
+        if (m->channels < 1 || m->channels > 2)
+            return AVERROR(EINVAL);
     }
 
     no_audio = (m->audio_codec == 3) || m->audio_index < 0;
     if (no_audio) {
         retail_codec  = MODS_ACODEC_NONE;
         m->channels   = 0;
+    } else if (m->sx_mode) {
+        retail_codec = MODS_ACODEC_CODEBOOK;
+        /* pacing for the trailer's per-frame block distribution */
+        {
+            AVRational vfr = st->avg_frame_rate;
+            double fps_val = (vfr.num > 0 && vfr.den > 0)
+                           ? (double)vfr.num / vfr.den : 30.0;
+            m->spf = (double)m->sx_rate / fps_val;
+        }
     } else {
         AVCodecParameters *ap = s->streams[m->audio_index]->codecpar;
         if (m->audio_codec < 0)
@@ -602,7 +641,7 @@ static int mods_write_header(AVFormatContext *s)
     avio_wl32(pb, 0);                       /* 0x2C key-frame count (patched) */
     avio_wl32(pb, FORMAT_HEADER_DONE);      /* 0x30 'HE' header-done marker */
 
-    if (!no_audio && !m->ds_adpcm) {
+    if (!no_audio && !m->ds_adpcm && !m->sx_mode) {
         AVCodecParameters *ap = s->streams[m->audio_index]->codecpar;
         int ret = mobi_aenc_init(&m->aenc, m->audio_codec,
                                  AV_CODEC_ID_ADPCM_IMA_MOFLEX,
@@ -619,9 +658,60 @@ static int mods_write_header(AVFormatContext *s)
     return 0;
 }
 
+static int sx_queue_video(MODSMuxContext *m, const uint8_t *data, int size)
+{
+    if (m->sxv_n >= m->sxv_cap) {
+        int nc = m->sxv_cap ? m->sxv_cap * 2 : 256;
+        uint8_t **nv = av_realloc_array(m->sxv, nc, sizeof(*m->sxv));
+        int *ns      = av_realloc_array(m->sxv_size, nc, sizeof(*m->sxv_size));
+        uint8_t *nk  = av_realloc(m->sxv_kf, nc);
+        if (!nv || !ns || !nk) {
+            /* on partial success the context keeps the grown arrays; safe */
+            if (nv) m->sxv = nv;
+            if (ns) m->sxv_size = ns;
+            if (nk) m->sxv_kf = nk;
+            return AVERROR(ENOMEM);
+        }
+        m->sxv = nv; m->sxv_size = ns; m->sxv_kf = nk; m->sxv_cap = nc;
+    }
+    m->sxv[m->sxv_n] = av_memdup(data, size ? size : 1);
+    if (!m->sxv[m->sxv_n])
+        return AVERROR(ENOMEM);
+    m->sxv_size[m->sxv_n] = size;
+    m->sxv_kf[m->sxv_n]   = (size >= 2 && (data[1] & 0x80)) ? 1 : 0;
+    m->sxv_n++;
+    return 0;
+}
+
 static int mods_write_packet(AVFormatContext *s, AVPacket *pkt)
 {
     MODSMuxContext *m = s->priv_data;
+
+    if (m->sx_mode && pkt->stream_index == m->audio_index) {
+        size_t sd_size;
+        const uint8_t *sd = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA,
+                                                    &sd_size);
+        if (sd && (int)sd_size >= m->channels * SX_CODEBOOK_SIZE_1CH && !m->sx_cbk) {
+            m->sx_cbk = av_memdup(sd, sd_size);
+            if (!m->sx_cbk)
+                return AVERROR(ENOMEM);
+            m->sx_cbk_size = (int)sd_size;
+        }
+        if (pkt->size > 0) {
+            if (m->abuf_size + pkt->size > m->abuf_cap) {
+                int nc = m->abuf_cap ? m->abuf_cap * 2 : 65536;
+                while (nc < m->abuf_size + pkt->size) nc *= 2;
+                uint8_t *nb = av_realloc(m->abuf, nc);
+                if (!nb)
+                    return AVERROR(ENOMEM);
+                m->abuf = nb; m->abuf_cap = nc;
+            }
+            memcpy(m->abuf + m->abuf_size, pkt->data, pkt->size);
+            m->abuf_size += pkt->size;
+            m->sx_periods++;
+        }
+        return 0;
+    }
 
     if (m->ds_adpcm && pkt->stream_index == m->audio_index) {
         /* Buffer raw interleaved S16 PCM; encoded to DS IMA at frame flush. */
@@ -676,6 +766,14 @@ static int mods_write_packet(AVFormatContext *s, AVPacket *pkt)
         return AVERROR(EINVAL);
     }
 
+    if (m->sx_mode) {
+        /* SX: audio arrives only at EOF (encoder flush), so buffer the video
+         * frames and assemble all chunks in the trailer. */
+        int qret = sx_queue_video(m, data, size);
+        av_free(stripped);
+        return qret;
+    }
+
     int ret = mods_flush_pending(s, 0);
     if (ret < 0) { av_free(stripped); return ret; }
 
@@ -695,11 +793,186 @@ static int mods_write_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
+/* Decode every buffered SX video frame with a private mobiclip decoder to learn
+ * exactly how many bytes each frame's video occupies — i.e. where the DS's own
+ * video decoder stops and starts reading audio.  The RBSP-stop-bit heuristic we
+ * use elsewhere can't tell trailing padding zeros from real zero data bytes and
+ * mis-sizes the video field on ~2% of frames, placing the audio a couple of
+ * bytes off (the stateful SX decoder then reads mid-aframe = progressive audio
+ * corruption).  Returns a malloc'd per-frame consumed-bytes array, or NULL on
+ * failure (caller falls back to the heuristic). */
+static int *mods_sx_video_stops(AVFormatContext *s)
+{
+    MODSMuxContext *m = s->priv_data;
+    const AVCodec *vc = avcodec_find_decoder(AV_CODEC_ID_MOBICLIP);
+    AVCodecContext *dec = NULL;
+    AVFrame *fr = NULL;
+    AVPacket *pk = NULL;
+    int *stops = NULL;
+
+    if (!vc) return NULL;
+    dec = avcodec_alloc_context3(vc);
+    fr  = av_frame_alloc();
+    pk  = av_packet_alloc();
+    stops = av_malloc_array(m->sxv_n > 0 ? m->sxv_n : 1, sizeof(*stops));
+    if (!dec || !fr || !pk || !stops) goto fail;
+    dec->width  = s->streams[0]->codecpar->width;
+    dec->height = s->streams[0]->codecpar->height;
+    dec->thread_count = 1;
+    if (avcodec_open2(dec, vc, NULL) < 0) goto fail;
+
+    for (int k = 0; k < m->sxv_n; k++) {
+        AVDictionaryEntry *e;
+        stops[k] = -1;
+        if (av_new_packet(pk, m->sxv_size[k]) < 0) goto fail;
+        memcpy(pk->data, m->sxv[k], m->sxv_size[k]);
+        if (avcodec_send_packet(dec, pk) == 0 &&
+            avcodec_receive_frame(dec, fr) == 0) {
+            e = av_dict_get(fr->metadata, "mobiclip_consumed_bytes", NULL, 0);
+            if (e) stops[k] = atoi(e->value);
+            av_frame_unref(fr);
+        }
+        av_packet_unref(pk);
+    }
+    avcodec_free_context(&dec); av_frame_free(&fr); av_packet_free(&pk);
+    return stops;
+fail:
+    avcodec_free_context(&dec); av_frame_free(&fr); av_packet_free(&pk);
+    av_freep(&stops);
+    return NULL;
+}
+
+/* SX: write every buffered frame as [word][video][kf word][blocks][pad][suffix],
+ * distributing the buffered 128-sample audio periods across the frames at
+ * ~sample_rate/fps, then the codebooks (header 0x24 points at them). */
+static int mods_sx_write_frames(AVFormatContext *s)
+{
+    MODSMuxContext *m = s->priv_data;
+    AVIOContext *pb = s->pb;
+    int period_bytes = m->channels * 20;   /* our encoder: mode-0 blocks only */
+    int cursor = 0;
+    int64_t cbk_off;
+    int *vstops = mods_sx_video_stops(s);
+
+    for (int k = 0; k < m->sxv_n; k++) {
+        const uint8_t *vid = m->sxv[k];
+        int vsize = m->sxv_size[k], is_kf = m->sxv_kf[k];
+        int vfield, vwrite, p_end, periods, abytes, kf_word, asize, pad, total;
+        int64_t chunk_off;
+
+        /* Video field ends where the mobiclip decoder stops, which is where the
+         * DS reads the audio.  The video data is mb_bits long followed by the
+         * RBSP stop bit at position mb_bits; the decoder reads THROUGH the stop
+         * bit, so its bit count is mb_bits+1, rounded up to a 16-bit word.  The
+         * old ceil(mb_bits/16) undercounts by one word exactly when
+         * mb_bits % 16 == 0 (data ends flush on a word boundary and the stop
+         * bit spills into the next word) — placing the audio 2 bytes early on
+         * ~2% of frames, which the stateful SX decoder then reads mid-aframe =
+         * intermittent, progressively-worsening audio corruption (not tied to
+         * scene cuts).  Rounding up over mb_bits+1 matches the decoder exactly
+         * (verified: mobiclip_consumed_bytes == vfield on all frames). */
+        {
+            int e = vsize, mb_bits = 0;
+            while (e > 0 && vid[e - 1] == 0) e--;
+            if (e > 0) {
+                int lb = vid[e - 1], kk = 0;
+                while (!((lb >> kk) & 1)) kk++;
+                mb_bits = (e - 1) * 8 + (7 - kk);
+            }
+            vfield = ((mb_bits + 1 + 15) / 16) * 2;
+            /* Prefer the exact decoder stop; the heuristic above is the fallback. */
+            if (vstops && vstops[k] >= 0)
+                vfield = vstops[k];
+            vwrite = FFMIN(vfield, vsize);
+        }
+
+        if (k == m->sxv_n - 1) {
+            p_end = m->sx_periods;         /* flush the remainder */
+        } else {
+            double target = (double)(k + 1) * m->spf / 128.0;
+            p_end = (int)FFMIN((double)m->sx_periods, target);
+            if (p_end < cursor) p_end = cursor;
+        }
+        periods = p_end - cursor;
+        abytes  = periods * period_bytes;
+        kf_word = (is_kf && abytes > 0) ? 4 : 0;
+        asize   = abytes + kf_word;
+        pad     = (-(vfield + asize + 4)) & 3;
+        total   = vfield + asize + pad + 4;
+
+        /* The chunk word's low 14 bits are the audio-block count, which retail
+         * defines as the number of 128-sample PERIODS this frame carries (NOT
+         * periods*channels, and with no +1). Proven by summing retail counts:
+         * sum(count)*128/sample_rate == duration only when count == periods
+         * (gives exactly 30.00 fps for americ1's movie_0*.mods; the old
+         * 1+periods*channels reads as 60fps -> the DS decodes ~2x too many
+         * audio periods per frame, running into the next chunk = the "static
+         * that fades in and out" as the codebook state corrupts and recovers). */
+        if (total > 0x3FFFF || periods > 0x3FFF) {
+            av_log(s, AV_LOG_ERROR, "mods/sx: frame %d too large\n", k);
+            av_freep(&vstops);
+            return AVERROR(EINVAL);
+        }
+
+        chunk_off = avio_tell(pb);
+        /* frame 0 must always be in the keyframe table: the demuxer locates
+         * the first chunk via the table's first entry. */
+        if (is_kf || k == 0) {
+            int ret = mods_record_keyframe(m, k, (uint32_t)chunk_off);
+            if (ret < 0) {
+                av_freep(&vstops);
+                return ret;
+            }
+        }
+
+        avio_wl32(pb, ((uint32_t)total << 14) | (uint32_t)periods);
+        avio_write(pb, vid, vwrite);
+        for (int i = vwrite; i < vfield; i++)
+            avio_w8(pb, 0);
+        if (kf_word)
+            avio_wl32(pb, 0);
+        if (abytes > 0)
+            avio_write(pb, m->abuf + cursor * period_bytes, abytes);
+        for (int i = 0; i < pad; i++)
+            avio_w8(pb, 0);
+        avio_w8(pb, pad);
+        avio_w8(pb, 0);
+        avio_wl16(pb, asize);
+
+        if ((uint32_t)total > m->max_chunk)
+            m->max_chunk = total;
+        cursor = p_end;
+        m->frame_count++;
+    }
+
+    /* codebooks (audio-codec-info); zeros if the encoder never delivered them */
+    cbk_off = avio_tell(pb);
+    if (m->sx_cbk)
+        avio_write(pb, m->sx_cbk, m->channels * SX_CODEBOOK_SIZE_1CH);
+    else
+        for (int i = 0; i < m->channels * SX_CODEBOOK_SIZE_1CH; i++)
+            avio_w8(pb, 0);
+    if (pb->seekable & AVIO_SEEKABLE_NORMAL) {
+        int64_t cur = avio_tell(pb);
+        avio_seek(pb, MODS_OFF_ACODEC_INFO, SEEK_SET);
+        avio_wl32(pb, (uint32_t)cbk_off);
+        avio_seek(pb, cur, SEEK_SET);
+    }
+    av_freep(&vstops);
+    return 0;
+}
+
 static int mods_write_trailer(AVFormatContext *s)
 {
     MODSMuxContext *m = s->priv_data;
     AVIOContext *pb = s->pb;
     int64_t kf_off;
+
+    if (m->sx_mode) {
+        int ret = mods_sx_write_frames(s);
+        if (ret < 0)
+            return ret;
+    }
 
     mods_flush_pending(s, 1);
 
@@ -739,6 +1012,12 @@ static void mods_deinit(AVFormatContext *s)
     av_freep(&m->pcmbuf);
     av_freep(&m->ds_s0);
     av_freep(&m->ds_s1);
+    for (int i = 0; i < m->sxv_n; i++)
+        av_freep(&m->sxv[i]);
+    av_freep(&m->sxv);
+    av_freep(&m->sxv_size);
+    av_freep(&m->sxv_kf);
+    av_freep(&m->sx_cbk);
 }
 
 #include "libavutil/opt.h"
@@ -751,7 +1030,7 @@ static const AVOption mods_options[] = {
     { "adpcm",     "IMA-ADPCM",        0, AV_OPT_TYPE_CONST, {.i64 = 1}, 0, 0, ENC, "mo_audio" },
     { "pcm",       "PCM16",            0, AV_OPT_TYPE_CONST, {.i64 = 2}, 0, 0, ENC, "mo_audio" },
     { "none",      "No audio",         0, AV_OPT_TYPE_CONST, {.i64 = 3}, 0, 0, ENC, "mo_audio" },
-    { "codebook",  "FastAudio/SX (unsupported)", 0, AV_OPT_TYPE_CONST, {.i64 = 4}, 0, 0, ENC, "mo_audio" },
+    { "codebook",  "FastAudio-codebook/SX (use -c:a vx_audio)", 0, AV_OPT_TYPE_CONST, {.i64 = 4}, 0, 0, ENC, "mo_audio" },
     { NULL },
 };
 
