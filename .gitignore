@@ -64,3 +64,10 @@
 /pyinst_dist/
 /build/
 .DS_Store
+
+# FastVideoDS .NET encoder build artifacts
+fastvideo/bin/
+fastvideo/obj/
+
+# Bundled 3DS CIA packaging tools (Windows binaries need the *.exe exception)
+!/cia3ds/bin/**/*.exe
