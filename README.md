@@ -21,9 +21,7 @@
 | FastAudio | ✅ | ✅ | ✅ |
 | PCM | ✅ | ✅ | ✅ |
 | Vorbis | ➖ | ➖ | ✅ |
-| Codebook (SX) | ➖ | ❌ | ➖ |
-
-> Codebook (FastAudio-SX) audio found in some MODS files is not currently supported and will return an error on decode.
+| Codebook (SX) | ➖ | ✅ | ➖ |
 
 ## Building
 

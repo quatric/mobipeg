@@ -2005,6 +2005,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
+        .id        = AV_CODEC_ID_VX,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "vx",
+        .long_name = NULL_IF_CONFIG_SMALL("ActImagine VX Video"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "pcm_s16le",
@@ -3573,6 +3580,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .name      = "fastaudio",
         .long_name = NULL_IF_CONFIG_SMALL("MobiClip FastAudio"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_VX_AUDIO,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "vx_audio",
+        .long_name = NULL_IF_CONFIG_SMALL("ActImagine VX Audio"),
+        .props     = AV_CODEC_PROP_LOSSY,
     },
 
     /* subtitle codecs */
