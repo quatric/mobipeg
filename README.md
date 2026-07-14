@@ -22,6 +22,14 @@ such as audio, video, subtitles and related metadata.
   multimedia content.
 * Additional small tools such as `aviocat`, `ismindex` and `qt-faststart`.
 
+| Audio Codec | MOFLEX (3DS) | MODS (DS) | MO (Wii) |
+|-------------|:------------:|:---------:|:--------:|
+| ADPCM | ✅ | ✅ | ✅ |
+| FastAudio | ✅ | ✅ | ✅ |
+| PCM | ✅ | ✅ | ✅ |
+| Vorbis | ➖ | ➖ | ✅ |
+| Codebook (SX) | ➖ | ✅ | ➖ |
+
 ## Documentation
 
 The offline documentation is available in the **doc/** directory.
@@ -38,8 +46,4 @@ Coding examples are available in the **doc/examples** directory.
 FFmpeg codebase is mainly LGPL-licensed with optional components licensed under
 GPL. Please refer to the LICENSE file for detailed information.
 
-## Contributing
-
-Patches should be submitted to the ffmpeg-devel mailing list using
-`git format-patch` or `git send-email`. Github pull requests should be
-avoided because they are not part of our review process and will be ignored.
+Copyright (c) 2026 quatric
