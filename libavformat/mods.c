@@ -22,6 +22,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <stdlib.h>
+
 #include "libavutil/intreadwrite.h"
 
 #define SX_CODEBOOK_SIZE 0xC34
@@ -164,10 +166,44 @@ static int mods_read_header(AVFormatContext *s)
                 m->audio_block = m->audio_channels * 512;    /* 256 samples/block, s16 */
             else
                 m->audio_block = 0;
-        } else if (acodec == 1 && ach >= 1 && arate > 0) {
-            /* Retail DS .mods FastAudio-codebook (SX) audio. */
-            avpriv_request_sample(s, "MODS FastAudio-codebook (SX)");
-            return AVERROR_PATCHWELCOME;
+        } else if (acodec == 1 && ach >= 1 && ach <= 2 && arate > 0 &&
+                   acodec_info_off > 0 && (pb->seekable & AVIO_SEEKABLE_NORMAL)) {
+            /* DS .mods FastAudio-codebook (SX) audio — the same codec as the
+             * ActImagine VX audio codec (vx_audio; verified bit-exact
+             * against Nintendo's SxCodec blob). The per-channel 3124-byte
+             * codebooks live at the audio-codec-info offset; hand them to the
+             * decoder as extradata with a w=h=0 prefix (packets carry no
+             * leading video bitstream). The video/audio chunk split uses the
+             * 4-byte suffix our muxer writes; retail files (VBR blocks, no
+             * suffix) still decode video-only. */
+            AVStream *ast = avformat_new_stream(s, NULL);
+            int64_t cur;
+            if (!ast)
+                return AVERROR(ENOMEM);
+            ast->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
+            ast->codecpar->codec_id    = AV_CODEC_ID_VX_AUDIO;
+            ast->codecpar->sample_rate = arate;
+            ast->codecpar->ch_layout.nb_channels = ach;
+            ast->codecpar->extradata = av_mallocz(16 + ach * SX_CODEBOOK_SIZE +
+                                                  AV_INPUT_BUFFER_PADDING_SIZE);
+            if (!ast->codecpar->extradata)
+                return AVERROR(ENOMEM);
+            ast->codecpar->extradata_size = 16 + ach * SX_CODEBOOK_SIZE;
+            AV_WL32(ast->codecpar->extradata + 12, ach);   /* q/w/h stay 0 */
+            cur = avio_tell(pb);
+            avio_seek(pb, acodec_info_off, SEEK_SET);
+            if (avio_read(pb, ast->codecpar->extradata + 16,
+                          ach * SX_CODEBOOK_SIZE) != ach * SX_CODEBOOK_SIZE) {
+                av_log(s, AV_LOG_WARNING, "MODS: SX codebook truncated; video only.\n");
+                ast->codecpar->codec_id = AV_CODEC_ID_NONE;
+            } else {
+                avpriv_set_pts_info(ast, 64, 1, arate);
+                m->has_sx_audio   = 1;
+                m->has_audio      = 1;
+                m->audio_channels = ach;
+                m->audio_codec_id = AV_CODEC_ID_VX_AUDIO;
+            }
+            avio_seek(pb, cur, SEEK_SET);
         } else if (acodec != 0 && acodec != 0xFF) {
             av_log(s, AV_LOG_WARNING,
                    "MODS: retail in-frame audio (codec %d) not supported; "
@@ -258,6 +294,36 @@ static int mods_audio_duration(MODSDemuxContext *m, int size)
     }
     /* fastaudio: 256 samples per 40-byte/ch frame */
     return (size / (40 * ch)) * 256;
+}
+
+/* Decode one video chunk through the private mobiclip decoder to find where the
+ * video bitstream ends and the SX audio tail begins.  Returns the byte offset
+ * (== mobiclip_consumed_bytes), or -1 on failure.  Used for SX files that lack
+ * our explicit 4-byte split suffix: older muxer output and retail DS .mods.
+ * Frames must be fed in order (P-frames reference earlier ones), which the
+ * linear demux read satisfies. */
+static int mods_sx_video_split(MODSDemuxContext *m, const uint8_t *data, int size)
+{
+    AVDictionaryEntry *e;
+    int consumed = -1, ret;
+
+    if (!m->vdec || !m->vpkt || !m->vframe)
+        return -1;
+    av_packet_unref(m->vpkt);
+    if (av_new_packet(m->vpkt, size) < 0)
+        return -1;
+    memcpy(m->vpkt->data, data, size);
+    ret = avcodec_send_packet(m->vdec, m->vpkt);
+    if (ret < 0)
+        return -1;
+    ret = avcodec_receive_frame(m->vdec, m->vframe);
+    if (ret < 0)
+        return -1;
+    e = av_dict_get(m->vframe->metadata, "mobiclip_consumed_bytes", NULL, 0);
+    if (e)
+        consumed = atoi(e->value);
+    av_frame_unref(m->vframe);
+    return (consumed >= 0 && consumed <= size) ? consumed : -1;
 }
 
 /* Emit the next audio block buffered from the current chunk, if any. */
@@ -379,36 +445,53 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
 
         if (m->audio_codec_id == AV_CODEC_ID_ADPCM_IMA_NDS ||
             m->audio_codec_id == AV_CODEC_ID_FASTAUDIO) {
-            /* The encoder writes a 4-byte unambiguous suffix at the end of
-             * each chunk: [pad_byte][0x00][asize_u16le].  This encodes the
-             * pad count and audio size so we can recover the video/audio
-             * split (vfield) directly, avoiding the RBSP-stop-bit scan that
-             * fails for non-keyframes where S = vfield + endpad lands inside
-             * audio data.  Fall back to computed audio_size if the suffix
-             * looks absent (legacy files). */
-            int stored_asize = (size >= 4) ? (int)AV_RL16(pkt->data + size - 2) : 0;
-            int spad = (size >= 4) ? pkt->data[size - 4] : 0;
-            if (stored_asize > 0 && stored_asize <= size && spad <= 3 && size >= 4) {
-                audio_size  = stored_asize;
-                audio_start = size - 4 - spad - stored_asize;
-                /* The stored asize includes the 4-byte keyframe word (if present).
-                 * The word is emitted only on keyframes (video bit15=1). Skip it
-                 * so aud_buf contains only block-aligned FastAudio data. */
-                if (m->audio_codec_id == AV_CODEC_ID_FASTAUDIO && audio_size >= 4) {
-                    int is_kf = (size >= 2 && (pkt->data[1] & 0x80));
-                    if (is_kf) {
-                        audio_start += 4;
-                        audio_size  -= 4;
-                    }
+            /* Find the video/audio split by decoding the video through the
+             * private mobiclip decoder (mods_sx_video_split -> exact vfield).
+             * The audio size then follows deterministically from the block
+             * count in the chunk word, so this is preferred for BOTH our own
+             * output and retail DS files. We do NOT trust the [pad][0][asize]
+             * suffix as a primary source: retail files carry no suffix, and a
+             * retail chunk's last 4 bytes occasionally look like a valid one
+             * (bogus audio_size, e.g. 293 -> ADPCM step_index blowup). The
+             * suffix and the RBSP-stop-bit heuristic are last resorts for when
+             * the private decoder is unavailable. */
+            int is_key = (size >= 2 && (pkt->data[1] & 0x80));
+            int vfield = mods_sx_video_split(m, pkt->data, size);
+            if (vfield >= 0 && vfield <= (int)size) {
+                if (m->audio_codec_id == AV_CODEC_ID_ADPCM_IMA_NDS) {
+                    /* On keyframes a 4-byte re-prime word precedes the audio,
+                     * and the first block of each channel carries a 4-byte IMA
+                     * init header (all part of the packet the decoder consumes;
+                     * headers are interleaved per block, ffmpeg's adpcm_ima_nds
+                     * layout). */
+                    audio_start = vfield;
+                    audio_size  = audio_blocks * m->audio_channels * 128;
+                    if (is_key && audio_blocks > 0)
+                        audio_size += 4 + 4 * m->audio_channels;
+                } else { /* FASTAUDIO: 4-byte keyframe word precedes blocks */
+                    int kf_word = (is_key && audio_blocks > 0) ? 4 : 0;
+                    audio_start = vfield + kf_word;
+                    audio_size  = audio_blocks * m->audio_channels * 40;
                 }
             } else {
-                int is_key = (size >= 2 && (pkt->data[1] & 0x80));
-                if (m->audio_codec_id == AV_CODEC_ID_ADPCM_IMA_NDS) {
+                int stored_asize = (size >= 4) ? (int)AV_RL16(pkt->data + size - 2) : 0;
+                int spad = (size >= 4) ? pkt->data[size - 4] : 0;
+                if (stored_asize > 0 && stored_asize <= size && spad <= 3 && size >= 4) {
+                    /* Our muxer's explicit split suffix: [pad][0x00][asize u16le]. */
+                    audio_size  = stored_asize;
+                    audio_start = size - 4 - spad - stored_asize;
+                    if (m->audio_codec_id == AV_CODEC_ID_FASTAUDIO && audio_size >= 4 && is_key) {
+                        audio_start += 4;   /* skip the keyframe word */
+                        audio_size  -= 4;
+                    }
+                } else if (m->audio_codec_id == AV_CODEC_ID_ADPCM_IMA_NDS) {
                     audio_size = audio_blocks * m->audio_channels * 128;
                     if (is_key && audio_blocks > 0)
                         audio_size += 4 + 4 * m->audio_channels;
+                    audio_start = (int)size - audio_size;
                 } else {
-                    /* FastAudio fallback: kf_word is 4 bytes before the blocks. */
+                    /* FastAudio heuristic fallback: kf_word is 4 bytes before
+                     * the blocks. */
                     int kf_word = (is_key && audio_blocks > 0) ? 4 : 0;
                     audio_size = audio_blocks * m->audio_channels * 40;
                     int S = (int)size - audio_size - kf_word;
@@ -453,25 +536,60 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
         }
     }
 
-    /* Retail SX audio: split the audio tail from this frame using the private
-     * mobiclip decoder, and buffer it to emit as the next packet. The full chunk
-     * is still emitted as the video packet below (mobiclip stops after video). */
+    /* SX audio: split the audio tail from this frame and buffer it to emit as
+     * the next packet (the full chunk is still emitted as the video packet
+     * below; the mobiclip video decoder stops after the video bits). The low
+     * 14 bits of the chunk word hold the number of 128-sample PERIODS this
+     * frame carries (retail semantics: count == periods, verified — see
+     * modsenc.c); each period is one AFrame per channel, so there are
+     * periods*channels AFrames. The video/audio boundary comes from the 4-byte
+     * [pad][0][asize u16] suffix our muxer writes. */
     if (m->has_sx_audio) {
-        int audio_blocks = (int)(word & 0x3FFF); /* low 14 bits = blocks/ch */
-        if (audio_blocks > 0) {
-            int audio_size = audio_blocks * 40 * m->audio_channels;
-            int audio_start = (int)size - audio_size;
-            
-            if (audio_start >= 0 && audio_size >= 0 && audio_start + audio_size <= (int)size) {
-                int alen = audio_size;
-                uint8_t *nb = av_realloc(m->aud_buf, 4 + alen);
+        int periods   = (int)(word & 0x3FFF);
+        int total_afr = periods * m->audio_channels;
+        if (total_afr > 0 && size >= 4) {
+            int is_kf = (size >= 2 && (pkt->data[1] & 0x80));
+            int stored_asize = (int)AV_RL16(pkt->data + size - 2);
+            int spad         = pkt->data[size - 4];
+            int vfield = -1, audio_start = -1, audio_size = -1;
+
+            if (stored_asize > 0 && spad <= 3 && stored_asize + spad + 4 <= (int)size) {
+                /* Our muxer's explicit split suffix: [pad][0x00][asize u16le].
+                 * asize includes the 4-byte keyframe reset word on keyframes. */
+                vfield      = (int)size - 4 - spad - stored_asize;
+                audio_start = vfield;
+                audio_size  = stored_asize;
+                if (is_kf && audio_size >= 4) {   /* skip the keyframe word */
+                    audio_start += 4;
+                    audio_size  -= 4;
+                }
+            } else {
+                /* No suffix (older muxer output / retail DS .mods): decode the
+                 * video through the private mobiclip decoder to find the split. */
+                vfield = mods_sx_video_split(m, pkt->data, size);
+                if (vfield >= 0 && vfield <= (int)size) {
+                    audio_start = vfield;
+                    /* Every video keyframe carries a 4-byte SX re-prime word
+                     * before the intra AFrame (retail writes real, non-zero data
+                     * there; our muxer writes zeros). Always skip it on keyframes
+                     * so the first AFrame the decoder sees is the intra one. */
+                    if (is_kf && audio_start + 4 <= (int)size)
+                        audio_start += 4;
+                    audio_size = (int)size - audio_start;
+                }
+            }
+
+            if (vfield >= 0 && audio_start >= 0 && audio_size > 0 &&
+                audio_start + audio_size <= (int)size) {
+                uint8_t *nb = av_realloc(m->aud_buf, 4 + audio_size);
                 if (nb) {
                     m->aud_buf = nb;
-                    AV_WL32(m->aud_buf, (uint32_t)audio_blocks);
-                    memcpy(m->aud_buf + 4, pkt->data + audio_start, alen);
-                    m->aud_size = 4 + alen;
-                    m->sx_emit_blocks = audio_blocks;
+                    AV_WL32(m->aud_buf, (uint32_t)total_afr);
+                    memcpy(m->aud_buf + 4, pkt->data + audio_start, audio_size);
+                    m->aud_size = 4 + audio_size;
+                    m->sx_emit_blocks = periods;
                 }
+                pkt->size = vfield; /* video only */
             }
         }
     }

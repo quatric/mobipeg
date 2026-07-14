@@ -473,6 +473,27 @@ static inline int16_t adpcm_ima_expand_nibble(ADPCMChannelStatus *c, int8_t nibb
     return (int16_t)c->predictor;
 }
 
+/* Reference-IMA nibble expansion: sums independently-truncated partial terms
+ * (step/8 + step + step/2 + step/4 selected by the delta bits) instead of the
+ * multiply-then-shift ((2*delta+1)*step)>>3 used by adpcm_ima_expand_nibble.
+ * The two are algebraically equal but round differently (e.g. step=7,delta=7:
+ * 11 vs 13); the Nintendo DS / Mobiclip SDK hardware uses this partial-sum form,
+ * and the per-nibble bias of the multiply form otherwise accumulates into a
+ * growing DC offset. Matches pleonex/PlayMobic's ImaAdpcmDecoder exactly. */
+static inline int16_t adpcm_ima_expand_nibble_ref(ADPCMChannelStatus *c, int8_t nibble)
+{
+    int step = ff_adpcm_step_table[c->step_index];
+    int diff = step >> 3;
+    if (nibble & 4) diff += step;
+    if (nibble & 2) diff += step >> 1;
+    if (nibble & 1) diff += step >> 2;
+    if (nibble & 8) diff = -diff;
+
+    c->predictor  = av_clip_int16(c->predictor + diff);
+    c->step_index = av_clip(c->step_index + ff_adpcm_index_table[(unsigned)nibble], 0, 88);
+    return (int16_t)c->predictor;
+}
+
 static inline int16_t adpcm_ima_alp_expand_nibble(ADPCMChannelStatus *c, int8_t nibble, int shift)
 {
     int step_index;
@@ -2030,8 +2051,8 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
                 samples = samples_p[channel] + 256 * b;
                 for (int n = 0; n < 256; n += 2) {
                     int v = bytestream2_get_byteu(&gb);
-                    *samples++ = adpcm_ima_expand_nibble(&c->status[channel], v & 0x0F, 3);
-                    *samples++ = adpcm_ima_expand_nibble(&c->status[channel], v >> 4  , 3);
+                    *samples++ = adpcm_ima_expand_nibble_ref(&c->status[channel], v & 0x0F);
+                    *samples++ = adpcm_ima_expand_nibble_ref(&c->status[channel], v >> 4);
                 }
             }
         }
