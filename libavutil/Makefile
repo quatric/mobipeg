@@ -325,6 +325,7 @@ TESTPROGS = adler32                                                     \
             xtea                                                        \
             tea                                                         \
 
+TESTPROGS-$(CONFIG_CUDA)             += hwcontext_cuda
 TESTPROGS-$(HAVE_THREADS)            += cpu_init
 TESTPROGS-$(HAVE_LZO1X_999_COMPRESS) += lzo
 
