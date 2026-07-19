@@ -8,6 +8,10 @@ on:
       - closed
       - labeled
 
+concurrency:
+  cancel-in-progress: false
+  group: backport-${{ forgejo.event.pull_request.number }}
+
 jobs:
   backporting:
     name: PR
