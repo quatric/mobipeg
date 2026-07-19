@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-name: Pull Request Backporting
+name: Backport
 
 on:
   pull_request_target:
@@ -10,11 +10,11 @@ on:
 
 jobs:
   backporting:
-    name: Backporting
+    name: PR
     if: >
-      forgejo.event.pull_request.merged && (
-        (forgejo.event.action == 'closed' && contains(forgejo.event.pull_request.labels.*.name, 'backport/')) ||
-        (forgejo.event.action == 'labeled' && contains(forgejo.event.label.name, 'backport/'))
+      ( vars.BACKPORTS == 'enabled' ) && (
+        forgejo.event.pull_request.merged &&
+        contains(toJSON(forgejo.event.pull_request.labels), 'backport/release/')
       )
     runs-on: utilities
     steps:
