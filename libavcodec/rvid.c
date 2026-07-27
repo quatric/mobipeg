@@ -88,12 +88,52 @@ static int rvid_lz10_decompress(const uint8_t *src, int src_size,
     return out_size;
 }
 
-/* Greedy LZ10 compressor (port of rvid_lz.c / Vid2RVID lz77.cpp). Returns the
- * padded compressed length or a negative error if it would exceed out_cap. */
+/* Longest LZ10 back-reference for the byte at data+offs. Returns the match
+ * length (0 if none >= 3) and stores the back-distance in *back_out. Matches
+ * are 3..18 bytes, distance 1..4096; distance-1 is allowed (RocketVideoPlayer
+ * decompresses to main RAM, matching the Vid2RVID reference), so this stays
+ * bit-compatible with existing .rvid tooling. */
+static int rvid_lz10_match(const uint8_t *data, int offs, int length,
+                           int *back_out)
+{
+    int maxnum  = FFMIN(18, length - offs);
+    int maxback = FFMIN(0x1000, offs);
+    const uint8_t *dp = data + offs;
+    const uint8_t *ptr = dp - 1;
+    const uint8_t *minptr = dp - maxback;
+    int nr = 2, back = 1;
+
+    if (maxnum < 3)
+        return 0;
+    while (minptr <= ptr) {
+        if (ptr[0] == dp[0] && ptr[1] == dp[1] && ptr[2] == dp[2]) {
+            int tmpnr = 3;
+            while (tmpnr < maxnum && ptr[tmpnr] == dp[tmpnr])
+                tmpnr++;
+            if (tmpnr > nr) {
+                nr = tmpnr;
+                back = (int)(dp - ptr);
+                if (nr == maxnum)
+                    break;
+            }
+        }
+        --ptr;
+    }
+    *back_out = back;
+    return nr > 2 ? nr : 0;
+}
+
+/* Nintendo LZ10 (0x10) compressor with lazy matching (PeterLemon's "best"
+ * heuristic: defer a match by one byte when the next position yields a strictly
+ * longer one). Returns the 4-byte-padded compressed length, or a negative error
+ * if it would exceed out_cap. */
 static int rvid_lz10_compress(const uint8_t *data, int data_size,
                               uint8_t *out, int out_cap)
 {
     int dstoffs = 4, length = data_size, offs = 0;
+    int headeroffs = -1, nbits = 0;
+    uint8_t header = 0;
+
     if (out_cap < 4)
         return AVERROR(ENOMEM);
     out[0] = 0x10;
@@ -101,56 +141,48 @@ static int rvid_lz10_compress(const uint8_t *data, int data_size,
     out[2] = (data_size >> 8) & 0xFF;
     out[3] = (data_size >> 16) & 0xFF;
 
-    while (1) {
-        int headeroffs = dstoffs++, i;
-        uint8_t header = 0;
-        for (i = 0; i < 8; i++) {
-            int comp = 0, back = 1, nr = 2;
-            int maxnum = FFMIN(18, length - offs);
-            int maxback = FFMIN(0x1000, offs);
-            const uint8_t *dp = data + offs;
-            const uint8_t *ptr = dp - 1;
-            const uint8_t *minptr = dp - maxback;
-            while (minptr <= ptr) {
-                if (ptr[0] == dp[0] && ptr[1] == dp[1] && ptr[2] == dp[2]) {
-                    int tmpnr = 3;
-                    while (tmpnr < maxnum && ptr[tmpnr] == dp[tmpnr])
-                        tmpnr++;
-                    if (tmpnr > nr) {
-                        if (offs + tmpnr > length) {
-                            nr = length - offs;
-                            back = (int)(dp - ptr);
-                            break;
-                        }
-                        nr = tmpnr;
-                        back = (int)(dp - ptr);
-                        if (nr == maxnum)
-                            break;
-                    }
-                }
-                --ptr;
-            }
-            if (nr > 2) {
-                if (dstoffs + 2 > out_cap)
-                    return AVERROR(ENOMEM);
-                offs += nr;
-                out[dstoffs++] = (((back - 1) >> 8) & 0xF) | (((nr - 3) & 0xF) << 4);
-                out[dstoffs++] = (back - 1) & 0xFF;
-                comp = 1;
-            } else {
-                if (dstoffs + 1 > out_cap)
-                    return AVERROR(ENOMEM);
-                out[dstoffs++] = data[offs++];
-            }
-            header = (header << 1) | (comp & 1);
-            if (offs >= length) {
-                header <<= (7 - i);
-                break;
-            }
+    while (offs < length) {
+        int back, len, comp = 0;
+
+        if (nbits == 0) {           /* start a new 8-token flag group */
+            if (dstoffs >= out_cap)
+                return AVERROR(ENOMEM);
+            headeroffs = dstoffs++;
+            header = 0;
         }
+
+        len = rvid_lz10_match(data, offs, length, &back);
+        if (len >= 3 && offs + 1 < length) {
+            /* Lazy: if emitting a literal now lets the *next* byte start a
+             * strictly longer match, do that instead — it never costs more and
+             * usually shrinks the stream. */
+            int nback, nlen = rvid_lz10_match(data, offs + 1, length, &nback);
+            if (nlen > len)
+                len = 0;
+        }
+
+        if (len >= 3) {
+            if (dstoffs + 2 > out_cap)
+                return AVERROR(ENOMEM);
+            out[dstoffs++] = (((back - 1) >> 8) & 0xF) | (((len - 3) & 0xF) << 4);
+            out[dstoffs++] = (back - 1) & 0xFF;
+            offs += len;
+            comp = 1;
+        } else {
+            if (dstoffs + 1 > out_cap)
+                return AVERROR(ENOMEM);
+            out[dstoffs++] = data[offs++];
+        }
+
+        header = (header << 1) | (comp & 1);
+        if (++nbits == 8) {
+            out[headeroffs] = header;
+            nbits = 0;
+        }
+    }
+    if (nbits) {                     /* flush a partial final flag group */
+        header <<= (8 - nbits);
         out[headeroffs] = header;
-        if (offs >= length)
-            break;
     }
     while (dstoffs & 3) {
         if (dstoffs >= out_cap)
