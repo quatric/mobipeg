@@ -205,6 +205,7 @@ extern const FFCodec ff_mobiclip_decoder;
 extern const FFCodec ff_rvid_decoder;
 extern const FFCodec ff_rvid_encoder;
 extern const FFCodec ff_vx_decoder;
+extern const FFCodec ff_hvqm4_decoder;
 extern const FFCodec ff_vx_encoder;
 extern const FFCodec ff_motionpixels_decoder;
 extern const FFCodec ff_mpeg1video_encoder;
@@ -937,7 +938,6 @@ extern const FFCodec ff_vnull_encoder;
 extern const FFCodec ff_anull_decoder;
 extern const FFCodec ff_anull_encoder;
 extern const FFCodec ff_fastaudio_encoder;
-extern const FFCodec ff_adpcm_ima_hvqm4_decoder;
 extern const FFCodec ff_mobiclip_encoder;
 // The iterate API is not usable with ossfuzz due to the excessive size of binaries created
 #if CONFIG_OSSFUZZ
