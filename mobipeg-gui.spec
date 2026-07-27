@@ -5,8 +5,8 @@ a = Analysis(
     ['encode_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('logo.png', '.'), ('rvid.py', '.'), ('rvid_lz.c', '.')],
-    hiddenimports=['encode', 'rvid', 'numpy'],
+    datas=[('logo.png', '.')],
+    hiddenimports=['encode'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -48,5 +48,5 @@ app = BUNDLE(
     name='mobipeg-gui.app',
     icon='logo.png',
     bundle_identifier=None,
-    version='1.1',
+    version='1.2',
 )

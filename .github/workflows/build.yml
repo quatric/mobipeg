@@ -210,8 +210,8 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Windows x86 and x86_64 — cross-compiled from Ubuntu with mingw-w64
-  # (Windows arm64 is not officially supported by FFmpeg configure)
+  # Windows x86, x86_64 and arm64 — cross-compiled from Ubuntu
+  # x86/x86_64 use mingw-w64 (gcc), arm64 uses llvm-mingw (clang)
   # ─────────────────────────────────────────────────────────────────────────
   build-windows:
     runs-on: ubuntu-22.04
@@ -222,10 +222,20 @@ jobs:
           - target: windows-x86_64
             ffarch: x86_64
             cross_prefix: x86_64-w64-mingw32
+            use_llvm: false
+            asm_flag: --disable-x86asm
 
           - target: windows-x86
             ffarch: x86
             cross_prefix: i686-w64-mingw32
+            use_llvm: false
+            asm_flag: --disable-x86asm
+
+          - target: windows-arm64
+            ffarch: aarch64
+            cross_prefix: aarch64-w64-mingw32
+            use_llvm: true
+            asm_flag: --disable-asm
 
     steps:
       - uses: actions/checkout@v4
@@ -244,11 +254,22 @@ jobs:
           cd nasm-${{ env.NASM_VERSION }}
           ./configure && make -j$(nproc) && sudo make install
 
-      - name: Install mingw-w64
+      - name: Install mingw-w64 (x86/x86_64)
+        if: matrix.use_llvm == false
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config nasm mingw-w64 mingw-w64-tools
+
+      - name: Install llvm-mingw (arm64)
+        if: matrix.use_llvm == true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config nasm
+          LLVM_MINGW_VER="20240619"
+          wget -q "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VER}/llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64.tar.xz"
+          sudo tar -xJf "llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64.tar.xz" -C /opt
+          echo "/opt/llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64/bin" >> $GITHUB_PATH
 
       # x264 has no mingw apt package — build it from source
       - name: Cache x264 for ${{ matrix.target }}
@@ -281,14 +302,18 @@ jobs:
       - name: Install SDL2 for Windows
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
-          mkdir -p "$DEPS/include" "$DEPS/lib"
+          mkdir -p "$DEPS/include" "$DEPS/lib" "$DEPS/bin"
           wget -q https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-mingw.tar.gz
           tar -xzf SDL2-devel-2.30.0-mingw.tar.gz
-          cp -a SDL2-2.30.0/${{ matrix.cross_prefix }}/include/SDL2 "$DEPS/include/"
-          cp -a SDL2-2.30.0/${{ matrix.cross_prefix }}/lib/* "$DEPS/lib/"
-          mkdir -p "$DEPS/bin"
-          cp -a SDL2-2.30.0/${{ matrix.cross_prefix }}/bin/SDL2.dll "$DEPS/bin/"
-          sed -i "s|^prefix=.*|prefix=$DEPS|" "$DEPS/lib/pkgconfig/sdl2.pc"
+          SDL2_ARCH_DIR="SDL2-2.30.0/${{ matrix.cross_prefix }}"
+          if [ -d "$SDL2_ARCH_DIR" ]; then
+            cp -a "$SDL2_ARCH_DIR/include/SDL2" "$DEPS/include/"
+            cp -a "$SDL2_ARCH_DIR/lib/"* "$DEPS/lib/"
+            cp -a "$SDL2_ARCH_DIR/bin/SDL2.dll" "$DEPS/bin/"
+            sed -i "s|^prefix=.*|prefix=$DEPS|" "$DEPS/lib/pkgconfig/sdl2.pc"
+          else
+            echo "::warning::SDL2 not found for ${{ matrix.cross_prefix }} — ffplay will be omitted"
+          fi
 
 
       - name: Cache libogg + libvorbis for ${{ matrix.target }}
@@ -335,7 +360,7 @@ jobs:
             --arch=${{ matrix.ffarch }} \
             --target-os=mingw32 \
             --cross-prefix=${{ matrix.cross_prefix }}- \
-            --disable-x86asm \
+            ${{ matrix.asm_flag }} \
             --enable-gpl \
             --enable-libx264 \
             --enable-libvorbis \
@@ -507,9 +532,36 @@ jobs:
           - target: linux-x86_64
             os: ubuntu-22.04
             ext: tar.gz
+
+          - target: linux-x86
+            os: ubuntu-22.04
+            ext: tar.gz
+            docker_platform: linux/386
+
+          - target: linux-arm64
+            os: ubuntu-22.04-arm
+            ext: tar.gz
+
+          - target: linux-armhf
+            os: ubuntu-22.04
+            ext: tar.gz
+            docker_platform: linux/arm/v7
+
           - target: windows-x86_64
             os: windows-latest
             ext: zip
+            python_arch: x64
+
+          - target: windows-x86
+            os: windows-latest
+            ext: zip
+            python_arch: x86
+
+          - target: windows-arm64
+            os: windows-11-arm
+            ext: zip
+            python_arch: arm64
+
           - target: macos-universal
             os: macos-14
             ext: tar.gz
@@ -519,10 +571,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up QEMU (cross-arch Linux builds)
+        if: matrix.docker_platform != ''
+        uses: docker/setup-qemu-action@v3
+
       - name: Setup Python
+        if: matrix.docker_platform == ''
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          architecture: ${{ matrix.python_arch || 'x64' }}
 
       - name: Download FFmpeg artifact
         uses: actions/download-artifact@v4
@@ -540,26 +598,64 @@ jobs:
             unzip mobipeg-*.zip
           fi
 
-      - name: Build PyInstaller App
+      - name: Build PyInstaller App (Docker / QEMU)
+        if: matrix.docker_platform != ''
+        run: |
+          # Run inside a native-arch container so PyInstaller produces the right ELF
+          docker run --rm --platform "${{ matrix.docker_platform }}" \
+            -v "$PWD:/work" -w /work \
+            python:3.12-slim bash -c "
+              apt-get update -qq
+              apt-get install -y --no-install-recommends python3-tk binutils || true
+              pip install --quiet pyinstaller Pillow
+              pyinstaller --name mobipeg-gui --windowed \
+                --add-binary artifact/ffmpeg:. \
+                --add-data logo.png:. \
+                --distpath pyinst_dist encode_gui.py
+              tar -czf mobipeg-gui-${{ matrix.target }}.tar.gz -C pyinst_dist mobipeg-gui
+            "
+          # Fix root-owned output files created inside the container
+          sudo chown "$USER" mobipeg-gui-${{ matrix.target }}.tar.gz
+
+      - name: Build PyInstaller App (native)
+        if: matrix.docker_platform == ''
         shell: bash
         run: |
           python -m pip install pyinstaller Pillow
           if [[ "${{ matrix.target }}" == windows* ]]; then
             FFMPEG_BIN="artifact/ffmpeg.exe"
             SDL2_BIN="artifact/SDL2.dll"
-            # Pyinstaller on Windows uses semicolon for add-data/binary
-            pyinstaller --name "mobipeg-gui" --windowed --add-binary "$FFMPEG_BIN;." --add-binary "$SDL2_BIN;." --add-data "logo.png;." --icon=logo.png --distpath pyinst_dist encode_gui.py
+            # SDL2.dll may be absent for some targets (e.g. arm64) — include it only if present
+            if [ -f "$SDL2_BIN" ]; then
+              pyinstaller --name "mobipeg-gui" --windowed \
+                --add-binary "$FFMPEG_BIN;." --add-binary "$SDL2_BIN;." \
+                --add-data "logo.png;." --icon=logo.png \
+                --distpath pyinst_dist encode_gui.py
+            else
+              pyinstaller --name "mobipeg-gui" --windowed \
+                --add-binary "$FFMPEG_BIN;." \
+                --add-data "logo.png;." --icon=logo.png \
+                --distpath pyinst_dist encode_gui.py
+            fi
             cd pyinst_dist
-            7z a ../mobipeg-gui-${{ matrix.target }}.zip mobipeg-gui
+            # 7z may not exist on arm64 Windows runners — fall back to PowerShell
+            7z a ../mobipeg-gui-${{ matrix.target }}.zip mobipeg-gui 2>/dev/null \
+              || powershell -Command "Compress-Archive -Path mobipeg-gui -DestinationPath ../mobipeg-gui-${{ matrix.target }}.zip"
           elif [[ "${{ matrix.target }}" == "macos-universal" ]]; then
             FFMPEG_BIN="artifact/ffmpeg"
-            pyinstaller --name "mobipeg-gui" --windowed --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." --icon=logo.png --distpath pyinst_dist --target-architecture universal2 encode_gui.py
+            pyinstaller --name "mobipeg-gui" --windowed \
+              --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." \
+              --icon=logo.png --distpath pyinst_dist \
+              --target-architecture universal2 encode_gui.py
             cd pyinst_dist
             zip -r ../mobipeg-gui-${{ matrix.target }}.zip mobipeg-gui.app
           else
+            # Native Linux (x86_64, arm64)
             sudo apt-get install python3-tk -y || true
             FFMPEG_BIN="artifact/ffmpeg"
-            pyinstaller --name "mobipeg-gui" --windowed --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." --icon=logo.png --distpath pyinst_dist encode_gui.py
+            pyinstaller --name "mobipeg-gui" --windowed \
+              --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." \
+              --icon=logo.png --distpath pyinst_dist encode_gui.py
             cd pyinst_dist
             tar -czf ../mobipeg-gui-${{ matrix.target }}.tar.gz mobipeg-gui
           fi
