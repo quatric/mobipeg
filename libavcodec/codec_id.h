@@ -1,5 +1,4 @@
 /*
- * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  * Codec IDs
  *
  * This file is part of FFmpeg.
@@ -297,6 +296,7 @@ enum AVCodecID {
     AV_CODEC_ID_MV30,
     AV_CODEC_ID_NOTCHLC,
     AV_CODEC_ID_PFM,
+    AV_CODEC_ID_MOBICLIP,
     AV_CODEC_ID_PHOTOCD,
     AV_CODEC_ID_IPU,
     AV_CODEC_ID_ARGO,
@@ -327,7 +327,6 @@ enum AVCodecID {
 
     /* Custom video codecs */
     AV_CODEC_ID_RVID,
-    AV_CODEC_ID_MOBICLIP,
     AV_CODEC_ID_HVQM4,
     AV_CODEC_ID_VX,
 
@@ -427,19 +426,19 @@ enum AVCodecID {
     AV_CODEC_ID_ADPCM_XMD,
     AV_CODEC_ID_ADPCM_IMA_XBOX,
     AV_CODEC_ID_ADPCM_SANYO,
+    AV_CODEC_ID_ADPCM_IMA_HVQM4,
     AV_CODEC_ID_ADPCM_IMA_PDA,
     AV_CODEC_ID_ADPCM_N64,
     AV_CODEC_ID_ADPCM_IMA_HVQM2,
-    AV_CODEC_ID_ADPCM_IMA_HVQM4,
     AV_CODEC_ID_ADPCM_IMA_MAGIX,
     AV_CODEC_ID_ADPCM_PSXC,
     AV_CODEC_ID_ADPCM_CIRCUS,
     AV_CODEC_ID_ADPCM_IMA_ESCAPE,
+
+    /* Custom ADPCM codecs */
     AV_CODEC_ID_ADPCM_IMA_MOBICLIP_WII,
     AV_CODEC_ID_SX,
     AV_CODEC_ID_ADPCM_IMA_NDS,
-
-    /* Custom ADPCM codecs */
 
     /* AMR */
     AV_CODEC_ID_AMR_NB = 0x12000,
@@ -555,6 +554,7 @@ enum AVCodecID {
     AV_CODEC_ID_MPEGH_3D_AUDIO,
     AV_CODEC_ID_SIREN,
     AV_CODEC_ID_HCA,
+    AV_CODEC_ID_FASTAUDIO,
     AV_CODEC_ID_MSNSIREN,
     AV_CODEC_ID_DFPWM,
     AV_CODEC_ID_BONK,
@@ -572,7 +572,6 @@ enum AVCodecID {
     AV_CODEC_ID_APPLE_APAC,
 
     /* Custom audio codecs */
-    AV_CODEC_ID_FASTAUDIO,
     AV_CODEC_ID_VX_AUDIO,
 
     /* subtitle codecs */
