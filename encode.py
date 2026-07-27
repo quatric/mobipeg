@@ -44,7 +44,13 @@ def is_ycgco(inp, ifmt):
     """True if the input's decoded video is tagged YCgCo. The mods decoder only
     sets this after decoding a frame, so probe the first decoded frame rather
     than the container header (which reports 'unknown'). Works for any input
-    type, so vx/other YCgCo sources get corrected the same as .mods."""
+    type, so vx/other YCgCo sources get corrected the same as .mods.
+
+    .mods and .vx are *always* YCgCo, so short-circuit on extension: the ffprobe
+    frame probe can fail silently (e.g. FFPROBE path issues in the frozen GUI
+    build), and we must not skip the color transform for those known formats."""
+    if os.path.splitext(inp)[1].lower() in (".mods", ".vx"):
+        return True
     try:
         p = subprocess.run(
             [FFPROBE, "-v", "error"] + ifmt +
@@ -73,7 +79,55 @@ def input_fmt(path):
         return ["-f", "thp"]
     if ext == ".rvid":
         return ["-f", "rvid"]
+    if ext == ".h4m":
+        # Hudson Soft HVQM4 (.h4m) GameCube/Wii FMV.
+        return ["-f", "hvqm4"]
     return []
+
+
+def s3tots_bin():
+    """Path to the bundled s3tots binary for this platform, or None."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    d = os.path.join(base, "tools", "s3tots")
+    if sys.platform == "darwin":
+        p = os.path.join(d, "s3tots-macos")
+    elif sys.platform.startswith("linux"):
+        p = os.path.join(d, "s3tots-linux-x86_64")
+    else:
+        return None
+    return p if os.path.isfile(p) else None
+
+
+def preprocess_input(inp, outdir):
+    """Transcode-source shim for container formats ffmpeg can't demux directly.
+
+    TiVo TyStreams (.ty/.ty+/.tmf) — including Series-3 recordings and MFS
+    VideoClip resources — are MPEG-2 wrapped in TiVo chunks. FFmpeg's built-in
+    `ty` demuxer only handles Series-1/2, so we run the bundled s3tots tool to
+    losslessly convert any TyStream to a standard MPEG-2 transport stream first,
+    then hand that .ts to ffmpeg. Returns the path ffmpeg should actually open
+    (the original path unchanged for every other input type).
+    """
+    ext = os.path.splitext(inp)[1].lower()
+    if ext not in (".ty", ".ty+", ".tmf"):
+        return inp
+    tool = s3tots_bin()
+    if not tool:
+        print(f"   (warning: no s3tots binary for {sys.platform}; passing {ext} to ffmpeg as-is)")
+        return inp
+    os.makedirs(outdir, exist_ok=True)
+    ts = os.path.join(outdir, os.path.splitext(os.path.basename(inp))[0] + ".ty.ts")
+    print(f">> TiVo TyStream: s3tots {os.path.basename(inp)} -> {os.path.basename(ts)}")
+    r = subprocess.run([tool, "-y", "-i", inp, "-o", ts],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in (r.stdout or "").splitlines():
+        print("   " + line)
+    if r.returncode != 0 or not os.path.isfile(ts) or os.path.getsize(ts) == 0:
+        print("   (s3tots failed; falling back to ffmpeg's ty demuxer)")
+        return inp
+    return ts
 
 
 def probe_duration(inp):
@@ -160,7 +214,7 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp) — use 'decode' to decode any supported file including .rvid")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid) — use 'decode' to decode any supported file including .rvid/.h4m/.ty")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
     parser.add_argument("input2", nargs="?", default="", help="Second input file (for moflex3d/cia right eye)")
@@ -170,12 +224,30 @@ def main():
     parser.add_argument("--keyframes", type=int, default=0, help="Number of evenly-spaced keyframes across the clip. 0 (default) = auto: as few as practical while keeping every gap within the encoder's ~90-frame limit. Scene-cut keyframes are still allowed in addition.")
     parser.add_argument("--roundtrip", action="store_true", help="Enable round-trip decoding validation")
     parser.add_argument("--fast-audio", dest="fast_audio", action="store_true", help="Disable the vx_audio long-term-prediction (LTP) lag search. Much faster (~90x on the audio pass) at ~2 dB lower quality. Only affects vx and mods/codebook (SX) audio; other codecs ignore it. Recommended for long clips, where the LTP drain otherwise runs for minutes after the video finishes.")
-    parser.add_argument("--quantizer", type=int, default=32, help="vx only: constant quantizer (12=best/largest .. 161=worst/smallest). Default 32 keeps per-frame sizes within the retail VX envelope so the DS decode buffer doesn't overflow. Lower values look better but produce larger frames that can crash a DS player with a fixed buffer.")
+    env_quant = 0
+    try:
+        env_quant = int(os.environ.get("QUANT", os.environ.get("QP", 0)))
+    except ValueError:
+        pass
+    parser.add_argument("--quantizer", "--qp", dest="quantizer", type=int, default=env_quant, help="Constant quantizer / QP setting (e.g. 18-28 for MobiClip, 32 for VX, 1-31 for THP qscale). Default 0 = format default (32 for VX, 22 for MobiClip CQP, 2 for THP). Can also be set via QUANT or QP environment variables.")
     parser.add_argument("--audio-rate", dest="audio_rate", type=int, default=0, help="vx/mods codebook: resample audio to this rate (Hz). 0 = keep source. Match the sample rate of the retail clip you're replacing (e.g. 22050 for americ1 cutscenes) — a DS player that sizes its audio buffer for the original rate can stall on a higher-rate stream.")
     parser.add_argument("--fps", dest="fps", default="", help="vx only: force this video frame rate. Accepts a decimal (e.g. 15) or an exact fraction (e.g. 60000/1001). Empty = keep source. A DS VX player clocks video off the audio, so the frame rate must match the clip you're replacing or the video plays too slow/fast.")
+    parser.add_argument("--rvid-mode", dest="rvid_mode", default="rgb555", choices=["rgb555", "rgb565", "256"], help="rvid only: pixel mode. rgb555 (unlimited color, default), rgb565 (max color), or 256 (8bpp palette).")
+    parser.add_argument("--no-compress", dest="rvid_no_compress", action="store_true", help="rvid only: store raw 16bpp frames instead of Nintendo LZ10 compression.")
+    parser.add_argument("--rvid-interlaced", dest="rvid_interlaced", action="store_true", help="rvid only: store one field per frame (interlaced).")
+    parser.add_argument("--rvid-no-dither", dest="rvid_no_dither", action="store_true", help="rvid only: disable the checkerboard ordered dither used when reducing to 16bpp.")
+    parser.add_argument("--mobi-qyx", type=int, default=int(os.environ.get("MOBI_QYX", 1)), help="MobiClip Quantizer Y extension tier (0-15, default 1). 0 = finest quality / visually lossless.")
+    parser.add_argument("--mobi-dz", type=int, default=int(os.environ.get("MOBI_DZ", 5)), help="Deadzone quantization scaling factor (1-8, default 5).")
+    parser.add_argument("--mobi-subme", type=int, default=int(os.environ.get("MOBI_SUBME", 2)), help="Subpel motion estimation refinement quality level (default 2).")
+    parser.add_argument("--mobi-intra-only", dest="mobi_intra_only", action="store_true", help="Force every frame to be encoded as an I-frame (keyframe only).")
+    parser.add_argument("--mobi-skip", type=int, default=int(os.environ.get("MOBI_SKIP", 512)), help="Macroblock skip decision error threshold (default 512).")
+    parser.add_argument("--pass", dest="pass_num", type=int, choices=[0, 1, 2], default=0, help="Specify encoding pass number for 2-pass encoding (1 or 2)")
+    parser.add_argument("--2pass", dest="two_pass", action="store_true", help="Perform automated 2-pass VBR/CBR encoding (runs pass 1 then pass 2)")
+    parser.add_argument("--bitrate", "-b", dest="bitrate", default="2000k", help="Target video bitrate for 2-pass VBR encoding (default 2000k)")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
 
     parsed = parser.parse_args()
+    OUTDIR = parsed.outdir
     
     fmt = parsed.fmt
     audio = parsed.audio
@@ -189,7 +261,23 @@ def main():
     vx_quant = parsed.quantizer
     audio_rate = parsed.audio_rate
     fps_ovr = parsed.fps.strip()
-    OUTDIR = parsed.outdir
+    rvid_mode = parsed.rvid_mode
+    rvid_no_compress = parsed.rvid_no_compress
+    rvid_interlaced = parsed.rvid_interlaced
+    rvid_no_dither = parsed.rvid_no_dither
+    if parsed.quantizer > 0:
+        os.environ["QUANT"] = str(parsed.quantizer)
+        os.environ["QP"] = str(parsed.quantizer)
+    if parsed.mobi_qyx != 1:
+        os.environ["MOBI_QYX"] = str(parsed.mobi_qyx)
+    if parsed.mobi_dz != 5:
+        os.environ["MOBI_DZ"] = str(parsed.mobi_dz)
+    if parsed.mobi_subme != 2:
+        os.environ["MOBI_SUBME"] = str(parsed.mobi_subme)
+    if parsed.mobi_intra_only:
+        os.environ["MOBI_INTRA_ONLY"] = "1"
+    if parsed.mobi_skip != 512:
+        os.environ["MOBI_SKIP"] = str(parsed.mobi_skip)
 
 
     # format -> mode | demuxer name | scale (video) | moaud? | cvc
@@ -219,8 +307,13 @@ def main():
         # GameCube/Wii THP: motion-JPEG video + adpcm_thp (DSP-ADPCM) audio.
         # Not a mobiclip codec, so no -mobiclip/-mo_audio; keeps source size.
         mode, dmx, scale, moaud, cvc = "vid", "thp", "", 0, "mjpeg"
+    elif fmt == "rvid":
+        # RocketVideo (.rvid) for the DS. Encoded natively by ffmpeg's rvid
+        # encoder + muxer (LZ10 compression lives in libavcodec/rvid.c); no
+        # external helper. DS screen is 256x192; source is packed to rgb24.
+        mode, dmx, scale, moaud, cvc = "vid", "rvid", "256:192", 0, "rvid"
     else:
-        print(f"unknown format '{fmt}' (decode|mo|moflex|moflex3d|mods|vx|thp)")
+        print(f"unknown format '{fmt}' (decode|mo|moflex|moflex3d|mods|vx|thp|rvid)")
         sys.exit(2)
 
 
@@ -229,7 +322,9 @@ def main():
     elif audio == "vorbis":
         scale = "384:288"
     
-    os.makedirs(OUTDIR, exist_ok=True)
+    out_directory = parsed.outdir or "."
+    if out_directory:
+        os.makedirs(out_directory, exist_ok=True)
 
     def run_cmd(cmd, check=True, hide_err=False):
         try:
@@ -251,6 +346,7 @@ def main():
         if not os.path.isfile(inp):
             print(f"input not found: {inp}")
             sys.exit(2)
+        inp = preprocess_input(inp, OUTDIR)
         watch = f"{OUTDIR}/decoded.mp4"
         print(f">> decoding  {inp}  ->  {watch}")
         ifmt = input_fmt(inp)
@@ -276,7 +372,9 @@ def main():
         if not os.path.isfile(inp2):
             print(f"right input not found: {inp2}")
             sys.exit(2)
-            
+        inp = preprocess_input(inp, OUTDIR)
+        inp2 = preprocess_input(inp2, OUTDIR)
+
         layout = layout_arg
         stem = f"{OUTDIR}/roundtrip_moflex3d_{audio}"
         container = f"{stem}.moflex"
@@ -327,7 +425,8 @@ def main():
     if not os.path.isfile(inp):
         print(f"input not found: {inp}")
         sys.exit(2)
-        
+    inp = preprocess_input(inp, OUTDIR)
+
     stem = f"{OUTDIR}/roundtrip_{fmt}_{audio}"
     container = f"{stem}.{fmt}"
     watch = f"{stem}.mp4"
@@ -344,6 +443,8 @@ def main():
                 enc_opts.extend(["-mo_audio", "none"])
         else:
             enc_opts.extend(["-mo_audio", audio])
+            if fmt in ("mo", "moflex", "moflex3d"):
+                enc_opts.extend(["-map", "0:v", "-map", "0:a?"])
             # SX/codebook audio is produced by its own encoder (trains a per-file
             # codebook over the whole stream), not the muxer's built-in packing.
             if audio == "codebook":
@@ -357,10 +458,16 @@ def main():
 
     if fmt == "mods":
         enc_opts.extend(["-mobiclip", "2", "-moflex", "0", "-g", "100000"])
+        if vx_quant > 0:
+            enc_opts.extend(["-qp", str(vx_quant)])
         if audio == "fastaudio":
             enc_opts.extend(["-sc_threshold", "0"])
     elif fmt in ["mo", "moflex", "moflex3d"]:
         enc_opts.extend(["-mobiclip", "1"])
+        if parsed.two_pass or parsed.pass_num > 0:
+            enc_opts.extend(["-b:v", parsed.bitrate, "-x264opts", "no-mbtree=1"])
+        elif vx_quant > 0:
+            enc_opts.extend(["-qp", str(vx_quant)])
 
         # Evenly-spaced keyframes for the Wii mobiclip formats. mo output is
         # resampled to 30000/1001; moflex keeps source fps. Auto mode uses the
@@ -387,18 +494,13 @@ def main():
                 enc_opts.extend(["-ar", str(audio_rate)])
         if n_keyframes and n_keyframes > 0:
             enc_opts.extend(["-keyint", str(n_keyframes)])
-        # Use constant-QP, NOT rate control. ffmpeg silently defaults -b:v to
-        # 200k, which switches the vx encoder into RC and drives the quantizer
-        # down to ~24 -> frames up to ~11.8 KB. No retail VX exceeds ~7.7 KB per
-        # frame, and a DS player with a fixed decode buffer overflows on the
-        # larger frames (a crash we traced by comparing frame_data_size_max vs
-        # retail americ1 files). CQP at a retail-like quantizer keeps every frame
-        # inside the retail envelope. Retail uses q ~28-36; default 32.
-        enc_opts.extend(["-b:v", "0", "-quantizer", str(vx_quant)])
+        qval = vx_quant if vx_quant > 0 else 32
+        enc_opts.extend(["-b:v", "0", "-quantizer", str(qval)])
     elif fmt == "thp":
         # THP video is all-intra MJPEG; audio is adpcm_thp (mono or stereo).
-        # -qscale:v 2 is a good default (1=best..31); THP frames are cheap.
-        enc_opts.extend(["-qscale:v", "2"])
+        # -qscale:v 2 is default (1=best..31); THP frames are cheap.
+        qval = str(vx_quant) if vx_quant > 0 else "2"
+        enc_opts.extend(["-qscale:v", qval])
         if audio == "none":
             enc_opts.append("-an")
         else:
@@ -408,6 +510,22 @@ def main():
             # a 48000 Hz stream plays ~0.67x = low-pitched, slow, and choppy.
             # Resample to 32000 unless the user forces a rate.
             enc_opts.extend(["-ar", str(audio_rate if audio_rate > 0 else 32000)])
+    elif fmt == "rvid":
+        # RocketVideo: 16bpp (RGB555/565) frames, optional Nintendo LZ10, encoded
+        # entirely by ffmpeg's rvid encoder. The encoder consumes rgb24 and packs
+        # to 16bpp itself. Audio is raw PCM (the rvid muxer's native stream).
+        enc_opts.extend(["-mode", rvid_mode,
+                         "-compress", "0" if rvid_no_compress else "1",
+                         "-interlaced", "1" if rvid_interlaced else "0",
+                         "-dither", "0" if rvid_no_dither else "1"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            # 16-bit PCM (pcm_s16le) is the higher-quality of the two rvid audio
+            # stream types; the muxer writes it as the left/right sound stream.
+            enc_opts.extend(["-c:a", "pcm_s16le"])
+            if audio_rate > 0:
+                enc_opts.extend(["-ar", str(audio_rate)])
 
     fps_filter = ""
     if fmt == "mo":
@@ -463,10 +581,20 @@ def main():
 
     fps_disp = f", {fps_filter}" if fps_filter else ""
     scale_disp = scale if scale else "source"
-    print(f">> encoding  {inp}  -> {container}  ({scale_disp}{fps_disp}, audio={audio})")
+    pass_file = os.path.join(parsed.outdir or ".", "mobiclip_2pass.log")
 
-    cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + [container]
-    run_cmd(cmd) or sys.exit(1)
+    if parsed.two_pass:
+        print(f">> 2-pass encoding  {inp}  -> {container}  (Pass 1/2)")
+        cmd_p1 = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + ["-pass", "1", "-passlogfile", pass_file, container]
+        run_cmd(cmd_p1) or sys.exit(1)
+        print(f">> 2-pass encoding  {inp}  -> {container}  (Pass 2/2)")
+        cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + ["-pass", "2", "-passlogfile", pass_file, container]
+        run_cmd(cmd) or sys.exit(1)
+    else:
+        if parsed.pass_num > 0:
+            enc_opts.extend(["-pass", str(parsed.pass_num), "-passlogfile", pass_file])
+        cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + [container]
+        run_cmd(cmd) or sys.exit(1)
     
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
