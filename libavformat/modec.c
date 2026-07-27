@@ -64,6 +64,11 @@ typedef struct MoDemuxContext {
      * (soff-carrying) section, vs our own [0xFFFF] size-split sections. */
     uint16_t vorbis_soff;
     int vorbis_soff_valid;
+    /* Multi-track audio state */
+    int num_tracks;
+    int current_audio_track;
+    uint32_t track_offsets[16];
+    int64_t track_data_base_pos;
 } MoDemuxContext;
 
 static int mo_probe(const AVProbeData *p)
@@ -235,8 +240,26 @@ static int mo_read_header(AVFormatContext *s)
                 return AVERROR_PATCHWELCOME;
             }
             break;
-        case FORMAT_MULTITRACK:
-            return AVERROR_PATCHWELCOME;
+        case FORMAT_MULTITRACK: {
+            uint32_t num_tr = avio_rl32(pb);
+            if (num_tr == 0 || num_tr > 16)
+                return AVERROR_INVALIDDATA;
+            mo->num_tracks = num_tr;
+            for (uint32_t i = 0; i < num_tr; i++) {
+                uint16_t marker = avio_rl16(pb);
+                AVStream *st = avformat_new_stream(s, NULL);
+                if (!st)
+                    return AVERROR(ENOMEM);
+                result = mo_handle_audio(st, marker, pb);
+                if (result == -1)
+                    return AVERROR_PATCHWELCOME;
+            }
+            int read_len = 4 + num_tr * 10;
+            int pad = (4 - (read_len % 4)) % 4;
+            if (pad > 0)
+                avio_skip(pb, pad);
+            break;
+        }
         case FORMAT_VORBIS:
         {
             if (!ast) {
@@ -393,6 +416,53 @@ static int mo_read_packet(AVFormatContext *s, AVPacket *pkt)
 
     // Determine whether audio or video.
     if (mo->handle_audio_packet) {
+        if (mo->num_tracks > 1) {
+            int t = mo->current_audio_track;
+            if (t == 0) {
+                for (int i = 0; i < mo->num_tracks; i++) {
+                    mo->track_offsets[i] = avio_rl32(pb);
+                }
+                mo->track_data_base_pos = avio_tell(pb);
+            }
+            uint32_t start_off = mo->track_offsets[t];
+            uint32_t end_off = (t + 1 < mo->num_tracks)
+                ? mo->track_offsets[t + 1]
+                : (mo->audio_size - mo->num_tracks * 4);
+            uint32_t track_size = (end_off > start_off) ? (end_off - start_off) : 0;
+
+            avio_seek(pb, mo->track_data_base_pos + start_off, SEEK_SET);
+            ret = av_get_packet(pb, pkt, track_size);
+            if (ret < 0) return ret;
+
+            pkt->stream_index = 1 + t;
+            AVStream *ast = s->streams[1 + t];
+            if (ast->codecpar->codec_id == AV_CODEC_ID_ADPCM_IMA_MOBICLIP_WII) {
+                int channels = ast->codecpar->ch_layout.nb_channels;
+                if (channels <= 0) channels = 1;
+                int block_size = channels * 132;
+                int blocks = ret / block_size;
+                int samples = blocks * 256;
+                pkt->pts = pkt->dts = mo->audio_sample_pos;
+                pkt->duration = samples;
+            } else {
+                pkt->pts = pkt->dts = mo->audio_sample_pos;
+            }
+
+            mo->current_audio_track++;
+            if (mo->current_audio_track >= mo->num_tracks) {
+                if (ast->codecpar->codec_id == AV_CODEC_ID_ADPCM_IMA_MOBICLIP_WII) {
+                    int channels = ast->codecpar->ch_layout.nb_channels;
+                    if (channels <= 0) channels = 1;
+                    int block_size = channels * 132;
+                    mo->audio_sample_pos += (ret / block_size) * 256;
+                }
+                avio_seek(pb, mo->next_chunk_pos, SEEK_SET);
+                mo->handle_audio_packet = 0;
+                mo->current_audio_track = 0;
+            }
+            return ret;
+        }
+
         // We now need to read the audio packet within this chunk.
         if (s->streams[1]->codecpar->codec_id == AV_CODEC_ID_VORBIS) {
             /* Vorbis audio section formats:

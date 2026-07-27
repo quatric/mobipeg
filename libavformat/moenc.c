@@ -244,6 +244,16 @@ typedef struct MoAdpcmChannel {
     int step_index;
 } MoAdpcmChannel;
 
+typedef struct MoTrackContext {
+    int channels;
+    int16_t *pcm_buf;
+    int pcm_samples;
+    int pcm_capacity;
+    int adpcm_target_acc;
+    int adpcm_samples_written;
+    MoAdpcmChannel adpcm[2];
+} MoTrackContext;
+
 /* Maximum keyframe entries pre-allocated in the header.
  * Each entry is 8 bytes (chunk_offset u32 + frame_index u32).
  * 4096 entries => 32 KB header overhead, supports ~68 min at 1fps GOP or
@@ -300,8 +310,11 @@ typedef struct MoMuxContext {
     int adpcm_samples_written;  /* decoded ADPCM samples already emitted */
     MoAdpcmChannel adpcm[2];
 
+    MoTrackContext tracks[16];
+
     int first_video_written;
     int chunk_count;           /* number of video chunks written (= frame count) */
+    int num_tracks;            /* number of audio tracks (>1 for multitrack) */
     int audio_codec;           /* resolved: 0=fastaudio, 1=adpcm, 2=pcm, 3=vorbis */
     int mobi_dbg;
     int mobi_muxdbg;
@@ -364,18 +377,14 @@ static uint8_t mo_ima_compress(MoAdpcmChannel *c, int16_t sample)
     return (uint8_t)nibble;
 }
 
-/* Encode `subframes` Wii MobiClip ADPCM blocks into `out`. If the PCM
- * buffer doesn't hold enough samples, the tail is padded with silence so the
- * decoder always sees a full 132-byte/channel block per subframe.
- * Returns bytes written. */
-static int encode_adpcm_blocks(MoMuxContext *mo, uint8_t *out, int subframes)
+static int encode_adpcm_blocks_track(MoTrackContext *tr, uint8_t *out, int subframes)
 {
     int written = 0;
-    int available_samples = mo->pcm_samples;
+    int available_samples = tr->pcm_samples;
 
     for (int sf = 0; sf < subframes; sf++) {
-        for (int ch = 0; ch < mo->channels; ch++) {
-            MoAdpcmChannel *c = &mo->adpcm[ch];
+        for (int ch = 0; ch < tr->channels; ch++) {
+            MoAdpcmChannel *c = &tr->adpcm[ch];
             out[written++] = c->step_index & 0xFF;
             out[written++] = (c->step_index >> 8) & 0xFF;
             out[written++] = c->predictor & 0xFF;
@@ -385,10 +394,10 @@ static int encode_adpcm_blocks(MoMuxContext *mo, uint8_t *out, int subframes)
             for (int n = 0; n < WII_ADPCM_SAMPLES_PER_BLOCK; n += 2) {
                 int16_t s0 = 0, s1 = 0;
                 if (sf_start + n < available_samples) {
-                    s0 = mo->pcm_buf[(sf_start + n) * mo->channels + ch];
+                    s0 = tr->pcm_buf[(sf_start + n) * tr->channels + ch];
                 }
                 if (sf_start + n + 1 < available_samples) {
-                    s1 = mo->pcm_buf[(sf_start + n + 1) * mo->channels + ch];
+                    s1 = tr->pcm_buf[(sf_start + n + 1) * tr->channels + ch];
                 }
                 uint8_t lo = mo_ima_compress(c, s0);
                 uint8_t hi = mo_ima_compress(c, s1);
@@ -398,16 +407,33 @@ static int encode_adpcm_blocks(MoMuxContext *mo, uint8_t *out, int subframes)
     }
 
     int consumed_samples = subframes * WII_ADPCM_SAMPLES_PER_BLOCK;
-    if (consumed_samples >= mo->pcm_samples) {
-        mo->pcm_samples = 0;
+    if (consumed_samples >= tr->pcm_samples) {
+        tr->pcm_samples = 0;
     } else {
-        int remaining = mo->pcm_samples - consumed_samples;
-        memmove(mo->pcm_buf,
-                mo->pcm_buf + consumed_samples * mo->channels,
-                (size_t)remaining * mo->channels * sizeof(int16_t));
-        mo->pcm_samples = remaining;
+        int remaining = tr->pcm_samples - consumed_samples;
+        memmove(tr->pcm_buf,
+                tr->pcm_buf + consumed_samples * tr->channels,
+                (size_t)remaining * tr->channels * sizeof(int16_t));
+        tr->pcm_samples = remaining;
     }
+
     return written;
+}
+
+static int encode_adpcm_blocks(MoMuxContext *mo, uint8_t *out, int subframes)
+{
+    MoTrackContext tr;
+    tr.channels = mo->channels;
+    tr.pcm_buf = mo->pcm_buf;
+    tr.pcm_samples = mo->pcm_samples;
+    tr.pcm_capacity = mo->pcm_capacity;
+    tr.adpcm[0] = mo->adpcm[0];
+    tr.adpcm[1] = mo->adpcm[1];
+    int ret = encode_adpcm_blocks_track(&tr, out, subframes);
+    mo->pcm_samples = tr.pcm_samples;
+    mo->adpcm[0] = tr.adpcm[0];
+    mo->adpcm[1] = tr.adpcm[1];
+    return ret;
 }
 
 static int mo_write_header(AVFormatContext *s)
@@ -418,14 +444,18 @@ static int mo_write_header(AVFormatContext *s)
     mo->first_video_written = 0;
 
     int no_audio = (mo->audio_codec == 4);
+    int num_audio_streams = 0;
+    for (unsigned int i = 1; i < s->nb_streams; i++) {
+        if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+            num_audio_streams++;
+    }
+    mo->num_tracks = num_audio_streams;
     int min_streams = no_audio ? 1 : 2;
 
-    if (s->nb_streams < min_streams || s->nb_streams > 2) {
-        av_log(s, AV_LOG_ERROR, "Exactly %s stream%s (video%s) %s required!\n",
+    if (s->nb_streams < min_streams || (no_audio && num_audio_streams > 0)) {
+        av_log(s, AV_LOG_ERROR, "At least %s stream%s required!\n",
                no_audio ? "one" : "two",
-               no_audio ? "" : "s",
-               no_audio ? "" : " + audio",
-               no_audio ? "is" : "are");
+               no_audio ? "" : "s");
         return AVERROR(EINVAL);
     }
 
