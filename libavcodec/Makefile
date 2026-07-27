@@ -551,6 +551,7 @@ OBJS-$(CONFIG_MOBICLIP_DECODER)        += mobiclip.o
 OBJS-$(CONFIG_RVID_DECODER)            += rvid.o
 OBJS-$(CONFIG_RVID_ENCODER)            += rvid.o elbg.o
 OBJS-$(CONFIG_VX_DECODER)     += vx.o
+OBJS-$(CONFIG_HVQM4_DECODER)           += hvqm4.o
 OBJS-$(CONFIG_VX_ENCODER)     += vx_enc.o
 OBJS-$(CONFIG_MOTIONPIXELS_DECODER)    += motionpixels.o
 OBJS-$(CONFIG_MOVTEXT_DECODER)         += movtextdec.o ass.o

@@ -13,6 +13,24 @@ such as audio, video, subtitles and related metadata.
 * `libswresample` implements audio mixing and resampling routines.
 * `libswscale` implements color conversion and scaling routines.
 
+| Format | Container | Platform | Encode | Decode |
+|--------|-----------|----------|--------|--------|
+| MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
+| MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
+| MODS | `.mods` | Nintendo DS | ✅ | ✅ |
+| MO | `.mo` | Nintendo Wii | ✅ | ✅ |
+| VX | `.vx` | Nintendo DS | ✅ | ✅ |
+| THP | `.thp` | GameCube / Wii | ✅ | ✅ |
+| RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
+| HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ➖ | ✅ |
+| TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ➖ | ✅ |
+
+Decode-only inputs (HVQM4, TiVo) can be transcoded into any of the encodable
+formats above, or previewed with `encode.py decode <file>`. Series-3 TiVo
+TyStreams (and MFS VideoClip resources) are handled through the bundled
+[`s3tots`](tools/s3tots) tool, which losslessly rewraps them to MPEG-2 TS
+before FFmpeg reads them.
+
 ## Tools
 
 * [ffmpeg](https://ffmpeg.org/ffmpeg.html) is a command line toolbox to
