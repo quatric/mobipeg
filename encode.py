@@ -241,9 +241,7 @@ def main():
     parser.add_argument("--mobi-subme", type=int, default=int(os.environ.get("MOBI_SUBME", 2)), help="Subpel motion estimation refinement quality level (default 2).")
     parser.add_argument("--mobi-intra-only", dest="mobi_intra_only", action="store_true", help="Force every frame to be encoded as an I-frame (keyframe only).")
     parser.add_argument("--mobi-skip", type=int, default=int(os.environ.get("MOBI_SKIP", 512)), help="Macroblock skip decision error threshold (default 512).")
-    parser.add_argument("--pass", dest="pass_num", type=int, choices=[0, 1, 2], default=0, help="Specify encoding pass number for 2-pass encoding (1 or 2)")
-    parser.add_argument("--2pass", dest="two_pass", action="store_true", help="Perform automated 2-pass VBR/CBR encoding (runs pass 1 then pass 2)")
-    parser.add_argument("--bitrate", "-b", dest="bitrate", default="2000k", help="Target video bitrate for 2-pass VBR encoding (default 2000k)")
+    parser.add_argument("--hq", "--highest-quality", dest="highest_quality", action="store_true", help="Use highest quality encoding settings (QP 12, MobiClip QYX 0, DZ 1, Subme 7, Skip 0)")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
 
     parsed = parser.parse_args()
@@ -265,6 +263,18 @@ def main():
     rvid_no_compress = parsed.rvid_no_compress
     rvid_interlaced = parsed.rvid_interlaced
     rvid_no_dither = parsed.rvid_no_dither
+    if parsed.highest_quality:
+        if parsed.quantizer == 0:
+            parsed.quantizer = 12
+        if parsed.mobi_qyx == 1:
+            parsed.mobi_qyx = 0
+        if parsed.mobi_dz == 5:
+            parsed.mobi_dz = 1
+        if parsed.mobi_subme == 2:
+            parsed.mobi_subme = 7
+        if parsed.mobi_skip == 512:
+            parsed.mobi_skip = 0
+
     if parsed.quantizer > 0:
         os.environ["QUANT"] = str(parsed.quantizer)
         os.environ["QP"] = str(parsed.quantizer)
@@ -464,9 +474,7 @@ def main():
             enc_opts.extend(["-sc_threshold", "0"])
     elif fmt in ["mo", "moflex", "moflex3d"]:
         enc_opts.extend(["-mobiclip", "1"])
-        if parsed.two_pass or parsed.pass_num > 0:
-            enc_opts.extend(["-b:v", parsed.bitrate, "-x264opts", "no-mbtree=1"])
-        elif vx_quant > 0:
+        if vx_quant > 0:
             enc_opts.extend(["-qp", str(vx_quant)])
 
         # Evenly-spaced keyframes for the Wii mobiclip formats. mo output is
@@ -581,20 +589,9 @@ def main():
 
     fps_disp = f", {fps_filter}" if fps_filter else ""
     scale_disp = scale if scale else "source"
-    pass_file = os.path.join(parsed.outdir or ".", "mobiclip_2pass.log")
 
-    if parsed.two_pass:
-        print(f">> 2-pass encoding  {inp}  -> {container}  (Pass 1/2)")
-        cmd_p1 = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + ["-pass", "1", "-passlogfile", pass_file, container]
-        run_cmd(cmd_p1) or sys.exit(1)
-        print(f">> 2-pass encoding  {inp}  -> {container}  (Pass 2/2)")
-        cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + ["-pass", "2", "-passlogfile", pass_file, container]
-        run_cmd(cmd) or sys.exit(1)
-    else:
-        if parsed.pass_num > 0:
-            enc_opts.extend(["-pass", str(parsed.pass_num), "-passlogfile", pass_file])
-        cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + [container]
-        run_cmd(cmd) or sys.exit(1)
+    cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + [container]
+    run_cmd(cmd) or sys.exit(1)
     
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
