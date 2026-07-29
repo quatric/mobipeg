@@ -107,7 +107,6 @@ static int ty_probe(const AVProbeData *p)
 
     for (i = 0; i + 12 < p->buf_size; i += CHUNK_SIZE) {
         if (AV_RB32(p->buf + i) == TIVO_PES_FILEID &&
-            AV_RB32(p->buf + i + 4) == 0x02 &&
             AV_RB32(p->buf + i + 8) == CHUNK_SIZE) {
             return AVPROBE_SCORE_MAX;
         }
@@ -224,8 +223,8 @@ static int analyze_chunk(AVFormatContext *s, const uint8_t *chunk)
         ff_dlog(s, "detected Series 1 Tivo\n");
         ty->tivo_series = TIVO_SERIES1;
         ty->pes_length = SERIES1_PES_LENGTH;
-    } else if (num_be0 > 0) {
-        ff_dlog(s, "detected Series 2 Tivo\n");
+    } else {
+        ff_dlog(s, "detected Series 2/3 Tivo\n");
         ty->tivo_series = TIVO_SERIES2;
         ty->pes_length = SERIES2_PES_LENGTH;
     }
