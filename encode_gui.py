@@ -182,46 +182,46 @@ class EncodeGUI(tk.Tk):
             variable=self.enc_roundtrip_var)
         self.enc_roundtrip_chk.grid(row=13, column=1, sticky="w", padx=5, pady=2)
 
-        self.enc_2pass_var = tk.BooleanVar(value=False)
-        self.enc_2pass_chk = ttk.Checkbutton(
+        self.enc_hq_var = tk.BooleanVar(value=False)
+        self.enc_hq_chk = ttk.Checkbutton(
             self.encode_frame,
-            text="Enable 2-Pass VBR/CBR Encoding",
-            variable=self.enc_2pass_var)
-        self.enc_2pass_chk.grid(row=13, column=2, sticky="w", padx=5, pady=2)
+            text="Use Highest Quality (Largest Filesize)",
+            variable=self.enc_hq_var)
+        self.enc_hq_chk.grid(row=14, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_rvid_nocompress_var = tk.BooleanVar(value=False)
         self.enc_rvid_nocompress_chk = ttk.Checkbutton(
             self.encode_frame,
             text="RVID: Raw 16bpp (no LZ10 compression)",
             variable=self.enc_rvid_nocompress_var)
-        self.enc_rvid_nocompress_chk.grid(row=14, column=1, sticky="w", padx=5, pady=2)
+        self.enc_rvid_nocompress_chk.grid(row=15, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_rvid_interlaced_var = tk.BooleanVar(value=False)
         self.enc_rvid_interlaced_chk = ttk.Checkbutton(
             self.encode_frame,
             text="RVID: Interlaced (one field per frame)",
             variable=self.enc_rvid_interlaced_var)
-        self.enc_rvid_interlaced_chk.grid(row=15, column=1, sticky="w", padx=5, pady=2)
+        self.enc_rvid_interlaced_chk.grid(row=16, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_rvid_nodither_var = tk.BooleanVar(value=False)
         self.enc_rvid_nodither_chk = ttk.Checkbutton(
             self.encode_frame,
             text="RVID: Disable 16bpp dithering",
             variable=self.enc_rvid_nodither_var)
-        self.enc_rvid_nodither_chk.grid(row=16, column=1, sticky="w", padx=5, pady=2)
+        self.enc_rvid_nodither_chk.grid(row=17, column=1, sticky="w", padx=5, pady=2)
 
-        # Row 17: Toggle Advanced Options
+        # Row 18: Toggle Advanced Options
         self.enc_adv_toggle_var = tk.BooleanVar(value=False)
         self.enc_adv_toggle_chk = ttk.Checkbutton(
             self.encode_frame,
             text="⚙ Show Advanced MobiClip Encoder Options (MOBI_*)",
             variable=self.enc_adv_toggle_var,
             command=self.on_toggle_advanced)
-        self.enc_adv_toggle_chk.grid(row=17, column=1, sticky="w", padx=5, pady=4)
+        self.enc_adv_toggle_chk.grid(row=18, column=1, sticky="w", padx=5, pady=4)
 
-        # Row 18: Advanced Options Frame
+        # Row 19: Advanced Options Frame
         self.enc_adv_frame = ttk.LabelFrame(self.encode_frame, text="Advanced MobiClip Tuning", padding=8)
-        self.enc_adv_frame.grid(row=18, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        self.enc_adv_frame.grid(row=19, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         self.enc_adv_frame.columnconfigure(1, weight=1)
 
         # MOBI_QYX
@@ -405,8 +405,8 @@ class EncodeGUI(tk.Tk):
                 cmd.extend(["--keyframes", kf])
         if self.enc_roundtrip_var.get():
             cmd.append("--roundtrip")
-        if self.enc_2pass_var.get():
-            cmd.append("--2pass")
+        if self.enc_hq_var.get():
+            cmd.append("--hq")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
             cmd.append("--fast-audio")
         if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "thp"):
