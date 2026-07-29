@@ -85,34 +85,8 @@ def input_fmt(path):
     return []
 
 
-def s3tots_bin():
-    """Path to the bundled s3tots binary for this platform, or None."""
-    base = os.path.dirname(os.path.abspath(__file__))
-    if getattr(sys, 'frozen', False):
-        base = sys._MEIPASS
-    d = os.path.join(base, "tools", "s3tots")
-    if sys.platform == "darwin":
-        p = os.path.join(d, "s3tots-macos")
-    elif sys.platform.startswith("linux"):
-        p = os.path.join(d, "s3tots-linux-x86_64")
-    else:
-        return None
-    return p if os.path.isfile(p) else None
-
-
 def preprocess_input(inp, outdir):
-    """Transcode-source shim for container formats ffmpeg can't demux directly.
-
-    TiVo TyStreams (.ty/.ty+/.tmf) — including Series-3 recordings and MFS
-    VideoClip resources — are MPEG-2 wrapped in TiVo chunks. FFmpeg's built-in
-    `ty` demuxer only handles Series-1/2, so we run the bundled s3tots tool to
-    losslessly convert any TyStream to a standard MPEG-2 transport stream first,
-    then hand that .ts to ffmpeg. Returns the path ffmpeg should actually open
-    (the original path unchanged for every other input type).
-    """
-    ext = os.path.splitext(inp)[1].lower()
-    if ext in [".ty", ".ty+", ".tmf"]:
-        return inp
+    """Transcode-source shim for input files (returns input path unchanged)."""
     return inp
 
 
