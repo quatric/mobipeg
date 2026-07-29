@@ -1796,6 +1796,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
+        .id        = AV_CODEC_ID_FASTVIDEO,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "fastvideo",
+        .long_name = NULL_IF_CONFIG_SMALL("FastVideoDS Video"),
+        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_PHOTOCD,
         .type      = AVMEDIA_TYPE_VIDEO,
         .name      = "photocd",
