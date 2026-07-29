@@ -186,7 +186,8 @@ class EncodeGUI(tk.Tk):
         self.enc_hq_chk = ttk.Checkbutton(
             self.encode_frame,
             text="Use Highest Quality (Largest Filesize)",
-            variable=self.enc_hq_var)
+            variable=self.enc_hq_var,
+            command=self.on_toggle_hq)
         self.enc_hq_chk.grid(row=14, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_rvid_nocompress_var = tk.BooleanVar(value=False)
@@ -271,7 +272,44 @@ class EncodeGUI(tk.Tk):
         ]
 
         self.enc_input_var.trace_add("write", lambda *a: self.on_input_changed(self.enc_input_var, self.enc_outdir_var))
+        for var in (self.enc_quant_var, self.enc_mobi_qyx_var, self.enc_mobi_dz_var, self.enc_mobi_subme_var, self.enc_mobi_skip_var):
+            var.trace_add("write", self.update_hq_state_from_fields)
         self.on_enc_format_change()
+
+    def on_toggle_hq(self):
+        if self.enc_hq_var.get():
+            self.enc_quant_var.set("12")
+            self.enc_mobi_qyx_var.set("0")
+            self.enc_mobi_dz_var.set("1")
+            self.enc_mobi_subme_var.set("7")
+            self.enc_mobi_skip_var.set("0")
+            fmt = self.formats_map.get(self.enc_fmt_var.get())
+            options = self.audio_options.get(fmt, [])
+            if "pcm" in options:
+                self.enc_audio_var.set("pcm")
+        else:
+            self.enc_quant_var.set("0")
+            self.enc_mobi_qyx_var.set("1")
+            self.enc_mobi_dz_var.set("5")
+            self.enc_mobi_subme_var.set("2")
+            self.enc_mobi_skip_var.set("512")
+            fmt = self.formats_map.get(self.enc_fmt_var.get())
+            options = self.audio_options.get(fmt, [])
+            if "adpcm" in options:
+                self.enc_audio_var.set("adpcm")
+
+    def update_hq_state_from_fields(self, *args):
+        is_hq = (
+            self.enc_quant_var.get().strip() == "12" and
+            self.enc_mobi_qyx_var.get().strip() == "0" and
+            self.enc_mobi_dz_var.get().strip() == "1" and
+            self.enc_mobi_subme_var.get().strip() == "7" and
+            self.enc_mobi_skip_var.get().strip() == "0"
+        )
+        if is_hq and not self.enc_hq_var.get():
+            self.enc_hq_var.set(True)
+        elif not is_hq and self.enc_hq_var.get():
+            self.enc_hq_var.set(False)
 
     def setup_decode_tab(self):
         self.decode_frame.columnconfigure(1, weight=1)
