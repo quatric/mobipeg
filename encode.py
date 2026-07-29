@@ -111,23 +111,9 @@ def preprocess_input(inp, outdir):
     (the original path unchanged for every other input type).
     """
     ext = os.path.splitext(inp)[1].lower()
-    if ext not in (".ty", ".ty+", ".tmf"):
+    if ext in [".ty", ".ty+", ".tmf"]:
         return inp
-    tool = s3tots_bin()
-    if not tool:
-        print(f"   (warning: no s3tots binary for {sys.platform}; passing {ext} to ffmpeg as-is)")
-        return inp
-    os.makedirs(outdir, exist_ok=True)
-    ts = os.path.join(outdir, os.path.splitext(os.path.basename(inp))[0] + ".ty.ts")
-    print(f">> TiVo TyStream: s3tots {os.path.basename(inp)} -> {os.path.basename(ts)}")
-    r = subprocess.run([tool, "-y", "-i", inp, "-o", ts],
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in (r.stdout or "").splitlines():
-        print("   " + line)
-    if r.returncode != 0 or not os.path.isfile(ts) or os.path.getsize(ts) == 0:
-        print("   (s3tots failed; falling back to ffmpeg's ty demuxer)")
-        return inp
-    return ts
+    return inp
 
 
 def probe_duration(inp):
