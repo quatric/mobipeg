@@ -394,6 +394,7 @@ OBJS-$(CONFIG_VX_MUXER)         += vxenc.o
 OBJS-$(CONFIG_MODS_DEMUXER)              += mods.o
 OBJS-$(CONFIG_MODS_MUXER)                += modsenc.o
 OBJS-$(CONFIG_RVID_DEMUXER)              += rvid.o
+OBJS-$(CONFIG_FV_DEMUXER)                += fvdec.o
 OBJS-$(CONFIG_HVQM4_DEMUXER)             += hvqm4.o
 OBJS-$(CONFIG_RVID_MUXER)                += rvidenc.o
 OBJS-$(CONFIG_MOFLEX_DEMUXER)            += moflex.o
