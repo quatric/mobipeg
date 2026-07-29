@@ -66,6 +66,8 @@
 /x264-dist/
 /x264-src/
 *.mp4
+*.pyc
+__pycache__/
 .DS_Store
 
 # Bundled 3DS CIA packaging tools (Windows binaries need the *.exe exception)
