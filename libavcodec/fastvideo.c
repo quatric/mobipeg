@@ -28,7 +28,6 @@ static av_cold int fastvideo_decode_init(AVCodecContext *avctx)
 static int fastvideo_decode_frame(AVCodecContext *avctx, AVFrame *frame,
                                   int *got_frame, AVPacket *avpkt)
 {
-    FastVideoContext *s = avctx->priv_data;
     GetBitContext gb;
     int ret, y, x;
 
@@ -40,7 +39,7 @@ static int fastvideo_decode_frame(AVCodecContext *avctx, AVFrame *frame,
 
     init_get_bits8(&gb, avpkt->data, avpkt->size);
 
-    frame->key_frame = 1;
+    frame->flags |= AV_FRAME_FLAG_KEY;
     frame->pict_type = AV_PICTURE_TYPE_I;
 
     /* Decode frame pixel data into RGB555 output buffer */
@@ -57,11 +56,11 @@ static int fastvideo_decode_frame(AVCodecContext *avctx, AVFrame *frame,
 
 const FFCodec ff_fastvideo_decoder = {
     .p.name         = "fastvideo",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("FastVideoDS Video"),
+    CODEC_LONG_NAME("FastVideoDS Video"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_FASTVIDEO,
     .priv_data_size = sizeof(FastVideoContext),
     .init           = fastvideo_decode_init,
-    .FF_CODEC_DECB_TYPE = fastvideo_decode_frame,
+    FF_CODEC_DECODE_CB(fastvideo_decode_frame),
     .p.capabilities = AV_CODEC_CAP_DR1,
 };
