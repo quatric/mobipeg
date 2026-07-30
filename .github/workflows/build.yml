@@ -559,6 +559,7 @@ jobs:
           - target: linux-x86_64
             os: ubuntu-22.04
             ext: tar.gz
+            python_arch: x64
 
           - target: linux-x86
             os: ubuntu-22.04
@@ -568,6 +569,7 @@ jobs:
           - target: linux-arm64
             os: ubuntu-22.04-arm
             ext: tar.gz
+            python_arch: arm64
 
           - target: linux-armhf
             os: ubuntu-22.04
@@ -592,6 +594,7 @@ jobs:
           - target: macos-universal
             os: macos-14
             ext: tar.gz
+            python_arch: x64
 
     runs-on: ${{ matrix.os }}
 
@@ -607,7 +610,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          architecture: ${{ matrix.python_arch || 'x64' }}
+          architecture: ${{ matrix.python_arch }}
 
       - name: Download FFmpeg artifact
         uses: actions/download-artifact@v4
@@ -633,7 +636,8 @@ jobs:
             -v "$PWD:/work" -w /work \
             python:3.12-slim bash -c "
               apt-get update -qq
-              apt-get install -y --no-install-recommends python3-tk binutils || true
+              apt-get install -y --no-install-recommends \
+                python3-tk binutils build-essential zlib1g-dev libjpeg-dev
               pip install --quiet pyinstaller Pillow
               pyinstaller --name mobipeg-gui --windowed \
                 --add-binary artifact/ffmpeg:. \
