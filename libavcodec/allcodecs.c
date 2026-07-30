@@ -203,7 +203,6 @@ extern const FFCodec ff_mjpegb_decoder;
 extern const FFCodec ff_mmvideo_decoder;
 extern const FFCodec ff_mobiclip_decoder;
 extern const FFCodec ff_fastvideo_decoder;
-extern const FFCodec ff_fastvideo_encoder;
 extern const FFCodec ff_rvid_decoder;
 extern const FFCodec ff_rvid_encoder;
 extern const FFCodec ff_vx_decoder;
