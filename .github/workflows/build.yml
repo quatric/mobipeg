@@ -84,12 +84,21 @@ jobs:
           MULTILIB="${{ matrix.foreign_arch == 'i386' && 'gcc-multilib g++-multilib' || '' }}"
 
           sudo apt-get remove -y "libx264-dev*" || true
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config nasm \
-            libc6-dev${FOREIGN} \
-            zlib1g-dev${FOREIGN} \
-            ${CROSS_CC} \
-            ${MULTILIB}
+          # ports.ubuntu.com occasionally lags the primary archive by a few
+          # minutes, which can make a foreign-arch Multi-Arch:same package
+          # (e.g. libssl3:arm64) transiently unresolvable. Retry with a
+          # fresh index before giving up.
+          for attempt in 1 2 3; do
+            sudo apt-get install -y --no-install-recommends \
+              build-essential pkg-config nasm \
+              libc6-dev${FOREIGN} \
+              zlib1g-dev${FOREIGN} \
+              ${CROSS_CC} \
+              ${MULTILIB} && break
+            echo "apt-get install failed (attempt ${attempt}), retrying after apt-get update..."
+            sleep 15
+            sudo apt-get update -qq
+          done
 
       - name: Set up pkg-config for cross target
         if: matrix.foreign_arch != ''
