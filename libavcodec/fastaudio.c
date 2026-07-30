@@ -101,10 +101,6 @@ static int read_bits(int bits, int *ppos, unsigned *src)
 
 static const uint8_t bits[8] = { 6, 6, 5, 5, 4, 0, 3, 3, };
 
-static void set_sample(int i, int j, int v, float *result, int *pads, float value)
-{
-    result[i * 64 + pads[i] + j * 3] = value * (2 * v - 7);
-}
 
 static int fastaudio_decode(AVCodecContext *avctx, AVFrame *frame,
                             int *got_frame, AVPacket *pkt)
