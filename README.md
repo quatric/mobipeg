@@ -50,6 +50,10 @@ before FFmpeg reads them.
 
 ## Documentation
 
+For full technical documentation of the MobiClip formats (video/audio codecs,
+container layouts, and platform requirements across the DS/3DS/Wii), see
+[The Mobiclip Formats](https://gist.github.com/quatric/3e2f0caa5c22a9a8b24d9cf1ffdfe860).
+
 The offline documentation is available in the **doc/** directory.
 
 The online documentation is available in the main [website](https://ffmpeg.org)
