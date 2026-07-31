@@ -61,6 +61,22 @@ def probe(path: str) -> SourceRef:
         if rate and rate != "0/0":
             frac = Fraction(rate)
             ref.fps_num, ref.fps_den = frac.numerator, frac.denominator
+        if v.get("duration") is not None:
+            ref.video_duration_s = float(v["duration"])
+        if v.get("nb_frames") is not None:
+            # The stream's own reported frame count -- this is what an
+            # expected-frame-count check must compare against, NOT
+            # duration_s * fps (see SourceRef's docstring: the container
+            # duration reflects whichever stream -- often audio -- runs
+            # longest, not the video stream specifically).
+            ref.video_frame_count = int(v["nb_frames"])
+        elif ref.video_duration_s and ref.fps_num and ref.fps_den:
+            # Fallback only: some containers don't report nb_frames without
+            # a full -count_frames decode (not done here for speed). This is
+            # a computed estimate from the video stream's OWN duration
+            # (still more accurate than the format-level duration), not a
+            # ground truth -- callers should treat it as approximate.
+            ref.video_frame_count = round(ref.video_duration_s * ref.fps_num / ref.fps_den)
 
     if not video_indices:
         raise ProbeError(f"no video stream found in {path}")

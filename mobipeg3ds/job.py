@@ -26,9 +26,21 @@ Target = Literal["moflex", "moflex3d"]
 
 @dataclass
 class SourceRef:
-    """What was probed about the input file. Populated by mobipeg3ds.probe."""
+    """What was probed about the input file. Populated by mobipeg3ds.probe.
+
+    duration_s is the CONTAINER-level duration (ffprobe's format.duration) --
+    it reflects whichever stream runs longest, which is very often the audio
+    stream, not the video stream. It must NOT be used to estimate an expected
+    video frame count (duration_s * fps): a real case in this project's own
+    testing showed this producing 1868.76 against an actual, exact,
+    zero-frame-loss video_frame_count of 1866 (the audio ran ~0.09s longer
+    than the video). Use video_frame_count for anything frame-accounting
+    related; duration_s is display-only.
+    """
     path: str
     duration_s: Optional[float] = None
+    video_duration_s: Optional[float] = None
+    video_frame_count: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
     fps_num: Optional[int] = None

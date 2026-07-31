@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self.job = EncodeJob(output=OutputSettings(path=""))
         self._encode_process: QProcess | None = None
         self._encode_started_at: float | None = None
+        self._user_cancelled: bool = False
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -130,9 +131,15 @@ class MainWindow(QMainWindow):
         self.source_path_edit.setText(path)
         lines = [
             f"path:          {src.path}",
-            f"duration:      {src.duration_s:.3f}s" if src.duration_s else "duration:      unknown",
+            f"duration:      {src.duration_s:.3f}s (container -- reflects the longest "
+            f"stream, often audio, not necessarily the video frame count)"
+            if src.duration_s else "duration:      unknown",
             f"resolution:    {src.width}x{src.height}" if src.width else "resolution:    unknown",
         ]
+        if src.video_duration_s:
+            lines.append(f"video duration:{src.video_duration_s:.3f}s")
+        if src.video_frame_count is not None:
+            lines.append(f"video frames:  {src.video_frame_count}")
         if src.fps_num and src.fps_den:
             lines.append(f"frame rate:    {src.fps_num}/{src.fps_den} ({src.fps_num/src.fps_den:.3f} fps)")
         lines.append(f"video streams: {src.video_stream_indices}")
@@ -458,6 +465,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_encode(self) -> None:
         if self._encode_process is not None:
+            self._user_cancelled = True
             self._encode_process.kill()
 
     def _encode_finished(self, exit_code: int, _status) -> None:
@@ -468,13 +476,21 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
 
         if exit_code != 0:
-            self.status_label.setText(f"Encode failed (exit code {exit_code}).")
             partial = self.job.partial_output_path
+            if self._user_cancelled:
+                msg = "Cancelled."
+            else:
+                msg = f"Encode failed (exit code {exit_code})."
             if os.path.exists(partial):
-                try:
-                    os.remove(partial)
-                except OSError:
-                    pass
+                # Never auto-delete .partial -- on cancellation this is a
+                # hard requirement (the partial must remain and must never
+                # be presented as complete); on a genuine failure it's also
+                # useful to inspect rather than silently discard. The final
+                # output path is never touched here either way -- only an
+                # explicit successful rename (below) ever produces it.
+                msg += f" Partial file retained at {partial}"
+            self.status_label.setText(msg)
+            self._user_cancelled = False
             return
 
         try:
@@ -484,11 +500,13 @@ class MainWindow(QMainWindow):
             return
 
         self.status_label.setText("Encode complete. Verifying...")
-        result = verify(self.job.output.path, check_decode=True)
+        expected = self.job.source.video_frame_count if self.job.source else None
+        result = verify(self.job.output.path, check_decode=True, expected_frame_count=expected)
         summary = (
             f"exists={result.exists}  size={result.size_bytes} bytes\n"
             f"sha256={result.sha256}\n"
-            f"decodes_cleanly={result.decodes_cleanly}  frames={result.decoded_frame_count}\n"
+            f"decodes_cleanly={result.decodes_cleanly}  frames={result.decoded_frame_count}  "
+            f"expected={result.expected_frame_count}  matches={result.frame_count_matches}\n"
         )
         if result.decode_error:
             summary += f"decode_error={result.decode_error}\n"

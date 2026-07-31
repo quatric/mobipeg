@@ -23,10 +23,24 @@ class VerificationResult:
     size_bytes: int | None = None
     decodes_cleanly: bool | None = None
     decoded_frame_count: int | None = None
+    expected_frame_count: int | None = None
     decode_error: str | None = None
 
     @property
+    def frame_count_matches(self) -> bool | None:
+        """None if either count is unknown -- an unknown expectation must
+        never be reported as a pass or a fail. Compares against the
+        source's own video_frame_count (nb_frames), NOT a duration*fps
+        estimate -- see SourceRef's docstring for why that estimate can be
+        off by several frames without any actual frame loss."""
+        if self.expected_frame_count is None or self.decoded_frame_count is None:
+            return None
+        return self.decoded_frame_count == self.expected_frame_count
+
+    @property
     def passed(self) -> bool:
+        if self.frame_count_matches is False:
+            return False
         return self.exists and (self.decodes_cleanly is not False)
 
 
@@ -38,7 +52,7 @@ def sha256_of(path: str) -> str:
     return h.hexdigest()
 
 
-def verify(path: str, check_decode: bool = True) -> VerificationResult:
+def verify(path: str, check_decode: bool = True, expected_frame_count: int | None = None) -> VerificationResult:
     p = Path(path)
     if not p.is_file():
         return VerificationResult(exists=False)
@@ -47,6 +61,7 @@ def verify(path: str, check_decode: bool = True) -> VerificationResult:
         exists=True,
         size_bytes=p.stat().st_size,
         sha256=sha256_of(str(p)),
+        expected_frame_count=expected_frame_count,
     )
 
     if not check_decode:

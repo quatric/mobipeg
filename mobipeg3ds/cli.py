@@ -41,7 +41,12 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"path:            {src.path}")
-    print(f"duration:        {src.duration_s:.3f}s" if src.duration_s else "duration:        unknown")
+    print(f"duration:        {src.duration_s:.3f}s (container -- reflects the longest stream, "
+          f"often audio)" if src.duration_s else "duration:        unknown")
+    if src.video_duration_s:
+        print(f"video duration:  {src.video_duration_s:.3f}s")
+    if src.video_frame_count is not None:
+        print(f"video frames:    {src.video_frame_count}")
     print(f"resolution:      {src.width}x{src.height}" if src.width else "resolution:      unknown")
     if src.fps_num and src.fps_den:
         print(f"frame rate:      {src.fps_num}/{src.fps_den} ({src.fps_num/src.fps_den:.3f} fps)")
@@ -100,9 +105,11 @@ def _cmd_encode(args: argparse.Namespace) -> int:
     _os.replace(job.partial_output_path, job.output.path)
 
     if job.verification_policy.software_decode or job.verification_policy.sha256:
-        result = verify(job.output.path, check_decode=job.verification_policy.software_decode)
+        result = verify(job.output.path, check_decode=job.verification_policy.software_decode,
+                         expected_frame_count=job.source.video_frame_count if job.source else None)
         print(f"verify: exists={result.exists} sha256={result.sha256} "
-              f"decodes_cleanly={result.decodes_cleanly} frames={result.decoded_frame_count}")
+              f"decodes_cleanly={result.decodes_cleanly} frames={result.decoded_frame_count} "
+              f"expected_frames={result.expected_frame_count} frame_count_matches={result.frame_count_matches}")
         if not result.passed:
             return 1
     return 0
