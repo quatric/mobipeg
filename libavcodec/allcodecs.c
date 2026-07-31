@@ -207,6 +207,7 @@ extern const FFCodec ff_rvid_decoder;
 extern const FFCodec ff_rvid_encoder;
 extern const FFCodec ff_vx_decoder;
 extern const FFCodec ff_hvqm4_decoder;
+extern const FFCodec ff_hvqm4_encoder;
 extern const FFCodec ff_vx_encoder;
 extern const FFCodec ff_motionpixels_decoder;
 extern const FFCodec ff_mpeg1video_encoder;
