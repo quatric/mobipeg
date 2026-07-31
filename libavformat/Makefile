@@ -628,6 +628,7 @@ OBJS-$(CONFIG_TTA_MUXER)                 += ttaenc.o apetag.o img2.o
 OBJS-$(CONFIG_TTML_MUXER)                += ttmlenc.o
 OBJS-$(CONFIG_TTY_DEMUXER)               += tty.o sauce.o
 OBJS-$(CONFIG_TY_DEMUXER)                += ty.o
+OBJS-$(CONFIG_TY_MUXER)                  += tyenc.o
 OBJS-$(CONFIG_TXD_DEMUXER)               += txd.o
 OBJS-$(CONFIG_UNCODEDFRAMECRC_MUXER)     += uncodedframecrcenc.o framehash.o
 OBJS-$(CONFIG_USM_DEMUXER)               += usmdec.o
