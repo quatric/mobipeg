@@ -1,0 +1,19 @@
+[project]
+name = "mobipeg3ds"
+version = "0.0.1"
+description = "Mobipeg 3DS -- Experimental Preview. A dedicated Nintendo 3DS MOFLEX encoder."
+requires-python = ">=3.10"
+license = { file = "LICENSE.md" }
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+
+[project.scripts]
+mobipeg3ds = "mobipeg3ds.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mobipeg3ds", "mobipeg3ds.gui"]

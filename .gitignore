@@ -64,3 +64,8 @@
 /pyinst_dist/
 /build/
 .DS_Store
+
+# Mobipeg 3DS additions
+__pycache__/
+*.pyc
+.pytest_cache/
