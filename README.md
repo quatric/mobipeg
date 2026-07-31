@@ -23,13 +23,19 @@ such as audio, video, subtitles and related metadata.
 | THP | `.thp` | GameCube / Wii | ✅ | ✅ |
 | RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
 | HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ➖ | ✅ |
-| TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ➖ | ✅ |
+| TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
 
-Decode-only inputs (HVQM4, TiVo) can be transcoded into any of the encodable
+Decode-only inputs (HVQM4) can be transcoded into any of the encodable
 formats above, or previewed with `encode.py decode <file>`. Series-3 TiVo
 TyStreams (and MFS VideoClip resources) are handled through the bundled
 [`s3tots`](tools/s3tots) tool, which losslessly rewraps them to MPEG-2 TS
 before FFmpeg reads them.
+
+TiVo `.ty` encoding (the `ty` muxer, `mpeg2video` + `mp2`/`ac3`) is ported
+from the ["tyffmpeg"](https://repo.mariocube.com/TiVo%20Restore%20Images/_Tools/tyffmpeg.zip)
+encoding library and targets the common Series 2 (Stand-Alone) container
+layout; it requires `--enable-gpl` and does not write `.ty+`'s trailing XML
+metadata block or Series 1/3-specific PES framing.
 
 ## Tools
 
