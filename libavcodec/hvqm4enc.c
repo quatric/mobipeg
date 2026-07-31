@@ -66,10 +66,6 @@
  * table's own fixed-point base exactly. */
 #define HVQ_UNK_SHIFT 12
 
-#ifdef HVQM4ENC_DEBUG_STATS
-int hvqm4_dbg_dc[3], hvqm4_dbg_aot[3], hvqm4_dbg_org[3];
-#endif
-
 /* ------------------------------------------------------------------- */
 /* Bit-exact match for h4m_audio_decode.c's getBit(): the decoder reads
  * 4-byte big-endian words and consumes bits MSB (bit 31) to LSB (bit 0),
@@ -264,10 +260,18 @@ static void huff_emit(HVQBitWriter *w, HVQHuff *h, int sym)
  * plus one terminating in-range symbol, mirroring the decoder's
  * accumulate-until-in-range loop. */
 
+/*
+ * The decoder's accumulate loop keeps reading symbols while the *raw
+ * decoded symbol value itself* satisfies value<=min || value>=max (see
+ * decodeSOvfSym()/decodeUOvfSym()). The continuation marker therefore
+ * must be exactly min or max - not min+1/max-1, which the decoder would
+ * accept as a normal terminating value and stop reading early, instantly
+ * desyncing every symbol read after it in that stream.
+ */
 static void plan_signed_ovf(int value, int min, int max, int *hist)
 {
     while (value >= max || value <= min) {
-        int step = value > 0 ? max - 1 : min + 1;
+        int step = value > 0 ? max : min;
         hist[(uint8_t)step]++;
         value -= step;
     }
@@ -277,7 +281,7 @@ static void plan_signed_ovf(int value, int min, int max, int *hist)
 static void emit_signed_ovf(HVQBitWriter *w, HVQHuff *h, int value, int min, int max)
 {
     while (value >= max || value <= min) {
-        int step = value > 0 ? max - 1 : min + 1;
+        int step = value > 0 ? max : min;
         huff_emit(w, h, (uint8_t)step);
         value -= step;
     }
@@ -287,8 +291,8 @@ static void emit_signed_ovf(HVQBitWriter *w, HVQHuff *h, int value, int min, int
 static void plan_unsigned_ovf(int value, int max, int *hist)
 {
     while (value >= max) {
-        hist[(uint8_t)(max - 1)]++;
-        value -= (max - 1);
+        hist[(uint8_t)max]++;
+        value -= max;
     }
     hist[(uint8_t)value]++;
 }
@@ -296,8 +300,8 @@ static void plan_unsigned_ovf(int value, int max, int *hist)
 static void emit_unsigned_ovf(HVQBitWriter *w, HVQHuff *h, int value, int max)
 {
     while (value >= max) {
-        huff_emit(w, h, (uint8_t)(max - 1));
-        value -= (max - 1);
+        huff_emit(w, h, (uint8_t)max);
+        value -= max;
     }
     huff_emit(w, h, (uint8_t)value);
 }
@@ -359,10 +363,6 @@ static av_cold int hvqm4_encode_init(AVCodecContext *avctx)
         av_log(avctx, AV_LOG_ERROR, "hvqm4: width/height must be multiples of 8\n");
         return AVERROR(EINVAL);
     }
-#ifdef HVQM4ENC_DEBUG_STATS
-    av_log(avctx, AV_LOG_WARNING, "hvqm4 opts: max_bases=%d search_step=%d org_threshold=%d\n",
-           s->max_bases, s->search_step, s->org_threshold);
-#endif
 
     s->width  = avctx->width;
     s->height = avctx->height;
@@ -398,13 +398,6 @@ static av_cold int hvqm4_encode_init(AVCodecContext *avctx)
     avctx->extradata[0] = s->h_samp;
     avctx->extradata[1] = s->v_samp;
 
-#ifdef HVQM4ENC_DEBUG_STATS
-    for (i = 0; i < PLANE_COUNT; i++)
-        av_log(avctx, AV_LOG_WARNING, "plane%d: w=%d h=%d h_blocks=%d v_blocks=%d h_blocks_safe=%d v_blocks_safe=%d\n",
-               i, s->planes[i].w, s->planes[i].h, s->planes[i].h_blocks, s->planes[i].v_blocks,
-               s->planes[i].h_blocks_safe, s->planes[i].v_blocks_safe);
-#endif
-
     return 0;
 }
 
@@ -412,12 +405,6 @@ static av_cold int hvqm4_encode_close(AVCodecContext *avctx)
 {
     HVQM4EncContext *s = avctx->priv_data;
     int i;
-#ifdef HVQM4ENC_DEBUG_STATS
-    av_log(avctx, AV_LOG_WARNING, "hvqm4 stats: Y dc=%d aot=%d org=%d | U dc=%d aot=%d org=%d | V dc=%d aot=%d org=%d\n",
-           hvqm4_dbg_dc[0], hvqm4_dbg_aot[0], hvqm4_dbg_org[0],
-           hvqm4_dbg_dc[1], hvqm4_dbg_aot[1], hvqm4_dbg_org[1],
-           hvqm4_dbg_dc[2], hvqm4_dbg_aot[2], hvqm4_dbg_org[2]);
-#endif
     for (i = 0; i < PLANE_COUNT; i++) {
         av_freep(&s->planes[i].dc);
         av_freep(&s->decisions[i]);
@@ -748,22 +735,8 @@ static void decide_blocks(HVQM4EncContext *s, int plane_idx,
                     err_dc += target[i][j] * target[i][j];
                 }
 
-#ifdef HVQM4ENC_NO_CHROMA_AOT
-            err_aot = search_aot(s, target, plane_idx == 0 ? s->max_bases : 0, bd, result);
-#else
             err_aot = search_aot(s, target, s->max_bases, bd, result);
-#endif
-#ifdef HVQM4ENC_DEBUG_STATS
-            {
-                static int nprinted = 0;
-                if (nprinted < 20 && err_dc > 50 && plane_idx >= 1) {
-                    av_log(NULL, AV_LOG_WARNING, "blk(%d,%d) plane%d err_dc=%d err_aot=%d nb_terms=%d bits0=%04x sym0=%d\n",
-                           x, y, plane_idx, err_dc, err_aot, bd->nb_terms,
-                           bd->nb_terms ? bd->term_bits[0] : 0, bd->nb_terms ? bd->term_sym[0] : -1);
-                    nprinted++;
-                }
-            }
-#endif
+
             if (bd->nb_terms > 0 && err_aot <= err_dc) {
                 bd->type = bd->nb_terms; /* 1..MAX_BASES */
             } else {
@@ -779,22 +752,6 @@ static void decide_blocks(HVQM4EncContext *s, int plane_idx,
                     for (j = 0; j < 4; j++)
                         bd->org[i][j] = b[i * stride + j];
             }
-#ifdef HVQM4ENC_FORCE_ORG
-            bd->type = BLK_ORG;
-            bd->nb_terms = 0;
-            for (i = 0; i < 4; i++)
-                for (j = 0; j < 4; j++)
-                    bd->org[i][j] = b[i * stride + j];
-#endif
-#ifdef HVQM4ENC_FORCE_DC
-            bd->type = BLK_DC;
-            bd->nb_terms = 0;
-#endif
-#ifdef HVQM4ENC_DEBUG_STATS
-            if (bd->type == BLK_DC) hvqm4_dbg_dc[plane_idx]++;
-            else if (bd->type == BLK_ORG) hvqm4_dbg_org[plane_idx]++;
-            else hvqm4_dbg_aot[plane_idx]++;
-#endif
         }
     }
 }
@@ -833,10 +790,6 @@ static void walk_dc_plane(HVQM4EncContext *s, int plane_idx,
             int actual = p->dc[blk_off(p, x, y)];
             int delta = actual - predicted;
 
-#ifdef HVQM4ENC_NO_DC_RLE
-            if (hist_dc) plan_signed_ovf(delta, DC_MIN, DC_MAX, hist_dc);
-            else         emit_signed_ovf(w_dc, huff_dc, delta, DC_MIN, DC_MAX);
-#else
             if (delta == 0) {
                 run++;
             } else {
@@ -848,7 +801,6 @@ static void walk_dc_plane(HVQM4EncContext *s, int plane_idx,
                 if (hist_dc) plan_signed_ovf(delta, DC_MIN, DC_MAX, hist_dc);
                 else         emit_signed_ovf(w_dc, huff_dc, delta, DC_MIN, DC_MAX);
             }
-#endif
             left_value = actual;
         }
     }
@@ -1025,16 +977,6 @@ static uint8_t *pack_ipic(HVQM4EncContext *s, FrameStreams *fs, int *out_size)
         offsets[i] = data_size;
         data_size += 4 + streams[i]->size; /* size field + payload */
     }
-#ifdef HVQM4ENC_DEBUG_STATS
-    {
-        static int printed = 0;
-        if (!printed) {
-            printed = 1;
-            for (i = 0; i < 16; i++)
-                av_log(NULL, AV_LOG_WARNING, "stream[%d] size=%d offset=%u\n", i, streams[i]->size, offsets[i]);
-        }
-    }
-#endif
 
     *out_size = header_size + data_size + 4 /* overread slack */;
     buf = av_mallocz(*out_size);
@@ -1077,24 +1019,12 @@ static int hvqm4_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     if (!frame)
         return 0;
 
-#ifdef HVQM4ENC_SWAP_UV
-    {
-        uint8_t *swapped[3] = { frame->data[0], frame->data[2], frame->data[1] };
-        int swapped_ls[3] = { frame->linesize[0], frame->linesize[2], frame->linesize[1] };
-        for (i = 0; i < PLANE_COUNT; i++)
-            compute_dc(&s->planes[i], swapped[i], swapped_ls[i]);
-        make_nest(s);
-        for (i = 0; i < PLANE_COUNT; i++)
-            decide_blocks(s, i, swapped[i], swapped_ls[i]);
-    }
-#else
     for (i = 0; i < PLANE_COUNT; i++)
         compute_dc(&s->planes[i], frame->data[i], frame->linesize[i]);
     make_nest(s);
 
     for (i = 0; i < PLANE_COUNT; i++)
         decide_blocks(s, i, frame->data[i], frame->linesize[i]);
-#endif
 
     if ((ret = build_frame_streams(s, &fs)) < 0)
         return ret;
