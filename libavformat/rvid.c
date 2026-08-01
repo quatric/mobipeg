@@ -81,13 +81,11 @@ static int rvid_read_header(AVFormatContext *s)
     c->snd_right   = AV_RL32(hdr + 0x1C);
     c->compressed  = comp_off != 0;
 
-    if (dual == 2) {
-        av_log(s, AV_LOG_ERROR, "rvid: GBA files are not supported\n");
-        return AVERROR_PATCHWELCOME;
-    }
+    if (dual > 2)
+        return AVERROR_INVALIDDATA;
     if (c->nframes <= 0 || c->vres <= 0 || c->vres > 255)
         return AVERROR_INVALIDDATA;
-    c->width = 256;
+    c->width = dual == 2 ? 240 : 256;
     c->file_size = avio_size(pb);
 
     /* frame offset table at 0x200 */
