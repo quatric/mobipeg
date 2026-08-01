@@ -550,6 +550,7 @@ OBJS-$(CONFIG_MLP_ENCODER)             += mlpenc.o mlp.o
 OBJS-$(CONFIG_MMVIDEO_DECODER)         += mmvideo.o
 OBJS-$(CONFIG_MOBICLIP_DECODER)        += mobiclip.o
 OBJS-$(CONFIG_FASTVIDEO_DECODER)       += fastvideo.o
+OBJS-$(CONFIG_FASTVIDEO_ENCODER)       += fastvideo.o
 OBJS-$(CONFIG_RVID_DECODER)            += rvid.o
 OBJS-$(CONFIG_RVID_ENCODER)            += rvid.o elbg.o
 OBJS-$(CONFIG_VX_DECODER)     += vx.o
