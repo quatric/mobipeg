@@ -27,9 +27,11 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "avformat.h"
+#include "avio_internal.h"
 #include "demux.h"
 #include "internal.h"
 #include "mpeg.h"
+#include "mpegts.h"
 
 #define SERIES1_PES_LENGTH  11    /* length of audio PES hdr on S1 */
 #define SERIES2_PES_LENGTH  16    /* length of audio PES hdr on S2 */
@@ -98,17 +100,111 @@ typedef struct TYDemuxContext {
     int             num_recs;         /* number of recs in this chunk */
     int             first_chunk;
 
+    uint8_t        *probe_chunks;      /* replay buffer for pipe inputs */
+    int             probe_chunk_count;
+    int             probe_chunk_index;
+    int             is_tmf;
+
+    MpegTSContext  *mpegts;            /* Series 3 transport stream parser */
+    int             is_series3;
+    int             series3_have_master;
+    int             series3_chunks_left;
+    int             series3_payload_pos;
+    int             series3_payload_size;
+    int             series3_flushed;
+    AVPacket       *series3_packet;
+
     uint8_t         chunk[CHUNK_SIZE];
+    uint8_t         series3_payload[CHUNK_SIZE];
 } TYDemuxContext;
+
+static int ty_read_series3_packet(AVFormatContext *s, AVPacket *pkt);
 
 static int ty_probe(const AVProbeData *p)
 {
     int i;
 
+    if (p->buf_size >= 512 && !memcmp(p->buf + 257, "ustar", 5)) {
+        int pos = 0;
+
+        while (pos + 512 <= p->buf_size &&
+               !memcmp(p->buf + pos + 257, "ustar", 5)) {
+            uint64_t size = 0;
+            int valid = 0;
+
+            for (int j = 0; j < 12; j++) {
+                const int c = p->buf[pos + 124 + j];
+
+                if (c >= '0' && c <= '7') {
+                    size = size * 8 + c - '0';
+                    valid = 1;
+                } else if (c && c != ' ') {
+                    valid = 0;
+                    break;
+                }
+            }
+            if (!valid)
+                break;
+
+            pos += 512;
+            if (strncmp((const char *)p->buf + pos - 512,
+                        "showing.xml", 100))
+                break;
+            pos += FFALIGN(size, 512);
+        }
+
+        if (pos + 12 <= p->buf_size &&
+            AV_RB32(p->buf + pos) == TIVO_PES_FILEID)
+            return AVPROBE_SCORE_MAX;
+        if (av_match_ext(p->filename, "tmf"))
+            return AVPROBE_SCORE_EXTENSION;
+    }
+
     for (i = 0; i + 12 < p->buf_size; i += CHUNK_SIZE) {
         if (AV_RB32(p->buf + i) == TIVO_PES_FILEID &&
             AV_RB32(p->buf + i + 8) == CHUNK_SIZE) {
             return AVPROBE_SCORE_MAX;
+        }
+
+        /* A non-seekable TY stream has no master/index chunks and starts
+         * directly with a payload chunk.  Validate the record table rather
+         * than letting the MPEG audio probe mistake its embedded MP2 data for
+         * a raw elementary stream. */
+        if (i + 4 <= p->buf_size) {
+            const uint8_t *chunk = p->buf + i;
+            const int available = p->buf_size - i;
+            const int num_recs = (chunk[3] & 0x80) ? AV_RL16(chunk)
+                                                   : chunk[0];
+            const int seq_word = AV_RL16(chunk + 2);
+            int recognized = 0;
+            int64_t payload = 0;
+
+            if (num_recs >= 5 && num_recs < (CHUNK_SIZE - 4) / 16 &&
+                4 + 16 * num_recs <= available &&
+                (!(seq_word & 0x8000) || (seq_word & 0x7fff) < num_recs)) {
+                for (int rec = 0; rec < num_recs; rec++) {
+                    const uint8_t *h = chunk + 4 + 16 * rec;
+                    const int rec_type = h[3];
+                    const int subrec_type = h[2] & 0x0f;
+                    int rec_size = 0;
+
+                    if (!(h[0] & 0x80))
+                        rec_size = ((h[0] << 8) | h[1]) << 4 | (h[2] >> 4);
+                    payload += rec_size;
+                    if ((rec_type == VIDEO_ID && subrec_type <= 0x0c) ||
+                        (rec_type == AUDIO_ID &&
+                         (subrec_type == 0x02 || subrec_type == 0x03 ||
+                          subrec_type == 0x04 || subrec_type == 0x09)))
+                        recognized++;
+                }
+                if (recognized >= 5 &&
+                    payload <= CHUNK_SIZE - 4 - 16 * num_recs) {
+                    if (!(seq_word & 0x8000) ||
+                        (chunk[4 + 16 * (seq_word & 0x7fff) + 3] == VIDEO_ID &&
+                         (chunk[4 + 16 * (seq_word & 0x7fff) + 2] & 0x0f) == 0x07))
+                        return AVPROBE_SCORE_MAX - 1;
+                }
+            }
         }
     }
 
@@ -163,6 +259,16 @@ static int find_es_header(const uint8_t *header,
         if (!memcmp(&buffer[count], header, 4))
             return count;
     }
+    return -1;
+}
+
+static int find_next_start_code(const uint8_t *buffer, int start, int size)
+{
+    const int end = FFMIN(size, start + 64);
+
+    for (int i = start; i + 3 < end; i++)
+        if (!buffer[i] && !buffer[i + 1] && buffer[i + 2] == 1)
+            return i;
     return -1;
 }
 
@@ -277,6 +383,67 @@ static int analyze_chunk(AVFormatContext *s, const uint8_t *chunk)
     return 0;
 }
 
+static int tmf_skip(const uint8_t *buf)
+{
+    int skip = 0;
+
+    while (skip + 512 <= CHUNK_SIZE &&
+           !memcmp(buf + skip + 257, "ustar", 5)) {
+        const uint8_t *header = buf + skip;
+        uint64_t size = 0;
+        int valid = 0;
+
+        for (int i = 0; i < 12; i++) {
+            const int c = header[124 + i];
+
+            if (c >= '0' && c <= '7') {
+                size = size * 8 + c - '0';
+                valid = 1;
+            } else if (c && c != ' ') {
+                return AVERROR_INVALIDDATA;
+            }
+        }
+        if (!valid)
+            return AVERROR_INVALIDDATA;
+
+        skip += 512;
+        if (strncmp((const char *)header, "showing.xml", 100))
+            return skip;
+        if (size > CHUNK_SIZE)
+            return AVERROR_INVALIDDATA;
+        if (FFALIGN(size, 512) > CHUNK_SIZE - skip)
+            return AVERROR_INVALIDDATA;
+        skip += FFALIGN(size, 512);
+    }
+
+    return skip;
+}
+
+static int read_source_chunk(AVFormatContext *s, uint8_t *buf)
+{
+    TYDemuxContext *ty = s->priv_data;
+    int ret, skip;
+
+    ret = ffio_read_size(s->pb, buf, CHUNK_SIZE);
+    if (ret < 0)
+        return ret;
+
+    if (!ty->is_tmf && !memcmp(buf + 257, "ustar", 5))
+        ty->is_tmf = 1;
+    if (!ty->is_tmf)
+        return 0;
+
+    skip = tmf_skip(buf);
+    if (skip < 0)
+        return skip;
+    if (!skip)
+        return 0;
+
+    memmove(buf, buf + skip, CHUNK_SIZE - skip);
+    ret = ffio_read_size(s->pb, buf + CHUNK_SIZE - skip, skip);
+    return ret < 0 ? ret : 0;
+}
+
 static int ty_read_header(AVFormatContext *s)
 {
     TYDemuxContext *ty = s->priv_data;
@@ -287,9 +454,23 @@ static int ty_read_header(AVFormatContext *s)
     ty->first_audio_pts = AV_NOPTS_VALUE;
     ty->last_audio_pts = AV_NOPTS_VALUE;
     ty->last_video_pts = AV_NOPTS_VALUE;
+    ty->probe_chunks = av_malloc(CHUNK_PEEK_COUNT * CHUNK_SIZE);
+    if (!ty->probe_chunks)
+        return AVERROR(ENOMEM);
 
     for (i = 0; i < CHUNK_PEEK_COUNT; i++) {
-        avio_read(pb, ty->chunk, CHUNK_SIZE);
+        int read_size = read_source_chunk(s, ty->chunk);
+
+        if (read_size < 0)
+            break;
+        memcpy(ty->probe_chunks + i * CHUNK_SIZE, ty->chunk, CHUNK_SIZE);
+        ty->probe_chunk_count++;
+
+        if (AV_RB32(ty->chunk) == TIVO_PES_FILEID &&
+            AV_RB32(ty->chunk + 4) >= 3) {
+            ty->is_series3 = 1;
+            break;
+        }
 
         ret = analyze_chunk(s, ty->chunk);
         if (ret < 0)
@@ -300,9 +481,24 @@ static int ty_read_header(AVFormatContext *s)
             break;
     }
 
+    if (ty->is_series3) {
+        ty->mpegts = avpriv_mpegts_parse_open(s);
+        if (!ty->mpegts)
+            return AVERROR(ENOMEM);
+        ty->first_chunk = 1;
+
+        ty->series3_packet = av_packet_alloc();
+        if (!ty->series3_packet)
+            return AVERROR(ENOMEM);
+        ret = ty_read_series3_packet(s, ty->series3_packet);
+        if (ret < 0)
+            return ret;
+        return 0;
+    }
+
     if (ty->tivo_series == TIVO_SERIES_UNKNOWN ||
-        ty->audio_type == TIVO_AUDIO_UNKNOWN ||
-        ty->tivo_type == TIVO_TYPE_UNKNOWN)
+        (ty->audio_type != TIVO_AUDIO_UNKNOWN &&
+         ty->tivo_type == TIVO_TYPE_UNKNOWN))
         return AVERROR_INVALIDDATA;
 
     st = avformat_new_stream(s, NULL);
@@ -313,41 +509,70 @@ static int ty_read_header(AVFormatContext *s)
     ffstream(st)->need_parsing = AVSTREAM_PARSE_FULL_RAW;
     avpriv_set_pts_info(st, 64, 1, 90000);
 
-    ast = avformat_new_stream(s, NULL);
-    if (!ast)
-        return AVERROR(ENOMEM);
-    ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+    if (ty->audio_type != TIVO_AUDIO_UNKNOWN) {
+        ast = avformat_new_stream(s, NULL);
+        if (!ast)
+            return AVERROR(ENOMEM);
+        ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
 
-    if (ty->audio_type == TIVO_AUDIO_MPEG) {
-        ast->codecpar->codec_id = AV_CODEC_ID_MP2;
-        ffstream(ast)->need_parsing = AVSTREAM_PARSE_FULL_RAW;
-    } else {
-        ast->codecpar->codec_id = AV_CODEC_ID_AC3;
+        if (ty->audio_type == TIVO_AUDIO_MPEG) {
+            ast->codecpar->codec_id = AV_CODEC_ID_MP2;
+            ffstream(ast)->need_parsing = AVSTREAM_PARSE_FULL_RAW;
+        } else {
+            ast->codecpar->codec_id = AV_CODEC_ID_AC3;
+        }
+        avpriv_set_pts_info(ast, 64, 1, 90000);
     }
-    avpriv_set_pts_info(ast, 64, 1, 90000);
 
     ty->first_chunk = 1;
 
-    avio_seek(pb, 0, SEEK_SET);
+    if (pb->seekable & AVIO_SEEKABLE_NORMAL) {
+        if (avio_seek(pb, 0, SEEK_SET) < 0)
+            return AVERROR(EIO);
+        av_freep(&ty->probe_chunks);
+        ty->probe_chunk_count = 0;
+    }
 
+    return 0;
+}
+
+static int read_raw_chunk(AVFormatContext *s)
+{
+    TYDemuxContext *ty = s->priv_data;
+    int read_size;
+
+    if (ty->probe_chunk_index < ty->probe_chunk_count) {
+        memcpy(ty->chunk,
+               ty->probe_chunks + ty->probe_chunk_index * CHUNK_SIZE,
+               CHUNK_SIZE);
+        ty->probe_chunk_index++;
+        read_size = CHUNK_SIZE;
+        if (ty->probe_chunk_index == ty->probe_chunk_count)
+            av_freep(&ty->probe_chunks);
+    } else {
+        if (avio_feof(s->pb))
+            return AVERROR_EOF;
+        read_size = read_source_chunk(s, ty->chunk) < 0 ? 0 : CHUNK_SIZE;
+    }
+    ty->cur_chunk++;
+
+    if (read_size != CHUNK_SIZE)
+        return read_size < 0 ? read_size : AVERROR_EOF;
     return 0;
 }
 
 static int get_chunk(AVFormatContext *s)
 {
     TYDemuxContext *ty = s->priv_data;
-    AVIOContext *pb = s->pb;
     int read_size, num_recs;
 
     ff_dlog(s, "parsing ty chunk #%d\n", ty->cur_chunk);
 
     /* if we have left-over filler space from the last chunk, get that */
-    if (avio_feof(pb))
-        return AVERROR_EOF;
-
     /* read the TY packet header */
-    read_size = avio_read(pb, ty->chunk, CHUNK_SIZE);
-    ty->cur_chunk++;
+    if (read_raw_chunk(s) < 0)
+        return AVERROR_EOF;
+    read_size = CHUNK_SIZE;
 
     if ((read_size < 4) || (AV_RB32(ty->chunk) == 0)) {
         return AVERROR_EOF;
@@ -386,6 +611,127 @@ static int get_chunk(AVFormatContext *s)
     return 0;
 }
 
+static int parse_series3_master(TYDemuxContext *ty)
+{
+    const unsigned chunk_count = AV_RB32(ty->chunk + 12);
+    unsigned segment_length;
+
+    if (AV_RB32(ty->chunk + 4) != 3 ||
+        AV_RB32(ty->chunk + 8) != CHUNK_SIZE ||
+        chunk_count < 4 || (chunk_count - 4) % 256)
+        return AVERROR_INVALIDDATA;
+
+    segment_length = (chunk_count - 4) / 256;
+    if (!segment_length)
+        return AVERROR_INVALIDDATA;
+
+    ty->series3_have_master = 1;
+    ty->series3_chunks_left = segment_length - 1;
+    return 0;
+}
+
+static int get_series3_payload(AVFormatContext *s)
+{
+    TYDemuxContext *ty = s->priv_data;
+
+    for (;;) {
+        int record_pos = 0;
+
+        if (read_raw_chunk(s) < 0)
+            return AVERROR_EOF;
+
+        if (AV_RB32(ty->chunk) == TIVO_PES_FILEID) {
+            int ret = parse_series3_master(ty);
+
+            if (ret < 0)
+                return ret;
+            continue;
+        }
+
+        if (ty->series3_have_master) {
+            if (ty->series3_chunks_left <= 0)
+                continue;
+            ty->series3_chunks_left--;
+        }
+
+        ty->series3_payload_pos  = 0;
+        ty->series3_payload_size = 0;
+
+        while (record_pos + 8 <= CHUNK_SIZE) {
+            const unsigned type_size = AV_RB32(ty->chunk + record_pos);
+            const unsigned total_size = type_size >> 12;
+            const unsigned type = type_size & 0xfff;
+            const unsigned fragments = AV_RB32(ty->chunk + record_pos + 4);
+
+            if (!total_size)
+                break;
+            if (total_size < 8 || total_size > CHUNK_SIZE - record_pos ||
+                fragments > (total_size - 8) / 8)
+                return AVERROR_INVALIDDATA;
+
+            if (type == 1) {
+                for (unsigned i = 0; i < fragments; i++) {
+                    const int table = record_pos + 8 + 8 * i;
+                    const unsigned offset = AV_RB32(ty->chunk + table);
+                    const unsigned size = AV_RB32(ty->chunk + table + 4);
+
+                    if (!offset || size > CHUNK_SIZE ||
+                        offset > CHUNK_SIZE - size ||
+                        ty->series3_payload_size > CHUNK_SIZE - size)
+                        return AVERROR_INVALIDDATA;
+                    memcpy(ty->series3_payload + ty->series3_payload_size,
+                           ty->chunk + offset, size);
+                    ty->series3_payload_size += size;
+                }
+            } else if (type != 2 && type != 3) {
+                break;
+            }
+
+            record_pos += total_size;
+        }
+
+        if (!ty->series3_payload_size)
+            continue;
+        if (ty->series3_payload_size % 188 || ty->series3_payload[0] != 0x47)
+            return AVERROR_INVALIDDATA;
+        return 0;
+    }
+}
+
+static int ty_read_series3_packet(AVFormatContext *s, AVPacket *pkt)
+{
+    TYDemuxContext *ty = s->priv_data;
+
+    for (;;) {
+        int ret;
+
+        if (ty->series3_payload_size < 188) {
+            ret = get_series3_payload(s);
+            if (ret < 0 && !ty->series3_flushed) {
+                ty->series3_flushed = 1;
+                return avpriv_mpegts_parse_flush(ty->mpegts, pkt);
+            }
+            if (ret < 0)
+                return ret;
+        }
+
+        ret = avpriv_mpegts_parse_packet(ty->mpegts, pkt,
+                                         ty->series3_payload +
+                                             ty->series3_payload_pos,
+                                         ty->series3_payload_size);
+        if (ret >= 0) {
+            ty->series3_payload_pos  += ret;
+            ty->series3_payload_size -= ret;
+            return 0;
+        }
+
+        /* No complete PES packet was returned, but the parser consumed the
+         * complete transport-stream part. */
+        ty->series3_payload_pos  += ty->series3_payload_size;
+        ty->series3_payload_size = 0;
+    }
+}
+
 static int demux_video(AVFormatContext *s, TyRecHdr *rec_hdr, AVPacket *pkt)
 {
     TYDemuxContext *ty = s->priv_data;
@@ -394,27 +740,33 @@ static int demux_video(AVFormatContext *s, TyRecHdr *rec_hdr, AVPacket *pkt)
     int es_offset1, ret;
     int got_packet = 0;
 
-    if (subrec_type != 0x02 && subrec_type != 0x0c &&
-        subrec_type != 0x08 && rec_size > 7) {
+    if (subrec_type != 0x02 && rec_size > 7) {
 
         /* get the PTS from this packet if it has one.
          * on S1, only 0x06 has PES.  On S2, however, most all do.
          * Do NOT Pass the PES Header to the MPEG2 codec */
         es_offset1 = find_es_header(ty_VideoPacket, ty->chunk + ty->cur_chunk_pos, 5);
         if (es_offset1 != -1) {
-            if (rec_size < es_offset1 + VIDEO_PTS_OFFSET + 5)
-                return AVERROR_INVALIDDATA;
+            const uint8_t *data = ty->chunk + ty->cur_chunk_pos;
+            const int payload_offset = find_next_start_code(data,
+                                                             es_offset1 + 4,
+                                                             rec_size);
 
-            ty->last_video_pts = ff_parse_pes_pts(
-                    ty->chunk + ty->cur_chunk_pos + es_offset1 + VIDEO_PTS_OFFSET);
+            /* Some Series 3 MFS resource clips use a 12-byte pseudo-PES
+             * header without a PTS, while generated and broadcast TY streams
+             * normally use the 16-byte form. */
+            if (rec_size >= es_offset1 + VIDEO_PTS_OFFSET + 5 &&
+                (data[es_offset1 + 7] & 0x80))
+                ty->last_video_pts = ff_parse_pes_pts(
+                        data + es_offset1 + VIDEO_PTS_OFFSET);
             if (subrec_type != 0x06) {
                 /* if we found a PES, and it's not type 6, then we're S2 */
                 /* The packet will have video data (& other headers) so we
                  * chop out the PES header and send the rest */
-                if (rec_size >= VIDEO_PES_LENGTH + es_offset1) {
-                    int size = rec_hdr->rec_size - VIDEO_PES_LENGTH - es_offset1;
+                if (payload_offset >= 0) {
+                    int size = rec_hdr->rec_size - payload_offset;
 
-                    ty->cur_chunk_pos += VIDEO_PES_LENGTH + es_offset1;
+                    ty->cur_chunk_pos += payload_offset;
                     if ((ret = av_new_packet(pkt, size)) < 0)
                         return ret;
                     memcpy(pkt->data, ty->chunk + ty->cur_chunk_pos, size);
@@ -664,7 +1016,14 @@ static int ty_read_packet(AVFormatContext *s, AVPacket *pkt)
     int64_t rec_size = 0;
     int ret = 0;
 
-    if (avio_feof(pb))
+    if (ty->series3_packet && ty->series3_packet->size) {
+        av_packet_move_ref(pkt, ty->series3_packet);
+        return 0;
+    }
+    if (ty->is_series3)
+        return ty_read_series3_packet(s, pkt);
+
+    if (ty->probe_chunk_index >= ty->probe_chunk_count && avio_feof(pb))
         return AVERROR_EOF;
 
     while (ret <= 0) {
@@ -682,9 +1041,6 @@ static int ty_read_packet(AVFormatContext *s, AVPacket *pkt)
 
         if (ty->cur_chunk_pos + rec->rec_size > CHUNK_SIZE)
             return AVERROR_INVALIDDATA;
-
-        if (avio_feof(pb))
-            return AVERROR_EOF;
 
         switch (rec->rec_type) {
         case VIDEO_ID:
@@ -713,6 +1069,10 @@ static int ty_read_close(AVFormatContext *s)
     TYDemuxContext *ty = s->priv_data;
 
     av_freep(&ty->rec_hdrs);
+    av_freep(&ty->probe_chunks);
+    if (ty->mpegts)
+        avpriv_mpegts_parse_close(ty->mpegts);
+    av_packet_free(&ty->series3_packet);
 
     return 0;
 }
@@ -720,7 +1080,7 @@ static int ty_read_close(AVFormatContext *s)
 const FFInputFormat ff_ty_demuxer = {
     .p.name         = "ty",
     .p.long_name    = NULL_IF_CONFIG_SMALL("TiVo TY Stream"),
-    .p.extensions   = "ty,ty+",
+    .p.extensions   = "ty,ty+,tmf",
     .p.flags        = AVFMT_TS_DISCONT,
     .priv_data_size = sizeof(TYDemuxContext),
     .read_probe     = ty_probe,
