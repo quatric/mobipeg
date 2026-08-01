@@ -178,10 +178,12 @@ static int fps_byte(AVFormatContext *s)
     fps = av_q2d(fr);
     if (fps <= 0)
         return 30;
+    if (fps > 59.80 && fps < 59.85)
+        return 0;
     base = (int)(fps + 0.5);
     if (base < 1) base = 1;
     if (base > 127) base = 127;
-    reduce = (base - fps) > 0.02;
+    reduce = (base - fps) >= 0.05;
     return base | (reduce ? 0x80 : 0);
 }
 
@@ -253,7 +255,7 @@ static int rvid_write_trailer(AVFormatContext *s)
     avio_w8(pb, fps_byte(s));
     avio_w8(pb, m->vres);
     avio_w8(pb, m->interlaced ? 1 : 0);
-    avio_w8(pb, 0);                            /* dualScreen */
+    avio_w8(pb, m->width == 240 ? 2 : 0);      /* GBA / DS */
     avio_wl16(pb, m->have_audio ? m->sample_rate : 0);
     avio_w8(pb, m->audio_16bit ? 1 : 0);
     avio_w8(pb, m->bmp_mode);
