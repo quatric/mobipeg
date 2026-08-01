@@ -1,5 +1,5 @@
 /*
- * HVQM4 video encoder (intra-only)
+ * HVQM4 video encoder
  * Copyright (c) 2026 quatric
  *
  * This file is part of FFmpeg.
@@ -21,8 +21,9 @@
 
 /*
  * Targets HVQM4 1.5's I-picture format (see h4m_audio_decode.c for the
- * reference decoder this must round-trip against bit-exactly). No P/B
- * frames yet: every output frame is an I-frame.
+ * reference decoder this must round-trip against bit-exactly). P pictures
+ * currently use a small integer-pixel motion search with intra fallback;
+ * half-pixel search, predictive AOT residuals, and B pictures are not yet used.
  *
  * Per 4x4 luma/chroma block, the decoder reconstructs pixels from one of:
  *   type 1..5  DC + N "AOT" basis terms, each a scaled 4x4 patch pulled
@@ -332,6 +333,11 @@ typedef struct HVQM4EncContext {
 
     HVQPlane planes[PLANE_COUNT];
     BlockDecision *decisions[PLANE_COUNT]; /* h_blocks * v_blocks, raster order */
+    uint8_t *recon[PLANE_COUNT]; /* decoder-exact reconstruction of current frame */
+    uint8_t *past[PLANE_COUNT];  /* previous reconstructed reference frame */
+    uint8_t *mcb_type;           /* P-picture 8x8 MCBs: 0=intra, 1=past */
+    int16_t *mcb_mv_h, *mcb_mv_v;/* half-pixel motion offsets from MCB origin */
+    int h_mcbs, v_mcbs;
 
     uint8_t nest[H_NEST_LANDSCAPE * V_NEST_LANDSCAPE];
     int h_nest_size, v_nest_size;
@@ -381,14 +387,24 @@ static av_cold int hvqm4_encode_init(AVCodecContext *avctx)
     plane_alloc_dims(&s->planes[0], s->width, s->height, 1, 1);
     plane_alloc_dims(&s->planes[1], s->width, s->height, s->h_samp, s->v_samp);
     plane_alloc_dims(&s->planes[2], s->width, s->height, s->h_samp, s->v_samp);
+    s->h_mcbs = s->width / 8;
+    s->v_mcbs = s->height / 8;
+    s->mcb_type = av_malloc((size_t)s->h_mcbs * s->v_mcbs);
+    s->mcb_mv_h = av_malloc_array((size_t)s->h_mcbs * s->v_mcbs, sizeof(*s->mcb_mv_h));
+    s->mcb_mv_v = av_malloc_array((size_t)s->h_mcbs * s->v_mcbs, sizeof(*s->mcb_mv_v));
+    if (!s->mcb_type || !s->mcb_mv_h || !s->mcb_mv_v)
+        return AVERROR(ENOMEM);
 
     for (i = 0; i < PLANE_COUNT; i++) {
         HVQPlane *p = &s->planes[i];
         size_t n = (size_t)p->h_blocks_safe * p->v_blocks_safe;
         p->dc = av_malloc(n);
         s->decisions[i] = av_calloc((size_t)p->h_blocks * p->v_blocks, sizeof(BlockDecision));
-        if (!p->dc || !s->decisions[i])
+        s->recon[i] = av_malloc((size_t)p->w * p->h);
+        s->past[i]  = av_malloc((size_t)p->w * p->h);
+        if (!p->dc || !s->decisions[i] || !s->recon[i] || !s->past[i])
             return AVERROR(ENOMEM);
+        memset(s->past[i], 0x7F, (size_t)p->w * p->h);
     }
 
     avctx->extradata = av_mallocz(2 + AV_INPUT_BUFFER_PADDING_SIZE);
@@ -408,7 +424,12 @@ static av_cold int hvqm4_encode_close(AVCodecContext *avctx)
     for (i = 0; i < PLANE_COUNT; i++) {
         av_freep(&s->planes[i].dc);
         av_freep(&s->decisions[i]);
+        av_freep(&s->recon[i]);
+        av_freep(&s->past[i]);
     }
+    av_freep(&s->mcb_type);
+    av_freep(&s->mcb_mv_h);
+    av_freep(&s->mcb_mv_v);
     return 0;
 }
 
@@ -756,6 +777,158 @@ static void decide_blocks(HVQM4EncContext *s, int plane_idx,
     }
 }
 
+/* Reconstruct an I-picture from the stored decisions exactly as
+ * IntraAotBlock()/OrgBlock()/dcBlock() do in the decoder.  Inter pictures
+ * must use this decoded result as their reference; using the source frame
+ * would make encoder and decoder reference histories diverge immediately. */
+static uint8_t clip_u8(int value)
+{
+    return value < 0 ? 0 : value > 255 ? 255 : value;
+}
+
+static void reconstruct_intra_plane(HVQM4EncContext *s, int plane_idx)
+{
+    HVQPlane *p = &s->planes[plane_idx];
+    uint8_t *dst = s->recon[plane_idx];
+    int bx, by;
+
+    for (by = 0; by < p->v_blocks; by++) {
+        for (bx = 0; bx < p->h_blocks; bx++) {
+            const BlockDecision *bd = &s->decisions[plane_idx][by * p->h_blocks + bx];
+            uint8_t *block = dst + (size_t)by * 4 * p->w + bx * 4;
+            int y, x;
+
+            if (bd->type == BLK_ORG) {
+                for (y = 0; y < 4; y++)
+                    memcpy(block + (size_t)y * p->w, bd->org[y], 4);
+            } else if (bd->type == BLK_DC) {
+                uint8_t dc = p->dc[blk_off(p, bx, by)];
+                for (y = 0; y < 4; y++)
+                    memset(block + (size_t)y * p->w, dc, 4);
+            } else {
+                int32_t result[4][4] = { { 0 } };
+                int running_sum = 0;
+                int32_t mean = 0;
+                int k;
+
+                for (k = 0; k < bd->nb_terms; k++) {
+                    uint8_t patch[4][4];
+                    uint16_t bits = bd->term_bits[k];
+                    int mn, mx, inverse, factor;
+
+                    nest_patch(s, bits, patch);
+                    mn = mx = patch[0][0];
+                    for (y = 0; y < 4; y++)
+                        for (x = 0; x < 4; x++) {
+                            mn = FFMIN(mn, patch[y][x]);
+                            mx = FFMAX(mx, patch[y][x]);
+                        }
+                    running_sum += bd->term_sym[k] << 2;
+                    inverse = hvq_div_table[mx - mn];
+                    if (bits & 0x8000)
+                        inverse = -inverse;
+                    factor = (running_sum + ((bits >> 13) & 3)) * inverse;
+                    for (y = 0; y < 4; y++)
+                        for (x = 0; x < 4; x++)
+                            result[y][x] += factor * patch[y][x];
+                }
+                for (y = 0; y < 4; y++)
+                    for (x = 0; x < 4; x++)
+                        mean += result[y][x];
+                mean >>= 4;
+                {
+                    int32_t delta = (p->dc[blk_off(p, bx, by)] << HVQ_UNK_SHIFT) - mean;
+                    for (y = 0; y < 4; y++)
+                        for (x = 0; x < 4; x++)
+                            block[(size_t)y * p->w + x] = clip_u8((result[y][x] + delta) >> HVQ_UNK_SHIFT);
+                }
+            }
+        }
+    }
+}
+
+/* Pick between a decoder-exact intra reconstruction and integer-pixel motion
+ * compensation from the previous decoded frame for each 8x8 luma MCB.
+ * Searching even pixel offsets keeps 4:2:0 chroma aligned too; the stored
+ * vectors are in the decoder's half-pixel units. */
+static void choose_p_macroblocks(HVQM4EncContext *s, const AVFrame *frame)
+{
+    int my, mx, plane;
+
+    for (my = 0; my < s->v_mcbs; my++) {
+        for (mx = 0; mx < s->h_mcbs; mx++) {
+            int64_t best_inter_err = INT64_MAX, intra_err = 0;
+            int best_dx = 0, best_dy = 0;
+            int dy, dx;
+
+            for (plane = 0; plane < PLANE_COUNT; plane++) {
+                HVQPlane *p = &s->planes[plane];
+                int bw = plane ? 4 : 8;
+                int bh = plane ? 4 : 8;
+                int px = mx * bw, py = my * bh;
+                int y, x;
+                for (y = 0; y < bh; y++) {
+                    const uint8_t *src = frame->data[plane] + (size_t)(py + y) * frame->linesize[plane] + px;
+                    const uint8_t *rec = s->recon[plane] + (size_t)(py + y) * p->w + px;
+                    for (x = 0; x < bw; x++) {
+                        int da = src[x] - rec[x];
+                        intra_err += (int64_t)da * da;
+                    }
+                }
+            }
+
+            for (dy = -6; dy <= 6; dy += 2) {
+                for (dx = -6; dx <= 6; dx += 2) {
+                    int luma_x = mx * 8 + dx, luma_y = my * 8 + dy;
+                    int64_t err = 0;
+                    if (luma_x < 0 || luma_y < 0 || luma_x + 8 > s->width || luma_y + 8 > s->height)
+                        continue;
+                    for (plane = 0; plane < PLANE_COUNT; plane++) {
+                        HVQPlane *p = &s->planes[plane];
+                        int bw = plane ? 4 : 8;
+                        int bh = plane ? 4 : 8;
+                        int px = mx * bw, py = my * bh;
+                        int rx = px + (plane ? dx / 2 : dx);
+                        int ry = py + (plane ? dy / 2 : dy);
+                        int y, x;
+                        for (y = 0; y < bh; y++) {
+                            const uint8_t *src = frame->data[plane] + (size_t)(py + y) * frame->linesize[plane] + px;
+                            const uint8_t *ref = s->past[plane] + (size_t)(ry + y) * p->w + rx;
+                            for (x = 0; x < bw; x++) {
+                                int d = src[x] - ref[x];
+                                err += (int64_t)d * d;
+                            }
+                        }
+                    }
+                    if (err < best_inter_err) {
+                        best_inter_err = err;
+                        best_dx = dx;
+                        best_dy = dy;
+                    }
+                }
+            }
+
+            s->mcb_type[my * s->h_mcbs + mx] = best_inter_err <= intra_err;
+            s->mcb_mv_h[my * s->h_mcbs + mx] = best_dx * 2;
+            s->mcb_mv_v[my * s->h_mcbs + mx] = best_dy * 2;
+            if (best_inter_err <= intra_err) {
+                for (plane = 0; plane < PLANE_COUNT; plane++) {
+                    HVQPlane *p = &s->planes[plane];
+                    int bw = plane ? 4 : 8;
+                    int bh = plane ? 4 : 8;
+                    int px = mx * bw, py = my * bh;
+                    int rx = px + (plane ? best_dx / 2 : best_dx);
+                    int ry = py + (plane ? best_dy / 2 : best_dy);
+                    int y;
+                    for (y = 0; y < bh; y++)
+                        memcpy(s->recon[plane] + (size_t)(py + y) * p->w + px,
+                               s->past[plane]  + (size_t)(ry + y) * p->w + rx, bw);
+                }
+            }
+        }
+    }
+}
+
 /* ------------------------------------------------------------------- */
 
 typedef struct FrameStreams {
@@ -763,6 +936,8 @@ typedef struct FrameStreams {
     HVQHuff huff_rle;        /* dc_rle + basis_num_run, shared */
     HVQHuff huff_buf0;       /* bufTree0, shared across all 3 planes */
     HVQHuff huff_basis;      /* basis_num, shared luma+chroma */
+    HVQHuff huff_mv;         /* mv_h + mv_v, P/B pictures */
+    HVQHuff huff_mcb;        /* mcb_type + mcb_proc run lengths */
 
     HVQBitWriter dc_values[PLANE_COUNT];
     HVQBitWriter dc_rle[PLANE_COUNT];
@@ -770,6 +945,8 @@ typedef struct FrameStreams {
     HVQBitWriter fixvl[PLANE_COUNT];
     HVQBitWriter basis_num[2];
     HVQBitWriter basis_num_run[2]; /* [0] carries the (unused) embedded tree */
+    HVQBitWriter mv_h, mv_v;
+    HVQBitWriter mcb_type, mcb_proc;
 } FrameStreams;
 
 #define DC_MIN (-0x80)
@@ -884,6 +1061,10 @@ static int build_frame_streams(HVQM4EncContext *s, FrameStreams *fs)
     bw_init(&fs->basis_num[1]);
     bw_init(&fs->basis_num_run[0]);
     bw_init(&fs->basis_num_run[1]);
+    bw_init(&fs->mv_h);
+    bw_init(&fs->mv_v);
+    bw_init(&fs->mcb_type);
+    bw_init(&fs->mcb_proc);
 
     /* ---- histogram pass ---- */
     for (i = 0; i < PLANE_COUNT; i++)
@@ -934,6 +1115,222 @@ static int build_frame_streams(HVQM4EncContext *s, FrameStreams *fs)
     return 0;
 }
 
+static int p_block_index(const HVQM4EncContext *s, int plane, int mx, int my, int k)
+{
+    const HVQPlane *p = &s->planes[plane];
+    int bx = mx * (plane ? 1 : 2);
+    int by = my * (plane ? 1 : 2);
+    static const uint8_t ox[4] = { 0, 0, 1, 1 };
+    static const uint8_t oy[4] = { 0, 1, 1, 0 };
+    if (!plane) {
+        bx += ox[k];
+        by += oy[k];
+    }
+    return by * p->h_blocks + bx;
+}
+
+static void walk_p_dc(HVQM4EncContext *s, int *hist, HVQHuff *huff,
+                      HVQBitWriter writers[PLANE_COUNT])
+{
+    int current[PLANE_COUNT] = { 0x7F, 0x7F, 0x7F };
+    int my, mx, plane, k;
+    for (my = 0; my < s->v_mcbs; my++) {
+        for (mx = 0; mx < s->h_mcbs; mx++) {
+            if (s->mcb_type[my * s->h_mcbs + mx]) {
+                current[0] = current[1] = current[2] = 0x7F;
+                continue;
+            }
+            for (plane = 0; plane < PLANE_COUNT; plane++) {
+                int blocks = plane ? 1 : 4;
+                HVQPlane *p = &s->planes[plane];
+                for (k = 0; k < blocks; k++) {
+                    int idx = p_block_index(s, plane, mx, my, k);
+                    int bx = idx % p->h_blocks, by = idx / p->h_blocks;
+                    int dc = p->dc[blk_off(p, bx, by)];
+                    int delta = dc - current[plane];
+                    if (hist)
+                        plan_signed_ovf(delta, DC_MIN, DC_MAX, hist);
+                    else
+                        emit_signed_ovf(&writers[plane], huff, delta, DC_MIN, DC_MAX);
+                    current[plane] = dc;
+                }
+            }
+        }
+    }
+}
+
+static void walk_p_basis(HVQM4EncContext *s, int *hist, HVQHuff *huff,
+                         HVQBitWriter writers[2])
+{
+    int my, mx, k;
+    for (my = 0; my < s->v_mcbs; my++) {
+        for (mx = 0; mx < s->h_mcbs; mx++) {
+            if (s->mcb_type[my * s->h_mcbs + mx])
+                continue;
+            for (k = 0; k < 4; k++) {
+                int val = s->decisions[0][p_block_index(s, 0, mx, my, k)].type;
+                if (hist) hist[val]++; else huff_emit(&writers[0], huff, val);
+            }
+            {
+                int idx = p_block_index(s, 1, mx, my, 0);
+                int val = s->decisions[1][idx].type | (s->decisions[2][idx].type << 4);
+                if (hist) hist[val]++; else huff_emit(&writers[1], huff, val);
+            }
+        }
+    }
+}
+
+static void walk_p_block_data(HVQM4EncContext *s, int plane, int *hist,
+                              HVQHuff *huff, HVQBitWriter *buf0, HVQBitWriter *fixvl)
+{
+    int my, mx, k, term;
+    int blocks = plane ? 1 : 4;
+    for (my = 0; my < s->v_mcbs; my++) {
+        for (mx = 0; mx < s->h_mcbs; mx++) {
+            if (s->mcb_type[my * s->h_mcbs + mx])
+                continue;
+            for (k = 0; k < blocks; k++) {
+                BlockDecision *bd = &s->decisions[plane][p_block_index(s, plane, mx, my, k)];
+                for (term = 0; term < bd->nb_terms; term++) {
+                    if (hist) hist[bd->term_sym[term]]++;
+                    else huff_emit(buf0, huff, bd->term_sym[term]);
+                }
+                if (!hist && fixvl) {
+                    if (bd->type == BLK_ORG) {
+                        int y, x;
+                        for (y = 0; y < 4; y++)
+                            for (x = 0; x < 4; x++)
+                                bw_put_byte_raw(fixvl, bd->org[y][x]);
+                    } else {
+                        for (term = 0; term < bd->nb_terms; term++) {
+                            bw_put_byte_raw(fixvl, bd->term_bits[term] >> 8);
+                            bw_put_byte_raw(fixvl, bd->term_bits[term]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void walk_p_mcb_type(HVQM4EncContext *s, int *hist, HVQHuff *huff,
+                            HVQBitWriter *w)
+{
+    int n = s->h_mcbs * s->v_mcbs;
+    int pos = 0, prev = -1;
+    while (pos < n) {
+        int value = s->mcb_type[pos];
+        int run = 1;
+        while (pos + run < n && s->mcb_type[pos + run] == value)
+            run++;
+        if (!hist) {
+            if (pos == 0)
+                bw_put_bits(w, 2, value);
+            else
+                bw_put_bit(w, prev == 0 ? 0 : 1); /* 0->1 increments; 1->0 decrements */
+            emit_unsigned_ovf(w, huff, run, 0xFF);
+        } else {
+            plan_unsigned_ovf(run, 0xFF, hist);
+        }
+        prev = value;
+        pos += run;
+    }
+}
+
+static int count_inter_mcbs(HVQM4EncContext *s)
+{
+    int i, n = s->h_mcbs * s->v_mcbs, count = 0;
+    for (i = 0; i < n; i++)
+        count += !!s->mcb_type[i];
+    return count;
+}
+
+static void walk_p_mvs(HVQM4EncContext *s, int *hist, HVQHuff *huff,
+                       HVQBitWriter *mv_h, HVQBitWriter *mv_v)
+{
+    int prev_h = 0, prev_v = 0;
+    int i, n = s->h_mcbs * s->v_mcbs;
+    for (i = 0; i < n; i++) {
+        int dh, dv;
+        if (!s->mcb_type[i])
+            continue;
+        dh = s->mcb_mv_h[i] - prev_h;
+        dv = s->mcb_mv_v[i] - prev_v;
+        av_assert0(dh >= -31 && dh <= 31 && dv >= -31 && dv <= 31);
+        if (hist) {
+            hist[(uint8_t)dh]++;
+            hist[(uint8_t)dv]++;
+        } else {
+            huff_emit(mv_h, huff, (uint8_t)dh);
+            huff_emit(mv_v, huff, (uint8_t)dv);
+        }
+        prev_h = s->mcb_mv_h[i];
+        prev_v = s->mcb_mv_v[i];
+    }
+}
+
+static int build_p_frame_streams(HVQM4EncContext *s, FrameStreams *fs)
+{
+    int hist_dc[256] = { 0 }, hist_buf0[256] = { 0 };
+    int hist_basis[256] = { 0 }, hist_mv[256] = { 0 }, hist_mcb[256] = { 0 };
+    int i, inter_count = count_inter_mcbs(s);
+
+    memset(fs, 0, sizeof(*fs));
+    for (i = 0; i < PLANE_COUNT; i++) {
+        bw_init(&fs->dc_values[i]); bw_init(&fs->dc_rle[i]);
+        bw_init(&fs->bufTree0[i]);  bw_init(&fs->fixvl[i]);
+    }
+    for (i = 0; i < 2; i++) {
+        bw_init(&fs->basis_num[i]); bw_init(&fs->basis_num_run[i]);
+    }
+    bw_init(&fs->mv_h); bw_init(&fs->mv_v);
+    bw_init(&fs->mcb_type); bw_init(&fs->mcb_proc);
+
+    walk_p_dc(s, hist_dc, NULL, fs->dc_values);
+    walk_p_basis(s, hist_basis, NULL, fs->basis_num);
+    for (i = 0; i < PLANE_COUNT; i++)
+        walk_p_block_data(s, i, hist_buf0, NULL, NULL, NULL);
+    walk_p_mvs(s, hist_mv, NULL, NULL, NULL);
+    walk_p_mcb_type(s, hist_mcb, NULL, NULL);
+    if (inter_count)
+        plan_unsigned_ovf(inter_count, 0xFF, hist_mcb); /* one all-1 proc run */
+
+    huff_build(&fs->huff_dc, hist_dc);
+    huff_build(&fs->huff_rle, (int[256]){ 0 });
+    huff_build(&fs->huff_buf0, hist_buf0);
+    huff_build(&fs->huff_basis, hist_basis);
+    huff_build(&fs->huff_mv, hist_mv);
+    huff_build(&fs->huff_mcb, hist_mcb);
+
+    if (!fs->huff_dc.empty)    huff_serialize(&fs->dc_values[0], &fs->huff_dc, fs->huff_dc.root);
+    if (!fs->huff_buf0.empty)  huff_serialize(&fs->bufTree0[0], &fs->huff_buf0, fs->huff_buf0.root);
+    if (!fs->huff_basis.empty) huff_serialize(&fs->basis_num[0], &fs->huff_basis, fs->huff_basis.root);
+    if (!fs->huff_mv.empty)    huff_serialize(&fs->mv_h, &fs->huff_mv, fs->huff_mv.root);
+    if (!fs->huff_mcb.empty)   huff_serialize(&fs->mcb_type, &fs->huff_mcb, fs->huff_mcb.root);
+
+    walk_p_dc(s, NULL, &fs->huff_dc, fs->dc_values);
+    walk_p_basis(s, NULL, &fs->huff_basis, fs->basis_num);
+    for (i = 0; i < PLANE_COUNT; i++)
+        walk_p_block_data(s, i, NULL, &fs->huff_buf0, &fs->bufTree0[i], &fs->fixvl[i]);
+    walk_p_mvs(s, NULL, &fs->huff_mv, &fs->mv_h, &fs->mv_v);
+    walk_p_mcb_type(s, NULL, &fs->huff_mcb, &fs->mcb_type);
+    if (inter_count) {
+        bw_put_bit(&fs->mcb_proc, 1);
+        emit_unsigned_ovf(&fs->mcb_proc, &fs->huff_mcb, inter_count, 0xFF);
+    }
+
+    for (i = 0; i < PLANE_COUNT; i++) {
+        bw_flush(&fs->dc_values[i]); bw_flush(&fs->bufTree0[i]);
+        bw_flush(&fs->fixvl[i]); bw_flush(&fs->dc_rle[i]);
+    }
+    for (i = 0; i < 2; i++) {
+        bw_flush(&fs->basis_num[i]); bw_flush(&fs->basis_num_run[i]);
+    }
+    bw_flush(&fs->mv_h); bw_flush(&fs->mv_v);
+    bw_flush(&fs->mcb_type); bw_flush(&fs->mcb_proc);
+    return 0;
+}
+
 static void free_frame_streams(FrameStreams *fs)
 {
     int i;
@@ -947,6 +1344,10 @@ static void free_frame_streams(FrameStreams *fs)
     bw_free(&fs->basis_num[1]);
     bw_free(&fs->basis_num_run[0]);
     bw_free(&fs->basis_num_run[1]);
+    bw_free(&fs->mv_h);
+    bw_free(&fs->mv_v);
+    bw_free(&fs->mcb_type);
+    bw_free(&fs->mcb_proc);
 }
 
 /* ------------------------------------------------------------------- */
@@ -1006,6 +1407,47 @@ static uint8_t *pack_ipic(HVQM4EncContext *s, FrameStreams *fs, int *out_size)
     return buf;
 }
 
+static uint8_t *pack_ppic(FrameStreams *fs, int *out_size)
+{
+    HVQBitWriter *streams[17] = {
+        &fs->basis_num[0], &fs->basis_num_run[0], &fs->basis_num[1], &fs->basis_num_run[1],
+        &fs->dc_values[0], &fs->bufTree0[0], &fs->fixvl[0],
+        &fs->dc_values[1], &fs->bufTree0[1], &fs->fixvl[1],
+        &fs->dc_values[2], &fs->bufTree0[2], &fs->fixvl[2],
+        &fs->mv_h, &fs->mv_v, &fs->mcb_type, &fs->mcb_proc,
+    };
+    int i, header_size = 8 + 17 * 4, data_size = 0;
+    uint32_t offsets[17];
+    uint8_t *buf, *p;
+
+    for (i = 0; i < 17; i++) {
+        offsets[i] = data_size;
+        data_size += 4 + streams[i]->size;
+    }
+    *out_size = header_size + data_size + 4;
+    buf = av_mallocz(*out_size);
+    if (!buf)
+        return NULL;
+
+    p = buf;
+    *p++ = 0;             /* dc_shift */
+    *p++ = HVQ_UNK_SHIFT; /* unk_shift */
+    *p++ = 0; *p++ = 0;   /* past horizontal/vertical MV residual bits */
+    *p++ = 0; *p++ = 0;   /* future residual bits (unused by P pictures) */
+    put_be16(&p, 0);
+    for (i = 0; i < 17; i++)
+        put_be32(&p, offsets[i]);
+
+    av_assert0(p == buf + header_size);
+    for (i = 0; i < 17; i++) {
+        put_be32(&p, streams[i]->size);
+        if (streams[i]->size)
+            memcpy(p, streams[i]->buf, streams[i]->size);
+        p += streams[i]->size;
+    }
+    return buf;
+}
+
 /* ------------------------------------------------------------------- */
 
 static int hvqm4_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
@@ -1015,38 +1457,57 @@ static int hvqm4_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     FrameStreams fs;
     uint8_t *payload;
     int payload_size, ret, i;
+    int is_i;
 
     if (!frame)
         return 0;
 
+    is_i = s->disp_id == 0 || frame->pict_type == AV_PICTURE_TYPE_I ||
+           (avctx->gop_size > 0 && s->disp_id % avctx->gop_size == 0);
     for (i = 0; i < PLANE_COUNT; i++)
         compute_dc(&s->planes[i], frame->data[i], frame->linesize[i]);
-    make_nest(s);
+    /* P/B intra macroblocks reuse the nest established by the preceding
+     * I-picture; HVQM4DecodeBpic() deliberately does not rebuild it. */
+    if (is_i)
+        make_nest(s);
 
     for (i = 0; i < PLANE_COUNT; i++)
         decide_blocks(s, i, frame->data[i], frame->linesize[i]);
+    for (i = 0; i < PLANE_COUNT; i++)
+        reconstruct_intra_plane(s, i);
 
-    if ((ret = build_frame_streams(s, &fs)) < 0)
-        return ret;
-
-    payload = pack_ipic(s, &fs, &payload_size);
+    if (is_i) {
+        if ((ret = build_frame_streams(s, &fs)) < 0)
+            return ret;
+        payload = pack_ipic(s, &fs, &payload_size);
+    } else {
+        choose_p_macroblocks(s, frame);
+        if ((ret = build_p_frame_streams(s, &fs)) < 0)
+            return ret;
+        payload = pack_ppic(&fs, &payload_size);
+    }
     free_frame_streams(&fs);
     if (!payload)
         return AVERROR(ENOMEM);
 
-    /* frame record body: [disp_id:4][I-picture payload] - the outer
+    /* frame record body: [disp_id:4][picture payload] - the outer
      * media-type/frame-type/size/disp_id wrapper is added by the hvqm4
      * muxer, matching hvqm4_read_packet()'s parsing. */
     if ((ret = ff_get_encode_buffer(avctx, pkt, 4 + payload_size, 0)) < 0) {
         av_free(payload);
         return ret;
     }
-    AV_WB32(pkt->data, s->disp_id++); /* disp_id: this encoder is intra-only,
-                                        * so display order == encode order */
+    AV_WB32(pkt->data, s->disp_id++); /* no B pictures yet, so display order
+                                        * still equals encode order */
     memcpy(pkt->data + 4, payload, payload_size);
     av_free(payload);
 
-    pkt->flags |= AV_PKT_FLAG_KEY;
+    if (is_i)
+        pkt->flags |= AV_PKT_FLAG_KEY;
+    else
+        pkt->flags &= ~AV_PKT_FLAG_KEY;
+    for (i = 0; i < PLANE_COUNT; i++)
+        FFSWAP(uint8_t *, s->past[i], s->recon[i]);
     *got_packet = 1;
     return 0;
 }

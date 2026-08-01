@@ -178,7 +178,7 @@ static int hvqm4_read_packet(AVFormatContext *ctx, AVPacket *pkt)
 
         // frame record: [media_type:2][frame_type:2][frame_size:4][disp_id:4][payload]
         uint16_t media_type = avio_rb16(pb);
-        avio_rb16(pb); // frame_type (I/P/B) — captured into the packet below
+        uint16_t frame_type = avio_rb16(pb);
         // rewind so the 2-byte frame type becomes the packet's first bytes
         avio_seek(pb, -2, SEEK_CUR);
         if ((ret = av_get_packet(pb, pkt, 2)) < 0)
@@ -206,6 +206,8 @@ static int hvqm4_read_packet(AVFormatContext *ctx, AVPacket *pkt)
             pkt->dts = h4m->video_dts++;
             ++h4m->gop_video_index;
             pkt->stream_index = h4m->video_stream_index;
+            if (frame_type == 0x10)
+                pkt->flags |= AV_PKT_FLAG_KEY;
         } else {
             av_packet_unref(pkt);
             av_log(ctx, AV_LOG_ERROR, "unknown media type\n");
