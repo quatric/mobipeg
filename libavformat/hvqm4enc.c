@@ -112,7 +112,7 @@ static int hvqm4_write_packet(AVFormatContext *ctx, AVPacket *pkt)
     AVIOContext *pb = ctx->pb;
 
     avio_wb16(pb, 1);    /* media_type: video */
-    avio_wb16(pb, 0x10); /* frame_type: I */
+    avio_wb16(pb, pkt->flags & AV_PKT_FLAG_KEY ? 0x10 : 0x20);
     avio_wb32(pb, (uint32_t)pkt->size); /* disp_id + payload */
     avio_write(pb, pkt->data, pkt->size);
 
