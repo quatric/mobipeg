@@ -130,7 +130,7 @@ static uint64_t ty_compute_ts(TYMuxContext *ty, int64_t pts)
         pts = 0;
     cur_ts = pts / 90; /* 90kHz PTS -> ms */
 
-    if (ty->first_pes_ts == 0) {
+    if (ty->first_pes_ts == AV_NOPTS_VALUE) {
         ty->first_pes_ts = cur_ts;
         ty->tivo_timestamp = 0;
     } else {
@@ -573,6 +573,7 @@ static int ty_write_header(AVFormatContext *s)
 
     ty->video_index = -1;
     ty->audio_index = -1;
+    ty->first_pes_ts = AV_NOPTS_VALUE;
 
     if (s->nb_streams < 1 || s->nb_streams > 2) {
         av_log(s, AV_LOG_ERROR,
