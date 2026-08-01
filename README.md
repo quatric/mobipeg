@@ -45,6 +45,24 @@ decoder rather than any original Hudson Soft encoder. There are no P/B
 (motion-compensated) frames yet — every output frame is an I-frame, so
 file size scales accordingly for longer clips.
 
+### Splitting stereoscopic MOFLEX video
+
+The MOFLEX demuxer exports the `VideoWithLayout` descriptor as standard
+stereoscopic side data. Nintendo 3DS layout 0/1 video stores the left and right
+eyes as alternating decoded frames, so both eyes must be decoded before they
+are separated. This example duplicates the audio into two ordinary MP4 files:
+
+```sh
+ffmpeg -i input.moflex \
+  -filter_complex "[0:v]split=2[vl][vr];[vl]stereo3d=al:ml,sidedata=delete:type=STEREO3D[left];[vr]stereo3d=al:mr,sidedata=delete:type=STEREO3D[right]" \
+  -map "[left]"  -map 0:a? -c:v h264_videotoolbox -c:a aac left.mp4 \
+  -map "[right]" -map 0:a? -c:v h264_videotoolbox -c:a aac right.mp4
+```
+
+For layout 1 (right-first), exchange `al` for `ar`. Layouts 2/3 and 4/5 are
+top/bottom and side-by-side respectively and can be separated with the
+corresponding `stereo3d` input mode.
+
 ## Tools
 
 * [ffmpeg](https://ffmpeg.org/ffmpeg.html) is a command line toolbox to
