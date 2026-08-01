@@ -23,6 +23,8 @@
  */
 
 #include "libavcodec/bytestream.h"
+#include "libavutil/mem.h"
+#include "libavutil/stereo3d.h"
 #include "demux.h"
 
 #include "avformat.h"
@@ -175,6 +177,7 @@ static int moflex_read_sync(AVFormatContext *s)
     while (!avio_feof(pb)) {
         unsigned type, ssize, codec_id = 0;
         unsigned codec_type, width = 0, height = 0, sample_rate = 0, channels = 0;
+        int image_layout = -1;
         int stream_index = -1;
         AVRational tb = av_make_q(0, 1);
 
@@ -218,7 +221,9 @@ static int moflex_read_sync(AVFormatContext *s)
             tb.num = avio_rb16(pb);
             width = avio_rb16(pb);
             height = avio_rb16(pb);
-            avio_skip(pb, type == 3 ? 3 : 2);
+            avio_skip(pb, 2); /* PelRatioRate, PelRatioScale */
+            if (type == 3)
+                image_layout = avio_r8(pb) & 0x0f;
             break;
         case 4:
             codec_type = AVMEDIA_TYPE_DATA;
@@ -245,6 +250,47 @@ static int moflex_read_sync(AVFormatContext *s)
 
             if (tb.num)
                 avpriv_set_pts_info(st, 63, tb.num, tb.den);
+
+            if (codec_type == AVMEDIA_TYPE_VIDEO && image_layout >= 0) {
+                AVStereo3D *stereo;
+                size_t stereo_size;
+
+                stereo = av_stereo3d_alloc_size(&stereo_size);
+                if (!stereo)
+                    return AVERROR(ENOMEM);
+
+                switch (image_layout) {
+                case 0:
+                case 1:
+                    stereo->type = AV_STEREO3D_FRAMESEQUENCE;
+                    break;
+                case 2:
+                case 3:
+                    stereo->type = AV_STEREO3D_TOPBOTTOM;
+                    break;
+                case 4:
+                case 5:
+                    stereo->type = AV_STEREO3D_SIDEBYSIDE;
+                    break;
+                case 6:
+                    stereo->type = AV_STEREO3D_2D;
+                    break;
+                default:
+                    stereo->type = AV_STEREO3D_UNSPEC;
+                    break;
+                }
+                if (image_layout & 1)
+                    stereo->flags |= AV_STEREO3D_FLAG_INVERT;
+                stereo->view = AV_STEREO3D_VIEW_PACKED;
+
+                if (!av_packet_side_data_add(&st->codecpar->coded_side_data,
+                                             &st->codecpar->nb_coded_side_data,
+                                             AV_PKT_DATA_STEREO3D,
+                                             stereo, stereo_size, 0)) {
+                    av_free(stereo);
+                    return AVERROR(ENOMEM);
+                }
+            }
         }
     }
 
