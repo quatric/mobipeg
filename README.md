@@ -37,13 +37,14 @@ encoding library and targets the common Series 2 (Stand-Alone) container
 layout; it requires `--enable-gpl` and does not write `.ty+`'s trailing XML
 metadata block or Series 1/3-specific PES framing.
 
-HVQM4 encoding (the `hvqm4` codec + muxer) is a from-scratch intra-only
-implementation: per-block DC prediction, greedy nest-basis matching
-pursuit for the AC/texture residual (in place of the original's VQ
-codebook), and literal-block escape, built directly against the bundled
-decoder rather than any original Hudson Soft encoder. There are no P/B
-(motion-compensated) frames yet — every output frame is an I-frame, so
-file size scales accordingly for longer clips.
+HVQM4 encoding (the `hvqm4` codec + muxer) is a from-scratch implementation:
+per-block DC prediction, greedy nest-basis matching pursuit for the AC/texture
+residual (in place of the original's VQ codebook), literal-block escape, and
+P-pictures with per-8x8 integer-pixel motion search plus intra fallback. It is built
+directly against the bundled decoder rather than any original Hudson Soft
+encoder. Half-pixel search, predictive AOT residuals, and B-pictures are not
+implemented yet. Set FFmpeg's `-g` option to control the I-picture interval
+(`-g 1` produces an all-intra stream).
 
 ### Splitting stereoscopic MOFLEX video
 
