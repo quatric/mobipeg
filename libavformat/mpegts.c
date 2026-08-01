@@ -3868,6 +3868,25 @@ int avpriv_mpegts_parse_packet(MpegTSContext *ts, AVPacket *pkt,
     return len1 - len;
 }
 
+int avpriv_mpegts_parse_flush(MpegTSContext *ts, AVPacket *pkt)
+{
+    for (int i = 0; i < NB_PID_MAX; i++) {
+        if (ts->pids[i] && ts->pids[i]->type == MPEGTS_PES) {
+            PESContext *pes = ts->pids[i]->u.pes_filter.opaque;
+
+            if (pes->state == MPEGTS_PAYLOAD && pes->data_index > 0) {
+                int ret = new_pes_packet(pes, pkt);
+
+                if (ret < 0)
+                    return ret;
+                pes->state = MPEGTS_SKIP;
+                return 0;
+            }
+        }
+    }
+    return AVERROR_EOF;
+}
+
 void avpriv_mpegts_parse_close(MpegTSContext *ts)
 {
     mpegts_free(ts);

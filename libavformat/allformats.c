@@ -292,6 +292,7 @@ extern const FFOutputFormat ff_vx_muxer;
 extern const FFInputFormat  ff_mods_demuxer;
 extern const FFInputFormat  ff_rvid_demuxer;
 extern const FFInputFormat  ff_fv_demuxer;
+extern const FFOutputFormat ff_fv_muxer;
 extern const FFInputFormat  ff_hvqm4_demuxer;
 extern const FFOutputFormat ff_hvqm4_muxer;
 extern const FFOutputFormat ff_rvid_muxer;
