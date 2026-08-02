@@ -92,6 +92,7 @@ typedef struct MOFLEXMuxContext {
     /* --- media block-writer state (operates on m->dyn) --- */
     AVIOContext *dyn;
     int64_t  block_start;       /* dyn offset of open block, or -1 */
+    int64_t  flags_byte_pos;    /* dyn offset of the flags byte of the open block */
     int      counter;           /* 6-bit flags counter */
     int64_t  next_sync_us;
     int64_t  cur_sync_ts;       /* ts (µs) of the most recent 4C32 sync block; per-frame
@@ -328,6 +329,7 @@ static int open_block(AVFormatContext *s, int64_t pts, int frame_start)
                 m->next_sync_us += SYNC_INTERVAL;
         }
     }
+    m->flags_byte_pos = avio_tell(m->dyn);
     avio_w8(m->dyn, m->counter << 2);   /* flags byte; bit0=0 = fixed-size (retail) */
     m->block_start = off;
     return 0;
@@ -349,6 +351,24 @@ static void close_block_m(MOFLEXMuxContext *m)
     int64_t boundary = m->block_start + MOFLEX_BLOCK;
     while (avio_tell(m->dyn) < boundary)
         avio_w8(m->dyn, 0x00);
+    m->block_start = -1;
+}
+
+/* Close the FINAL block as a short VariablePacketSize block (flags bit0=1).
+ * Patches the already-written flags byte back to bit0=1, writes the 0x00
+ * EP terminator, and stops — no zero-padding needed.  The demuxer stops
+ * reading a variable block at the 0x00 terminator rather than seeking
+ * block_size bytes forward, so the file ends exactly here. */
+static void close_block_m_final(MOFLEXMuxContext *m)
+{
+    if (m->block_start < 0)
+        return;
+    /* Patch flags byte: set bit0=1 (VariablePacketSize). */
+    int64_t cur = avio_tell(m->dyn);
+    avio_seek(m->dyn, m->flags_byte_pos, SEEK_SET);
+    avio_w8(m->dyn, (m->counter << 2) | 1);
+    avio_seek(m->dyn, cur, SEEK_SET);
+    avio_w8(m->dyn, 0x00);   /* EP terminator — no padding */
     m->block_start = -1;
 }
 
@@ -614,6 +634,7 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
     MOFLEXMuxContext *m = s->priv_data;
     int counter = 2;
     int64_t block_start = -1;
+    int64_t flags_byte_pos = -1;   /* position of the flags byte of the current block */
     int off = 0;
     int si = m->data_ep;   /* seek table lives in the DATA descriptor stream */
 
@@ -622,6 +643,7 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
             int64_t bs = avio_tell(pb);   /* block starts at the sync header */
             if (bs == 0)
                 write_sync_header(s, pb, 1);
+            flags_byte_pos = avio_tell(pb);
             avio_w8(pb, counter << 2);   /* bit0=0 = fixed-size (retail) */
             block_start = bs;
         }
@@ -658,10 +680,14 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
             block_start = -1;
         }
     }
-    /* Terminate and pad the final block. */
+    /* Close the final block as a short VariablePacketSize block (no padding).
+     * Patch the flags byte to bit0=1, then write a single 0x00 terminator. */
     if (block_start >= 0) {
-        avio_w8(pb, 0x00);
-        while (avio_tell(pb) < block_start + MOFLEX_BLOCK) avio_w8(pb, 0x00);
+        int64_t cur = avio_tell(pb);
+        avio_seek(pb, flags_byte_pos, SEEK_SET);
+        avio_w8(pb, (counter << 2) | 1);
+        avio_seek(pb, cur, SEEK_SET);
+        avio_w8(pb, 0x00);   /* EP terminator — no padding */
     }
     return 0;
 }
@@ -737,8 +763,8 @@ static int moflex_write_trailer(AVFormatContext *s)
             i++;
         }
     }
-    if (m->block_start >= 0)   /* terminate and pad the final block */
-        close_block_m(m);
+    if (m->block_start >= 0)   /* close final block without padding */
+        close_block_m_final(m);
 
     int media_size = avio_close_dyn_buf(m->dyn, &media);
     m->dyn = NULL;
