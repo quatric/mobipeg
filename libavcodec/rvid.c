@@ -1,6 +1,6 @@
 /*
  * RocketVideo (.rvid) video codec (encoder + decoder)
- * Copyright (c) 2026 mobipeg
+ * Copyright (c) 2026 quatric
  *
  * This file is part of FFmpeg.
  *
