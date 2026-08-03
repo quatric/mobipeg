@@ -1,6 +1,6 @@
 /*
  * FastVideoDS (.fv) muxer
- * Copyright (c) 2026 mobipeg / quatric
+ * Copyright (c) 2026 quatric
  *
  * This file is part of FFmpeg.
  */
