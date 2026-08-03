@@ -153,7 +153,8 @@ class EncodeGUI(tk.Tk):
         self.enc_arate_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_audio_rate_var, width=8)
         self.enc_arate_entry.grid(row=9, column=1, sticky="w", padx=5, pady=5)
 
-        # Row 10: FPS (vx / thp / mods) — match the clip you're replacing (e.g. 15 or 60000/1001).
+        # Row 10: FPS — applies to every format; match the clip you're replacing
+        # (e.g. 15 or 60000/1001).  Always shown, never gated behind Advanced.
         self.enc_fps_label = ttk.Label(self.encode_frame, text="FPS (blank=source):")
         self.enc_fps_label.grid(row=10, column=0, sticky="e", padx=5, pady=5)
         self.enc_fps_var = tk.StringVar(value="")
@@ -262,7 +263,6 @@ class EncodeGUI(tk.Tk):
             ({"mo", "moflex", "moflex3d", "vx"}, (self.enc_keyframes_label, self.enc_keyframes_entry)),
             ({"vx", "mo", "moflex", "moflex3d", "mods", "thp"}, (self.enc_quant_label, self.enc_quant_entry)),
             ({"vx", "mods", "thp", "rvid"}, (self.enc_arate_label, self.enc_arate_entry)),
-            ({"vx", "thp", "mods"}, (self.enc_fps_label, self.enc_fps_entry)),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),

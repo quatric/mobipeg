@@ -72,3 +72,7 @@ __pycache__/
 
 # Bundled 3DS CIA packaging tools (Windows binaries need the *.exe exception)
 !/cia3ds/bin/**/*.exe
+
+# FastVideo C# build output (contains absolute paths)
+fastvideo/bin/
+fastvideo/obj/

@@ -191,7 +191,7 @@ def main():
         pass
     parser.add_argument("--quantizer", "--qp", dest="quantizer", type=int, default=env_quant, help="Constant quantizer / QP setting (e.g. 18-28 for MobiClip, 32 for VX, 1-31 for THP qscale). Default 0 = format default (32 for VX, 22 for MobiClip CQP, 2 for THP). Can also be set via QUANT or QP environment variables.")
     parser.add_argument("--audio-rate", dest="audio_rate", type=int, default=0, help="vx/mods codebook: resample audio to this rate (Hz). 0 = keep source. Match the sample rate of the retail clip you're replacing (e.g. 22050 for americ1 cutscenes) — a DS player that sizes its audio buffer for the original rate can stall on a higher-rate stream.")
-    parser.add_argument("--fps", dest="fps", default="", help="vx only: force this video frame rate. Accepts a decimal (e.g. 15) or an exact fraction (e.g. 60000/1001). Empty = keep source. A DS VX player clocks video off the audio, so the frame rate must match the clip you're replacing or the video plays too slow/fast.")
+    parser.add_argument("--fps", dest="fps", default="", help="Force this video frame rate (all formats). Accepts a decimal (e.g. 15) or an exact fraction (e.g. 60000/1001). Empty = keep source (.mo defaults to 30000/1001). The frame rate must usually match the clip you're replacing or the video plays too slow/fast.")
     parser.add_argument("--rvid-mode", dest="rvid_mode", default="rgb555", choices=["rgb555", "rgb565", "256"], help="rvid only: pixel mode. rgb555 (unlimited color, default), rgb565 (max color), or 256 (8bpp palette).")
     parser.add_argument("--no-compress", dest="rvid_no_compress", action="store_true", help="rvid only: store raw 16bpp frames instead of Nintendo LZ10 compression.")
     parser.add_argument("--rvid-interlaced", dest="rvid_interlaced", action="store_true", help="rvid only: store one field per frame (interlaced).")
@@ -495,17 +495,16 @@ def main():
             if audio_rate > 0:
                 enc_opts.extend(["-ar", str(audio_rate)])
 
+    # --fps applies to every format: the output frame rate generally has to match
+    # the clip being replaced.  A DS VX player clocks video off the audio, so a
+    # mismatch plays too slow/fast; .mods DS slots are ~30 fps and a 60 fps stream
+    # overruns the ARM9 decode budget; retail THP movies are 29.97.  .mo defaults
+    # to 29.97 (what the Wii player expects) but --fps still overrides it.
     fps_filter = ""
-    if fmt == "mo":
-        fps_filter = "fps=30000/1001"
-    elif fmt in ("vx", "thp", "mods") and fps_ovr:
-        # A DS VX player clocks video off the audio, so the output frame rate
-        # must match the clip being replaced. Resampling the video to that fps
-        # fixes "plays slowly/too fast". Accepts a fraction like 60000/1001.
-        # THP likewise: retail movies are 29.97 (30000/1001), so allow forcing it.
-        # .mods DS slots are ~30 fps; a 60 fps stream overruns the ARM9 decode
-        # budget (plays slow/choppy), so honor --fps here too.
+    if fps_ovr:
         fps_filter = f"fps={fps_ovr}"
+    elif fmt == "mo":
+        fps_filter = "fps=30000/1001"
         
     filters = []
     if scale:
