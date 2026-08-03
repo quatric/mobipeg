@@ -46,7 +46,11 @@
 #include "mo.h"
 #include "mo_audioenc.h"
 
-#define MOFLEX_BLOCK   4096      /* block_size from the 4C32 sync header (retail uses 4096) */
+/* Block size is carried in the 4C32 sync header as BE16(block_size - 1), so it is
+ * per-file rather than a constant: retail 3DS titles use 4096, but the Mobiclip
+ * 3DS SDK encoder emits 2048.  Default to the SDK value so our output matches
+ * SDK references byte-for-byte; -mo_block 4096 reproduces the retail layout. */
+#define MOFLEX_BLOCK_DEFAULT 2048
 #define SEEK_ENTRY_SZ  24
 #define SYNC_INTERVAL  1000000   /* µs between sync points (~1/sec)        */
 
@@ -60,6 +64,8 @@ typedef struct QEntry {
 typedef struct MOFLEXMuxContext {
     const AVClass *class;   /* MUST be first */
     int audio_codec;        /* -1=auto, 0=fastaudio, 1=adpcm, 2=pcm */
+    int block_size;         /* block_size written to the 4C32 sync header */
+    int vdesc_type;         /* video descriptor type: 3 = WithLayout, 1 = plain */
     int gop_size;           /* unused placeholder kept for option compat */
     int audio_stream_index;
     int video_stream_index;
@@ -222,8 +228,9 @@ static void write_descriptors(AVFormatContext *s, AVIOContext *pb)
      * chunk).  Set -mo_layout 4 with a side-by-side packed frame for L/R 3D. */
     for (int v = 0; v < m->nb_video; v++) {
         AVStream *st = s->streams[m->video_in[v]];
-        put_var(pb, 3);
-        put_var(pb, 13);
+        int layout = m->vdesc_type == 3;
+        put_var(pb, m->vdesc_type);
+        put_var(pb, layout ? 13 : 12);
         avio_w8(pb, v);                  /* EP stream index = order in list */
         avio_w8(pb, 0); /* 0 = MobiClip codec */
         avio_wb16(pb, m->vfr.num);   /* fps numerator */
@@ -232,7 +239,8 @@ static void write_descriptors(AVFormatContext *s, AVIOContext *pb)
         avio_wb16(pb, st->codecpar->height);
         avio_w8(pb, 1); /* PelRatioRate  */
         avio_w8(pb, 1); /* PelRatioScale */
-        avio_w8(pb, v == 0 ? m->mo_layout : m->mo_layout2); /* ImageLayout */
+        if (layout)
+            avio_w8(pb, v == 0 ? m->mo_layout : m->mo_layout2); /* ImageLayout */
     }
     /* Data/seek-table descriptor — retail order: data before audio */
     put_var(pb, 4);
@@ -264,6 +272,7 @@ static void write_descriptors(AVFormatContext *s, AVIOContext *pb)
 
 static void write_sync_header(AVFormatContext *s, AVIOContext *pb, int64_t ts_us)
 {
+    MOFLEXMuxContext *m = s->priv_data;
     uint64_t ts = (uint64_t)ts_us;
     uint32_t v19 = (uint32_t)(ts >> 32);
     uint16_t chk = (uint16_t)(((ts >> 16) & 0xFFFF) ^ (v19 >> 16) ^ 0xAAAAu
@@ -271,7 +280,7 @@ static void write_sync_header(AVFormatContext *s, AVIOContext *pb, int64_t ts_us
     avio_wb16(pb, 0x4C32);
     avio_wb16(pb, chk);
     avio_wb64(pb, ts);
-    avio_wb16(pb, MOFLEX_BLOCK - 1);
+    avio_wb16(pb, m->block_size - 1);
     write_descriptors(s, pb);
 }
 
@@ -340,7 +349,7 @@ static int open_block(AVFormatContext *s, int64_t pts, int frame_start)
  *
  * final_ef controls the endframe bit on the truly last chunk. */
 
-/* Write 0x00 terminator and zero-pad the open block to MOFLEX_BLOCK bytes.
+/* Write 0x00 terminator and zero-pad the open block to m->block_size bytes.
  * With fixed-size blocks (bit0=0) the demuxer seeks to pos+size after every
  * block, so the padding bytes are simply skipped. */
 static void close_block_m(MOFLEXMuxContext *m)
@@ -348,7 +357,7 @@ static void close_block_m(MOFLEXMuxContext *m)
     if (m->block_start < 0)
         return;
     avio_w8(m->dyn, 0x00);   /* EP terminator */
-    int64_t boundary = m->block_start + MOFLEX_BLOCK;
+    int64_t boundary = m->block_start + m->block_size;
     while (avio_tell(m->dyn) < boundary)
         avio_w8(m->dyn, 0x00);
     m->block_start = -1;
@@ -397,7 +406,7 @@ static int emit_frame(AVFormatContext *s, int si, const uint8_t *data, int size,
         }
 
         int64_t cur   = avio_tell(m->dyn);
-        int64_t avail = m->block_start + MOFLEX_BLOCK - cur;
+        int64_t avail = m->block_start + m->block_size - cur;
         int remaining = size - off;
         int hdr1 = ep_header_bytes(si, final_ef);
         int hdr0 = ep_header_bytes(si, 0);
@@ -408,7 +417,7 @@ static int emit_frame(AVFormatContext *s, int si, const uint8_t *data, int size,
                      frametype, pts - m->cur_sync_ts);
             off = size;
             /* If this exactly fills the block, close it now. */
-            if (avio_tell(m->dyn) >= m->block_start + MOFLEX_BLOCK)
+            if (avio_tell(m->dyn) >= m->block_start + m->block_size)
                 m->block_start = -1;
             /* Otherwise the block stays open for subsequent frames. */
         } else if (avail > hdr0) {
@@ -424,7 +433,7 @@ static int emit_frame(AVFormatContext *s, int si, const uint8_t *data, int size,
             if (exactly_filled && payload > 0)
                 m->block_start = -1;   /* block exactly full, no terminator */
             else
-                close_block_m(m);      /* terminator + zero-pad to MOFLEX_BLOCK */
+                close_block_m(m);      /* terminator + zero-pad to m->block_size */
         } else {
             /* Not enough room for even a minimal chunk. */
             close_block_m(m);
@@ -648,7 +657,7 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
             block_start = bs;
         }
         int64_t cur   = avio_tell(pb);
-        int64_t avail = block_start + MOFLEX_BLOCK - cur;
+        int64_t avail = block_start + m->block_size - cur;
         int remaining = blob_size - off;
         int hdr1 = ep_header_bytes(si, 1);
         int hdr0 = ep_header_bytes(si, 0);
@@ -656,7 +665,7 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
         if (hdr1 + remaining <= avail) {
             write_ep(pb, si, blob + off, remaining, 1, 0, 0);
             off = blob_size;
-            if (avio_tell(pb) >= block_start + MOFLEX_BLOCK)
+            if (avio_tell(pb) >= block_start + m->block_size)
                 block_start = -1;
         } else if (avail > hdr0) {
             int payload = (int)(avail - hdr0);
@@ -671,12 +680,12 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
                 block_start = -1;
             } else {
                 avio_w8(pb, 0x00);
-                while (avio_tell(pb) < block_start + MOFLEX_BLOCK) avio_w8(pb, 0x00);
+                while (avio_tell(pb) < block_start + m->block_size) avio_w8(pb, 0x00);
                 block_start = -1;
             }
         } else {
             avio_w8(pb, 0x00);
-            while (avio_tell(pb) < block_start + MOFLEX_BLOCK) avio_w8(pb, 0x00);
+            while (avio_tell(pb) < block_start + m->block_size) avio_w8(pb, 0x00);
             block_start = -1;
         }
     }
@@ -868,6 +877,16 @@ static const AVOption moflex_options[] = {
       OFFSET(mo_layout), AV_OPT_TYPE_INT, {.i64 = 6}, 0, 255, ENC },
     { "mo_layout2", "video 1 ImageLayout (only used with a 2nd video stream)", OFFSET(mo_layout2),
       AV_OPT_TYPE_INT, {.i64 = 6}, 0, 255, ENC },
+    /* Written to the 4C32 sync header as BE16(block_size-1) and used as the
+     * zero-padding boundary for every block.  SDK = 2048, retail 3DS = 4096. */
+    { "mo_block",   "block size in bytes (2048 = 3DS SDK, 4096 = retail)", OFFSET(block_size),
+      AV_OPT_TYPE_INT, {.i64 = MOFLEX_BLOCK_DEFAULT}, 512, 65536, ENC },
+    /* 3 = MoLiveStreamVideoWithLayout (retail; hardware fast path), 1 = plain
+     * video descriptor (what the 3DS SDK encoder writes).  Type 1 is reported
+     * to fall back to a slow software path on the 3DS player, so 3 stays the
+     * default; use 1 only to reproduce SDK output byte-for-byte. */
+    { "mo_vdesc",   "video descriptor type (3 = with layout/retail, 1 = plain/SDK)", OFFSET(vdesc_type),
+      AV_OPT_TYPE_INT, {.i64 = 3}, 1, 3, ENC },
     { "gop_size",   "(ignored) keyframe interval", OFFSET(gop_size), AV_OPT_TYPE_INT,
       {.i64 = 0}, 0, INT_MAX, ENC },
     { "keyint",     "(ignored) keyframe interval", OFFSET(gop_size), AV_OPT_TYPE_INT,
