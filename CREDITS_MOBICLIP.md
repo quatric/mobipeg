@@ -10,6 +10,16 @@ The implementation of Mobiclip support in this software was made possible thanks
 * [flipnote.js](https://github.com/jaames/flipnote.js/)
 * [RocketVideoPlayer](https://github.com/RocketRobz/RocketVideoPlayer)
 
+## MODS encoder reference
+
+* **Helwettpackardenterprise** — `MODS_Encoder_v43_2`, a Codex-assisted C
+  translation of the retail Mobiclip VfW encoder (`mods.dll`), verified against
+  the original under Unicorn. It is the source for the exact transform and
+  quantization now used by the Mobiclip encoder in
+  [quatric/x264](https://github.com/quatric/x264): the forward integer DCTs,
+  the H.264 MF/dequant scale matrices, the single `(1 << shift) / 3` rounding
+  bias, and the `shift = 15 + q/6` (4x4) / `16 + q/6` (8x8) quantizer scaling.
+
 ## HVQM4 (Hudson Soft `.h4m`)
 
 * [Tilka/hvqm4](https://github.com/Tilka/hvqm4) — bit-accurate HVQM4 1.3/1.5 decoder by Tillmann Karras, based on the audio decoder by flacs/hcs. The core `libavcodec/h4m_audio_decode.c` is vendored from this project.
