@@ -1170,7 +1170,9 @@ static av_cold int X264_init(AVCodecContext *avctx)
         } else if (x4->cqp >= 0) {
             x4->params.rc.i_rc_method   = X264_RC_CQP;
             x4->params.rc.i_qp_constant = x4->cqp;
-        } else if (x4->i_mobiclip) {
+        } else if (x4->i_mobiclip && !avctx->bit_rate) {
+            /* Only when no rate control was requested at all -- an explicit
+             * -b:v must reach x264's ABR, not be overridden with fixed QP. */
             x4->params.rc.i_rc_method   = X264_RC_CQP;
             x4->params.rc.i_qp_constant = 18;
         }
