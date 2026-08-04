@@ -1739,7 +1739,8 @@ const FFCodec ff_mobiclip_encoder = {
     .p.type           = AVMEDIA_TYPE_VIDEO,
     .p.id             = AV_CODEC_ID_MOBICLIP,
     .p.capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY |
-                        AV_CODEC_CAP_OTHER_THREADS,
+                        AV_CODEC_CAP_OTHER_THREADS |
+                        AV_CODEC_CAP_ENCODER_RECON_FRAME,
     .p.priv_class     = &x264_class,
     .p.wrapper_name   = "libx264",
     .priv_data_size   = sizeof(X264Context),
