@@ -62,6 +62,49 @@ def is_ycgco(inp, ifmt):
         return False
 
 
+def stereo_layout(inp, ifmt):
+    """Return (type, inverted) for a stereoscopic input, else (None, False).
+
+    type is ffmpeg's stereo3d name: "frameseq", "tb" or "sbs". inverted means
+    the right eye comes first. MobiClip carries this as the moflex descriptor's
+    ImageLayout, which the demuxer exports as AV_PKT_DATA_STEREO3D."""
+    try:
+        p = subprocess.run(
+            [FFPROBE, "-v", "error"] + ifmt +
+            ["-select_streams", "v:0", "-show_entries",
+             "stream_side_data=side_data_type,type,view,inverted",
+             "-of", "default=nw=1", inp],
+            stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        out = (p.stdout or "").lower()
+    except Exception:
+        return None, False
+    if "stereo 3d" not in out and "stereo3d" not in out:
+        return None, False
+    if "type=2d" in out or "type=unspecified" in out:
+        return None, False
+    inverted = "inverted=1" in out or "inverted=true" in out
+    if "frame alternate" in out or "frameseq" in out or "framesequence" in out:
+        return "frameseq", inverted
+    if "top" in out and "bottom" in out:
+        return "tb", inverted
+    if "side by side" in out or "sidebyside" in out:
+        return "sbs", inverted
+    return None, False
+
+
+def eye_filters(kind, inverted):
+    """stereo3d input mode for (left, right) given the packing.
+
+    stereo3d's *l/*r output modes pick a single eye; sidedata=delete drops the
+    now-meaningless stereo tag so players don't try to re-interpret the result.
+    'inverted' swaps which eye is stored first."""
+    src = {"frameseq": "al", "tb": "abl", "sbs": "sbsl"}[kind]
+    left, right = f"{src}:ml", f"{src}:mr"
+    if inverted:
+        left, right = right, left
+    return left, right
+
+
 def input_fmt(path):
     """Force the right demuxer for our custom/ambiguous source inputs.
 
@@ -214,6 +257,8 @@ def main():
     parser.add_argument("--me", dest="me_method", default="", choices=["dia", "hex", "umh", "esa"], help="MobiClip: motion search method (retail 'MeMethod'). Default is the preset's (hex).")
     parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
+    parser.add_argument("-o", "--output", dest="output", default="", help="Output filename (decode mode). Default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4.")
+    parser.add_argument("--eyes", dest="eyes", default="both", choices=["both", "left", "right", "packed"], help="Decode mode, stereoscopic 3DS input: which eye to write. 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Ignored for 2D input.")
 
     parsed = parser.parse_args()
     OUTDIR = parsed.outdir
@@ -355,15 +400,58 @@ def main():
             print(f"input not found: {inp}")
             sys.exit(2)
         inp = preprocess_input(inp, OUTDIR)
-        watch = f"{OUTDIR}/decoded.mp4"
-        print(f">> decoding  {inp}  ->  {watch}")
+        # Name the output after the input rather than a fixed "decoded.mp4", so
+        # decoding several files into one directory doesn't overwrite itself.
+        if parsed.output:
+            base, ext = os.path.splitext(os.path.basename(parsed.output))
+            ext = ext or ".mp4"
+            outdir_for = os.path.dirname(parsed.output) or OUTDIR
+        else:
+            base, ext = os.path.splitext(os.path.basename(inp))[0], ".mp4"
+            outdir_for = OUTDIR
         ifmt = input_fmt(inp)
         # mods (and any YCgCo-tagged) video needs the inverse-YCgCo filter, else
         # the chroma copies through wrong (green/magenta). Detect via the first
         # decoded frame's colorspace so it also covers non-.mods YCgCo inputs.
-        dec_vf = ["-vf", YCGCO_INV_VF] if is_ycgco(inp, ifmt) else []
-        if dec_vf:
+        ycgco = is_ycgco(inp, ifmt)
+        if ycgco:
             print("   (YCgCo input: applying inverse color transform)")
+
+        kind, inverted = stereo_layout(inp, ifmt)
+        want = parsed.eyes
+        if kind and want != "packed":
+            # Stereoscopic: 3DS layout 0/1 stores the eyes as alternating
+            # frames, so both must be decoded before they can be separated --
+            # hence one filter graph that splits and picks an eye per output.
+            left_mode, right_mode = eye_filters(kind, inverted)
+            wanted = [("left", left_mode), ("right", right_mode)]
+            if want in ("left", "right"):
+                wanted = [w for w in wanted if w[0] == want]
+            pre = f"{YCGCO_INV_VF}," if ycgco else ""
+            labels, graph, outs = [], [], []
+            graph.append("[0:v]split=%d%s" % (len(wanted), "".join(f"[s{i}]" for i in range(len(wanted)))))
+            for i, (name, mode) in enumerate(wanted):
+                graph.append(f"[s{i}]{pre}stereo3d={mode},sidedata=delete:type=STEREO3D[{name}]")
+                labels.append(name)
+                outs.append(os.path.join(outdir_for, f"{base}_{name}{ext}"))
+            fc = ";".join(graph)
+            print(f">> decoding  {inp}  ({kind}{', eyes swapped' if inverted else ''})")
+            for o in outs:
+                print(f"   -> {o}")
+            cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp,
+                   "-filter_complex", fc]
+            for name, o in zip(labels, outs):
+                cmd += ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3", o]
+            run_cmd(cmd) or sys.exit(1)
+            print("\ndecode complete:")
+            run_cmd(["ls", "-la"] + outs)
+            sys.exit(0)
+
+        watch = os.path.join(outdir_for, base + ext)
+        if kind and want == "packed":
+            print(f"   (stereoscopic {kind} input kept packed; --eyes both splits it)")
+        print(f">> decoding  {inp}  ->  {watch}")
+        dec_vf = ["-vf", YCGCO_INV_VF] if ycgco else []
         cmd1 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
         cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", watch]
         run_ffenc_fallback(cmd1, cmd2)
