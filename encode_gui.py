@@ -226,19 +226,19 @@ class EncodeGUI(tk.Tk):
         self.enc_adv_frame.grid(row=19, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         self.enc_adv_frame.columnconfigure(1, weight=1)
 
-        # MOBI_QYX
-        ttk.Label(self.enc_adv_frame, text="MOBI_QYX (QY Tier 0-15, default 1):").grid(row=0, column=0, sticky="e", padx=5, pady=2)
-        self.enc_mobi_qyx_var = tk.StringVar(value="1")
-        ttk.Entry(self.enc_adv_frame, textvariable=self.enc_mobi_qyx_var, width=6).grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        # Bitrate (average-bitrate mode; overrides the quantizer)
+        ttk.Label(self.enc_adv_frame, text="Bitrate (e.g. 700k, blank = use QP):").grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        self.enc_bitrate_var = tk.StringVar(value="")
+        ttk.Entry(self.enc_adv_frame, textvariable=self.enc_bitrate_var, width=10).grid(row=0, column=1, sticky="w", padx=5, pady=2)
 
-        # MOBI_DZ
-        ttk.Label(self.enc_adv_frame, text="MOBI_DZ (Deadzone 1-8, default 5):").grid(row=1, column=0, sticky="e", padx=5, pady=2)
-        self.enc_mobi_dz_var = tk.StringVar(value="5")
-        ttk.Entry(self.enc_adv_frame, textvariable=self.enc_mobi_dz_var, width=6).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+        # Multipass
+        self.enc_multipass_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.enc_adv_frame, text="Two-pass rate control (needs a bitrate)",
+                        variable=self.enc_multipass_var).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         # MOBI_SUBME
-        ttk.Label(self.enc_adv_frame, text="MOBI_SUBME (Subpel Refine, default 2):").grid(row=2, column=0, sticky="e", padx=5, pady=2)
-        self.enc_mobi_subme_var = tk.StringVar(value="2")
+        ttk.Label(self.enc_adv_frame, text="Subpel/RD refine 2-9 (blank = preset):").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        self.enc_mobi_subme_var = tk.StringVar(value="")
         ttk.Entry(self.enc_adv_frame, textvariable=self.enc_mobi_subme_var, width=6).grid(row=2, column=1, sticky="w", padx=5, pady=2)
 
         # MOBI_SKIP
@@ -272,16 +272,14 @@ class EncodeGUI(tk.Tk):
         ]
 
         self.enc_input_var.trace_add("write", lambda *a: self.on_input_changed(self.enc_input_var, self.enc_outdir_var))
-        for var in (self.enc_quant_var, self.enc_mobi_qyx_var, self.enc_mobi_dz_var, self.enc_mobi_subme_var, self.enc_mobi_skip_var):
+        for var in (self.enc_quant_var, self.enc_mobi_subme_var, self.enc_mobi_skip_var):
             var.trace_add("write", self.update_hq_state_from_fields)
         self.on_enc_format_change()
 
     def on_toggle_hq(self):
         if self.enc_hq_var.get():
             self.enc_quant_var.set("12")
-            self.enc_mobi_qyx_var.set("0")
-            self.enc_mobi_dz_var.set("1")
-            self.enc_mobi_subme_var.set("7")
+            self.enc_mobi_subme_var.set("9")
             self.enc_mobi_skip_var.set("0")
             fmt = self.formats_map.get(self.enc_fmt_var.get())
             options = self.audio_options.get(fmt, [])
@@ -289,9 +287,7 @@ class EncodeGUI(tk.Tk):
                 self.enc_audio_var.set("pcm")
         else:
             self.enc_quant_var.set("0")
-            self.enc_mobi_qyx_var.set("1")
-            self.enc_mobi_dz_var.set("5")
-            self.enc_mobi_subme_var.set("2")
+            self.enc_mobi_subme_var.set("")
             self.enc_mobi_skip_var.set("512")
             fmt = self.formats_map.get(self.enc_fmt_var.get())
             options = self.audio_options.get(fmt, [])
@@ -301,9 +297,7 @@ class EncodeGUI(tk.Tk):
     def update_hq_state_from_fields(self, *args):
         is_hq = (
             self.enc_quant_var.get().strip() == "12" and
-            self.enc_mobi_qyx_var.get().strip() == "0" and
-            self.enc_mobi_dz_var.get().strip() == "1" and
-            self.enc_mobi_subme_var.get().strip() == "7" and
+            self.enc_mobi_subme_var.get().strip() == "9" and
             self.enc_mobi_skip_var.get().strip() == "0"
         )
         if is_hq and not self.enc_hq_var.get():
@@ -460,14 +454,13 @@ class EncodeGUI(tk.Tk):
             if arate and arate != "0":
                 cmd.extend(["--audio-rate", arate])
         if fmt in ("mo", "moflex", "moflex3d", "mods") and self.enc_adv_toggle_var.get():
-            qyx = self.enc_mobi_qyx_var.get().strip()
-            if qyx and qyx != "1":
-                cmd.extend(["--mobi-qyx", qyx])
-            dz = self.enc_mobi_dz_var.get().strip()
-            if dz and dz != "5":
-                cmd.extend(["--mobi-dz", dz])
+            bitrate = self.enc_bitrate_var.get().strip()
+            if bitrate:
+                cmd.extend(["--bitrate", bitrate])
+                if self.enc_multipass_var.get():
+                    cmd.extend(["--multipass", "2"])
             subme = self.enc_mobi_subme_var.get().strip()
-            if subme and subme != "2":
+            if subme:
                 cmd.extend(["--mobi-subme", subme])
             if self.enc_mobi_intra_var.get():
                 cmd.append("--mobi-intra-only")
