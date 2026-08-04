@@ -196,12 +196,23 @@ def main():
     parser.add_argument("--no-compress", dest="rvid_no_compress", action="store_true", help="rvid only: store raw 16bpp frames instead of Nintendo LZ10 compression.")
     parser.add_argument("--rvid-interlaced", dest="rvid_interlaced", action="store_true", help="rvid only: store one field per frame (interlaced).")
     parser.add_argument("--rvid-no-dither", dest="rvid_no_dither", action="store_true", help="rvid only: disable the checkerboard ordered dither used when reducing to 16bpp.")
-    parser.add_argument("--mobi-qyx", type=int, default=int(os.environ.get("MOBI_QYX", 1)), help="MobiClip Quantizer Y extension tier (0-15, default 1). 0 = finest quality / visually lossless.")
-    parser.add_argument("--mobi-dz", type=int, default=int(os.environ.get("MOBI_DZ", 5)), help="Deadzone quantization scaling factor (1-8, default 5).")
-    parser.add_argument("--mobi-subme", type=int, default=int(os.environ.get("MOBI_SUBME", 2)), help="Subpel motion estimation refinement quality level (default 2).")
+    parser.add_argument("--mobi-qyx", type=int, default=int(os.environ.get("MOBI_QYX", 0)), help="MobiClip: coarsen the quantizer by this many whole qy tiers, i.e. QP + 6*N (0-8, default 0). The quantizer used to be the only way to change quality; plain --qp now works over the format's full 12-63 range, so leave this at 0.")
+    parser.add_argument("--mobi-subme", type=int, default=int(os.environ.get("MOBI_SUBME", 0)), help="Subpel/RD refinement level 2-11 (0 = the preset's value, normally 7). 9 is the best quality that this encoder can act on; 10-11 need trellis, which MobiClip has no representation for. Below 6 disables RD mode decision.")
     parser.add_argument("--mobi-intra-only", dest="mobi_intra_only", action="store_true", help="Force every frame to be encoded as an I-frame (keyframe only).")
-    parser.add_argument("--mobi-skip", type=int, default=int(os.environ.get("MOBI_SKIP", 512)), help="Macroblock skip decision error threshold (default 512).")
-    parser.add_argument("--hq", "--highest-quality", dest="highest_quality", action="store_true", help="Use highest quality encoding settings (QP 12, MobiClip QYX 0, DZ 1, Subme 7, Skip 0)")
+    parser.add_argument("--mobi-skip", type=int, default=int(os.environ.get("MOBI_SKIP", 512)), help="Macroblock skip decision error threshold (default 512). 0 keeps every residual, which is slightly better at low QP; higher values freeze near-static blocks to stop dither flicker.")
+    parser.add_argument("--hq", "--highest-quality", dest="highest_quality", action="store_true", help="Highest quality MobiClip settings: QP 12 (the format's floor), subme 9, and no skip threshold.")
+
+    # --- MobiClip rate control, named after the retail encoder's settings ---
+    parser.add_argument("--bitrate", dest="bitrate", default="", help="MobiClip: target bitrate for average-bitrate mode, e.g. 700k. Overrides --qp. (Retail 'Bitrate'.)")
+    parser.add_argument("--multipass", dest="multipass", type=int, default=1, choices=[1, 2], help="MobiClip: number of rate-control passes (default 1). 2 runs an analysis pass first and hits the target bitrate more accurately at the same quality. Requires --bitrate. (Retail np1/npn and cbr1/cbrn.)")
+    parser.add_argument("--passlog", dest="passlog", default="", help="MobiClip: statistics file for --multipass 2 (default <output>.pass).")
+    parser.add_argument("--min-qp", dest="min_qp", type=int, default=0, help="MobiClip: lowest quantizer rate control may use, 12-48. (Retail 'MinQuantizer'.)")
+    parser.add_argument("--max-qp", dest="max_qp", type=int, default=0, help="MobiClip: highest quantizer rate control may use, 12-48. (Retail 'MaxQuantizer'.)")
+    parser.add_argument("--i-boost", dest="i_boost", type=int, default=-1, help="MobiClip: percent extra bits for I-frames, 0-100 (retail 'IBoostPercent', default 40). Only meaningful with --bitrate.")
+    parser.add_argument("--i-threshold", dest="i_threshold", type=int, default=-1, help="MobiClip: scene-cut sensitivity for inserting I-frames, 0-100 (retail 'IThreshold', default 90). 0 disables scene-cut keyframes.")
+    parser.add_argument("--buffer-size", dest="buffer_size", default="", help="MobiClip: rate-control buffer size, e.g. 400k (retail 'BufferSize'). Bounds how far the bitrate may drift locally.")
+    parser.add_argument("--me", dest="me_method", default="", choices=["dia", "hex", "umh", "esa"], help="MobiClip: motion search method (retail 'MeMethod'). Default is the preset's (hex).")
+    parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
 
     parsed = parser.parse_args()
@@ -223,31 +234,58 @@ def main():
     rvid_no_compress = parsed.rvid_no_compress
     rvid_interlaced = parsed.rvid_interlaced
     rvid_no_dither = parsed.rvid_no_dither
+    mobi_bitrate = parsed.bitrate.strip()
+    mobi_passes = parsed.multipass
+    mobi_passlog = parsed.passlog.strip()
+    mobi_rc = []          # extra MobiClip rate-control / analysis options
+    if mobi_bitrate:
+        mobi_rc += ["-b:v", mobi_bitrate]
+    if parsed.min_qp:
+        mobi_rc += ["-qmin", str(parsed.min_qp)]
+    if parsed.max_qp:
+        mobi_rc += ["-qmax", str(parsed.max_qp)]
+    if parsed.i_boost >= 0:
+        # Retail IBoostPercent is "I-frames get N% more bits"; x264 spends that
+        # as a QP factor, and ffmpeg passes it in negated (see libx264.c).
+        mobi_rc += ["-i_qfactor", f"{-1.0 / (1.0 + parsed.i_boost / 100.0):.4f}"]
+    if parsed.i_threshold >= 0:
+        mobi_rc += ["-sc_threshold", str(parsed.i_threshold)]
+    if parsed.buffer_size:
+        mobi_rc += ["-bufsize", parsed.buffer_size]
+    if parsed.me_method:
+        mobi_rc += ["-me_method", parsed.me_method]
+    if parsed.dct8x8 >= 0:
+        mobi_rc += ["-8x8dct", str(parsed.dct8x8)]
+    # --hq is "as good as MobiClip gets", not "every knob to its extreme":
+    # QP 12 is the lowest quantizer the decoder accepts, subme 9 is the highest
+    # refinement this encoder can actually act on (10-11 only add trellis, which
+    # is forced off), and skip 0 stops near-static blocks being frozen.
     if parsed.highest_quality:
-        if parsed.quantizer == 0:
+        if parsed.quantizer == 0 and not parsed.bitrate:
             parsed.quantizer = 12
-        if parsed.mobi_qyx == 1:
-            parsed.mobi_qyx = 0
-        if parsed.mobi_dz == 5:
-            parsed.mobi_dz = 1
-        if parsed.mobi_subme == 2:
-            parsed.mobi_subme = 7
+        if parsed.mobi_subme == 0:
+            parsed.mobi_subme = 9
         if parsed.mobi_skip == 512:
             parsed.mobi_skip = 0
+
+    # --hq may have set a quantizer above; vx_quant was captured before that,
+    # so pick the value up again or --hq's QP never reaches the encoder.
+    vx_quant = parsed.quantizer
 
     if parsed.quantizer > 0:
         os.environ["QUANT"] = str(parsed.quantizer)
         os.environ["QP"] = str(parsed.quantizer)
-    if parsed.mobi_qyx != 1:
+    if parsed.mobi_qyx:
         os.environ["MOBI_QYX"] = str(parsed.mobi_qyx)
-    if parsed.mobi_dz != 5:
-        os.environ["MOBI_DZ"] = str(parsed.mobi_dz)
-    if parsed.mobi_subme != 2:
+    if parsed.mobi_subme:
         os.environ["MOBI_SUBME"] = str(parsed.mobi_subme)
     if parsed.mobi_intra_only:
         os.environ["MOBI_INTRA_ONLY"] = "1"
     if parsed.mobi_skip != 512:
         os.environ["MOBI_SKIP"] = str(parsed.mobi_skip)
+
+    if parsed.multipass == 2 and not parsed.bitrate:
+        parser.error("--multipass 2 needs --bitrate; a constant quantizer has nothing to redistribute")
 
 
     # format -> mode | demuxer name | scale (video) | moaud? | cvc
@@ -428,14 +466,16 @@ def main():
 
     if fmt == "mods":
         enc_opts.extend(["-mobiclip", "2", "-moflex", "0", "-g", "100000"])
-        if vx_quant > 0:
+        if vx_quant > 0 and not mobi_bitrate:
             enc_opts.extend(["-qp", str(vx_quant)])
         if audio == "fastaudio":
             enc_opts.extend(["-sc_threshold", "0"])
+        enc_opts.extend(mobi_rc)
     elif fmt in ["mo", "moflex", "moflex3d"]:
         enc_opts.extend(["-mobiclip", "1"])
-        if vx_quant > 0:
+        if vx_quant > 0 and not mobi_bitrate:
             enc_opts.extend(["-qp", str(vx_quant)])
+        enc_opts.extend(mobi_rc)
 
         # Evenly-spaced keyframes for the Wii mobiclip formats. mo output is
         # resampled to 30000/1001; moflex keeps source fps. Auto mode uses the
@@ -549,8 +589,23 @@ def main():
     fps_disp = f", {fps_filter}" if fps_filter else ""
     scale_disp = scale if scale else "source"
 
-    cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts + [container]
-    run_cmd(cmd) or sys.exit(1)
+    base = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts
+    if mobi_passes == 2:
+        # libx264 keeps its own statistics file (x264's psz_stat_out); ffmpeg's
+        # -passlogfile drives avctx->stats_out, which this encoder never fills,
+        # so the file has to be named through -x264-params.
+        statfile = mobi_passlog or (container + ".pass")
+        print(f">> pass 1/2  analysis  ->  {statfile}")
+        run_cmd(base + ["-pass", "1", "-x264-params", f"stats={statfile}", container]) or sys.exit(1)
+        print(">> pass 2/2  encode")
+        run_cmd(base + ["-pass", "2", "-x264-params", f"stats={statfile}", container]) or sys.exit(1)
+        for leftover in (statfile, statfile + ".mbtree", statfile + ".temp"):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
+    else:
+        run_cmd(base + [container]) or sys.exit(1)
     
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
