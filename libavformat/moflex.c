@@ -198,8 +198,19 @@ static int moflex_read_sync(AVFormatContext *s)
             case 1: codec_id = AV_CODEC_ID_ADPCM_IMA_MOFLEX; break;
             case 2: codec_id = AV_CODEC_ID_PCM_S16LE; break;
             default:
-                av_log(s, AV_LOG_ERROR, "Unsupported audio codec: %d\n", codec_id);
-                return AVERROR_PATCHWELCOME;
+                /* An audio codec we don't know must not cost the caller the
+                 * whole file: the rest of the descriptor is fixed-size, so
+                 * parsing stays in sync and every other stream still works.
+                 * Expose the stream as data so its packets remain available
+                 * (and demuxing keeps its timestamps) while the video decodes
+                 * normally.  Returning AVERROR_PATCHWELCOME here meant a
+                 * single unrecognised audio track made the file undecodable. */
+                av_log(s, AV_LOG_WARNING,
+                       "Unsupported audio codec %d in stream %d; "
+                       "keeping it as a data stream.\n", codec_id, stream_index);
+                codec_type = AVMEDIA_TYPE_DATA;
+                codec_id = AV_CODEC_ID_NONE;
+                break;
             }
             sample_rate = avio_rb24(pb) + 1;
             tb = av_make_q(1, sample_rate);
