@@ -28,5 +28,8 @@ run src2.yuv 320 240 120 18 2 -1
 run src3.yuv 384 224 120 18 2 -1
 run eb.yuv   384 288 150 18 2 -1
 run eb.yuv   384 288 150 30 1 -1
+# retail Wii Internet Channel content at the .mo native size, if present
+[ -f te.yuv ] && run te.yuv 624 352 300 16 1 -1
+[ -f te.yuv ] && run te.yuv 624 352 300 24 1 -1
 echo "$pass passed, $fail failed"
 exit $((fail > 0))
