@@ -81,6 +81,26 @@ corresponding `stereo3d` input mode.
 | Vorbis | ➖ | ➖ | ✅ |
 | Codebook (SX) | ➖ | ✅ | ➖ |
 
+## Building
+
+Mobiclip **video encoding** (`-c:v mobiclip`, and therefore every `.mo` /
+`.moflex` / `.mods` output) is implemented as a fork of x264, so it is only
+compiled in when FFmpeg is configured with `--enable-libx264`. Configure
+without it and the `mobiclip` encoder is simply absent — decoding and the
+non-Mobiclip formats still work, which makes the omission easy to miss.
+
+The fork is required; stock x264 does not implement the Mobiclip bitstream:
+
+```sh
+git clone https://github.com/quatric/x264 && cd x264
+./configure --prefix="$PWD/../x264-install" --enable-static --enable-pic --disable-cli
+make -j && make install
+cd .. && PKG_CONFIG_PATH="$PWD/x264-install/lib/pkgconfig" \
+  ./configure --enable-gpl --enable-libx264 && make -j
+```
+
+Confirm with `ffmpeg -encoders | grep mobiclip`.
+
 ## Documentation
 
 For full technical documentation of the MobiClip formats (video/audio codecs,
