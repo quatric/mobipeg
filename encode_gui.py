@@ -319,12 +319,35 @@ class EncodeGUI(tk.Tk):
         self.dec_outdir_var = tk.StringVar(value="")
         ttk.Entry(self.decode_frame, textvariable=self.dec_outdir_var).grid(row=1, column=1, sticky="ew", padx=5, pady=5)
         ttk.Button(self.decode_frame, text="Browse...", command=lambda: self.browse_dir(self.dec_outdir_var)).grid(row=1, column=2, padx=5, pady=5)
-        
+
+        # Output file. Pre-filled from the input's own name so decoding several
+        # files into one directory doesn't overwrite itself; "Save As..." lets
+        # the user pick something else. For a stereoscopic input the eye is
+        # appended to whatever is here (name_left.mp4 / name_right.mp4).
+        ttk.Label(self.decode_frame, text="Output File:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        self.dec_output_var = tk.StringVar(value="")
+        ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=2, column=2, padx=5, pady=5)
+
+        # Stereoscopic eye selection (3DS moflex)
+        ttk.Label(self.decode_frame, text="3D eyes:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        self.dec_eyes_var = tk.StringVar(value="both")
+        eyes_frame = ttk.Frame(self.decode_frame)
+        eyes_frame.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        for i, (val, label) in enumerate((("both", "Both (separate files)"),
+                                          ("left", "Left only"),
+                                          ("right", "Right only"),
+                                          ("packed", "Keep packed"))):
+            ttk.Radiobutton(eyes_frame, text=label, value=val,
+                            variable=self.dec_eyes_var).grid(row=0, column=i, padx=(0, 8))
+        self.dec_eyes_note = ttk.Label(self.decode_frame, text="", foreground="grey")
+        self.dec_eyes_note.grid(row=4, column=1, sticky="w", padx=5)
+
         # Run Button
         self.dec_run_btn = ttk.Button(self.decode_frame, text="▶ Run Decoding", command=self.run_decoding)
-        self.dec_run_btn.grid(row=2, column=1, pady=15)
-        
-        self.dec_input_var.trace_add("write", lambda *a: self.on_input_changed(self.dec_input_var, self.dec_outdir_var))
+        self.dec_run_btn.grid(row=5, column=1, pady=15)
+
+        self.dec_input_var.trace_add("write", lambda *a: self.on_decode_input_changed())
 
     def on_input_changed(self, var, outdir_var):
         val = var.get()
@@ -371,6 +394,59 @@ class EncodeGUI(tk.Tk):
         directory = filedialog.askdirectory()
         if directory:
             var.set(directory)
+
+    def browse_save_decode(self):
+        """Save As for the decoded output, seeded with the derived name."""
+        current = self.dec_output_var.get().strip()
+        initial = os.path.basename(current) if current else self.derived_decode_name()
+        initialdir = self.dec_outdir_var.get().strip() or (
+            os.path.dirname(current) if current else "")
+        filename = filedialog.asksaveasfilename(
+            title="Save decoded video as",
+            initialfile=initial or "decoded.mp4",
+            initialdir=initialdir or None,
+            defaultextension=".mp4",
+            filetypes=[("MP4 video", "*.mp4"), ("All files", "*.*")])
+        if filename:
+            self.dec_output_var.set(filename)
+            self.dec_outdir_var.set(os.path.dirname(filename))
+
+    def derived_decode_name(self):
+        """Default output filename for the currently selected decode input."""
+        inp = self.dec_input_var.get().strip()
+        if not inp:
+            return ""
+        return os.path.splitext(os.path.basename(inp))[0] + ".mp4"
+
+    def on_decode_input_changed(self):
+        self.on_input_changed(self.dec_input_var, self.dec_outdir_var)
+        name = self.derived_decode_name()
+        # Only auto-fill while the user hasn't typed their own name, so an
+        # explicit choice survives picking a different input.
+        current = self.dec_output_var.get().strip()
+        if name and (not current or getattr(self, "_dec_output_auto", "") == current):
+            outdir = self.dec_outdir_var.get().strip()
+            full = os.path.join(outdir, name) if outdir else name
+            self.dec_output_var.set(full)
+            self._dec_output_auto = full
+        self.update_decode_eyes_note()
+
+    def update_decode_eyes_note(self):
+        """Say whether the selected input actually is stereoscopic."""
+        inp = self.dec_input_var.get().strip()
+        note = ""
+        if inp and os.path.isfile(inp):
+            try:
+                import encode as _enc
+                kind, inverted = _enc.stereo_layout(inp, _enc.input_fmt(inp))
+                if kind:
+                    note = f"stereoscopic ({kind}{', eyes swapped' if inverted else ''})"
+                else:
+                    note = "2D input - eye selection ignored"
+            except Exception:
+                note = ""
+        if hasattr(self, "dec_eyes_note"):
+            self.dec_eyes_note.config(text=note)
 
     def append_console(self, text):
         self.console.config(state="normal")
@@ -494,10 +570,16 @@ class EncodeGUI(tk.Tk):
             
         cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
         cmd.extend(["decode", inp])
-        
+
         if outdir:
             cmd.extend(["--outdir", outdir])
-            
+        outfile = self.dec_output_var.get().strip()
+        if outfile:
+            cmd.extend(["-o", outfile])
+        eyes = self.dec_eyes_var.get()
+        if eyes and eyes != "both":
+            cmd.extend(["--eyes", eyes])
+
         self.execute_cmd(cmd, self.dec_run_btn)
 
 if __name__ == "__main__":
