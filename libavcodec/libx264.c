@@ -1296,10 +1296,11 @@ static av_cold int X264_init(AVCodecContext *avctx)
     if (x4->mixed_refs >= 0)
         x4->params.analyse.b_mixed_references = x4->mixed_refs;
     if (x4->i_mobiclip) {
-        /* MobiClip's 8x8 IDCT (even/odd butterfly) differs from x264's DCT8_1D
-         * for non-DC coefficients; force 4x4-only which uses the same inverse4
-         * butterfly in both encoder and decoder. */
-        x4->params.analyse.b_transform_8x8    = 0;
+        /* 8x8 luma used to reconstruct incorrectly (wrong coefficient scan and
+         * a non-decoder-exact inverse transform), so it was forced off here.
+         * Both are fixed in the encoder now, so -8x8dct applies as usual. */
+        if (x4->dct8x8 >= 0)
+            x4->params.analyse.b_transform_8x8 = x4->dct8x8;
         /* Cap the motion-search range.  At scene cuts x264 finds spurious
          * far-away matches producing large motion vectors.  Such large MVs
          * propagate through MobiClip's median MV predictor (a per-column ring
