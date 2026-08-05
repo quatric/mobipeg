@@ -113,13 +113,18 @@ static void host_cleanup(void *opaque, uint8_t *ctx, void *obj)
 int main(int argc, char **argv)
 {
     if (argc < 8) {
-        fprintf(stderr, "usage: %s in.yuv w h frames qp keyint out.bin [dll_image.bin]\n", argv[0]);
+        fprintf(stderr, "usage: %s in.yuv w h frames qp keyint out.bin "
+                        "[dll_image.bin] [yuvmode] [vlctable]\n", argv[0]);
         return 2;
     }
     const char *inpath = argv[1];
     int W = atoi(argv[2]), H = atoi(argv[3]);
     int NF = atoi(argv[4]), QP = atoi(argv[5]), KEYINT = atoi(argv[6]);
     int YUVMODE = (argc > 9) ? atoi(argv[9]) : 0;
+    /* VlcTable selects the coefficient table set: 1 is the retail MODS/DS
+     * default, 0 is the other set -- which is what the Wii .mo path uses in our
+     * encoder (-mobiclip 1). Exposed so the two table sets can be compared. */
+    int VLCTABLE = (argc > 10) ? atoi(argv[10]) : 1;
     const char *outpath = argv[7];
     const char *dllpath = (argc > 8) ? argv[8]
         : "ref43/reference/controlled/virtualdubmod_10000000.bin";
@@ -161,7 +166,7 @@ int main(int argc, char **argv)
     /* encoder.general defaults from the retail configuration model:
      * MeMethod=1, RefCount=5, YuvMode=0, VlcTable=1, SliceCount=1. */
     opt.settings[0] = 1; opt.settings[1] = 5; opt.settings[2] = YUVMODE;
-    opt.settings[3] = 1; opt.settings[4] = 1;
+    opt.settings[3] = VLCTABLE; opt.settings[4] = 1;
     opt.feature_flags = 0; opt.initial_qp = QP;
 
     CqPolicy *cq = low_alloc(NULL, (uint32_t)sizeof(CqPolicy));
