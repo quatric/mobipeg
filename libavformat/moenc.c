@@ -1133,6 +1133,22 @@ static int flush_chunk(AVFormatContext *s)
 
     int64_t chunk_start = avio_tell(pb);
     uint32_t chunk_full = (uint32_t)(video_written + audio_chunk_size + 8);
+
+    /* A folded chunk writes no pad bytes of its own, so the next chunk begins
+     * at chunk_start + chunk_full — and the demuxer's next-chunk formula,
+     * raw_end + (4 - raw_end % 4), ALWAYS lands on a 4-byte boundary.  Folding
+     * is therefore only self-consistent when chunk_full is itself 4-aligned;
+     * otherwise the two disagree and the demuxer reads the next header from the
+     * wrong offset, ending the stream after chunk 0.
+     *
+     * Block codecs and Vorbis are 4-aligned by construction (block sizes and
+     * the zero-padded section), and so is stereo PCM (4-byte frames).  Mono PCM
+     * has a 2-byte frame, so half its chunks are not — that is the whole bug.
+     * Fall back to the explicit-pad path there, which agrees with the demuxer
+     * for every alignment. */
+    if (chunk_full % 4)
+        fold_audio = 0;
+
     int trail_pad = (int)(4 - ((chunk_start + chunk_full) % 4));
     if (trail_pad == 0) trail_pad = 4;        /* demuxer formula never yields 0 */
     /* SDK quirk verified against retail (basic.mo, testF.mo) and accepted by
