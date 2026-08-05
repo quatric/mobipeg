@@ -165,7 +165,9 @@ int main(int argc, char **argv)
     BeginOptions opt; memset(&opt, 0, sizeof opt);
     /* encoder.general defaults from the retail configuration model:
      * MeMethod=1, RefCount=5, YuvMode=0, VlcTable=1, SliceCount=1. */
-    opt.settings[0] = 1; opt.settings[1] = 5; opt.settings[2] = YUVMODE;
+    const char *rc_env = getenv("MODS_REFCOUNT");
+    opt.settings[0] = 1; opt.settings[1] = rc_env ? atoi(rc_env) : 5;
+    opt.settings[2] = YUVMODE;
     opt.settings[3] = VLCTABLE; opt.settings[4] = 1;
     opt.feature_flags = 0; opt.initial_qp = QP;
 
