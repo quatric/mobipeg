@@ -27,8 +27,17 @@ int main(int argc, char **argv)
         uint32_t sz; uint8_t kf;
         if (fread(&sz, 4, 1, fi) != 1) break;
         if (fread(&kf, 1, 1, fi) != 1) break;
-        if (av_new_packet(pkt, (int)sz) < 0) break;
-        if (fread(pkt->data, 1, sz, fi) != sz) break;
+        /* The reference encoder prefixes each payload with a u32 bit count
+         * that is not part of the Mobiclip frame (see reference/README.md).
+         * Strip it — feeding it to the decoder desyncs the very first header
+         * and every frame fails with "setup_qtables failed". */
+        if (sz < 4) break;
+        uint8_t *raw = av_malloc(sz);
+        if (!raw) break;
+        if (fread(raw, 1, sz, fi) != sz) { av_free(raw); break; }
+        if (av_new_packet(pkt, (int)sz - 4) < 0) { av_free(raw); break; }
+        memcpy(pkt->data, raw + 4, sz - 4);
+        av_free(raw);
         if (kf) pkt->flags |= AV_PKT_FLAG_KEY;
         int r = avcodec_send_packet(dc, pkt);
         if (r < 0) { fail++; fprintf(stderr, "frame %d: send failed\n", n); }
