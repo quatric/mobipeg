@@ -146,12 +146,19 @@ jobs:
           make -j$(nproc) && make install
           cd ..
 
+      # Key the cache on the upstream x264 commit rather than a hand-bumped
+      # version number: the patched x264 keeps adding x264_param_t fields, and a
+      # cache that outlives them leaves ffmpeg building against a stale x264.h.
+      - name: Resolve x264 revision
+        id: x264-rev
+        run: echo "sha=$(git ls-remote https://github.com/quatric/x264.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
       - name: Cache x264
         id: cache-x264
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: x264-linux-${{ matrix.target }}-v7
+          key: x264-linux-${{ matrix.target }}-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build x264
         if: steps.cache-x264.outputs.cache-hit != 'true'
@@ -280,15 +287,22 @@ jobs:
           sudo tar -xJf "llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64.tar.xz" -C /opt
           echo "/opt/llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64/bin" >> $GITHUB_PATH
 
-      # x264 has no mingw apt package — build it from source
+      # x264 has no mingw apt package — build it from source.
+      # hashFiles('x264-src/**') used to be the cache key, but x264-src is only
+      # cloned by the *next* step, so the hash was always empty and the key
+      # constant — the cache never invalidated when quatric/x264 gained new
+      # x264_param_t fields. Key on the upstream commit instead, and no
+      # restore-keys: a prefix fallback would restore the stale headers anyway.
+      - name: Resolve x264 revision
+        id: x264-rev
+        run: echo "sha=$(git ls-remote https://github.com/quatric/x264.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
       - name: Cache x264 for ${{ matrix.target }}
         id: cache-x264
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: x264-${{ matrix.target }}-v9-${{ hashFiles('x264-src/**') }}
-          restore-keys: |
-            x264-${{ matrix.target }}-v9-
+          key: x264-${{ matrix.target }}-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-x264.outputs.cache-hit != 'true'
@@ -438,12 +452,18 @@ jobs:
           brew update
           brew install yasm pkg-config nasm sdl2
 
+      # This cache holds x264 too, so it has to track the upstream x264 commit
+      # (see the linux job) — otherwise ffmpeg builds against a stale x264.h.
+      - name: Resolve x264 revision
+        id: x264-rev
+        run: echo "sha=$(git ls-remote https://github.com/quatric/x264.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
       - name: Cache dependencies
         id: cache-deps
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps
-          key: deps-macos-universal-v7
+          key: deps-macos-universal-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
