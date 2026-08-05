@@ -1101,8 +1101,12 @@ static int predict_motion(AVCodecContext *avctx,
             mv.x = mv.x + (unsigned)get_se_golomb(gb);
             mv.y = mv.y + (unsigned)get_se_golomb(gb);
         }
-        if (mv.x >= INT_MAX || mv.y >= INT_MAX)
+        if (mv.x >= INT_MAX || mv.y >= INT_MAX) {
+            if (getenv("MOBI_DECDBG"))
+                av_log(avctx, AV_LOG_INFO, "[DEC]   MV overflow idx=%d mv=%d,%d\n",
+                       index, mv.x, mv.y);
             return AVERROR_INVALIDDATA;
+        }
 
         motion[offsetm].x = mv.x;
         motion[offsetm].y = mv.y;
@@ -1202,6 +1206,11 @@ static int predict_motion(AVCodecContext *avctx,
             int ret, idx2;
 
             idx2 = get_vlc2(gb, mv_vlc[s->moflex][tidx], MOBI_MV_VLC_BITS, 1);
+
+            if (getenv("MOBI_DECDBG"))
+                av_log(avctx, AV_LOG_INFO,
+                       "[DEC]   split index=%d half=%d %dx%d tidx=%d -> idx2=%d\n",
+                       index, i, width, height, tidx, idx2);
 
             ret = predict_motion(avctx, width, height, idx2,
                                  offsetm, offsetx + i * adjx, offsety + i * adjy);
