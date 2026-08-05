@@ -4,3 +4,5 @@
 reconcheck
 pktdump
 reference/mods_ref_enc
+reference/decode_ref
+reference/ref.bin
