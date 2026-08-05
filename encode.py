@@ -19,9 +19,12 @@ if getattr(sys, 'frozen', False):
     FFENC = os.path.join(sys._MEIPASS, ffmpeg_name)
     ffprobe_name = "ffprobe.exe" if os.name == 'nt' else "ffprobe"
     FFPROBE = os.environ.get("FFPROBE", os.path.join(sys._MEIPASS, ffprobe_name))
+    ffplay_name = "ffplay.exe" if os.name == 'nt' else "ffplay"
+    FFPLAY = os.environ.get("FFPLAY", os.path.join(sys._MEIPASS, ffplay_name))
 else:
     FFENC = os.environ.get("FFMPEG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg"))
     FFPROBE = os.environ.get("FFPROBE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe"))
+    FFPLAY = os.environ.get("FFPLAY", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffplay"))
 DEFAULT_OUTDIR = os.environ.get("OUTDIR", "/Volumes/SSD/tmp")
 
 
@@ -90,6 +93,15 @@ def stereo_layout(inp, ifmt):
     if "side by side" in out or "sidebyside" in out:
         return "sbs", inverted
     return None, False
+
+
+def stereo_in_mode(kind, inverted):
+    """stereo3d's *input* mode name for the given packing.
+
+    The l/r suffix says which eye is stored first, so feeding the 'r' variant
+    for an inverted stream makes every stereo3d output mode mean what it says
+    (out=sbsl really is left-on-the-left)."""
+    return {"frameseq": "a", "tb": "ab", "sbs": "sbs"}[kind] + ("r" if inverted else "l")
 
 
 def eye_filters(kind, inverted):
@@ -217,7 +229,7 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid) — use 'decode' to decode any supported file including .rvid/.h4m/.ty")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid) — use 'decode' to decode any supported file including .rvid/.h4m/.ty, or 'play' to play one back without writing a file")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
     parser.add_argument("input2", nargs="?", default="", help="Second input file (for moflex3d/cia right eye)")
@@ -258,7 +270,8 @@ def main():
     parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
     parser.add_argument("-o", "--output", dest="output", default="", help="Output filename (decode mode). Default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4.")
-    parser.add_argument("--eyes", dest="eyes", default="both", choices=["both", "left", "right", "packed"], help="Decode mode, stereoscopic 3DS input: which eye to write. 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Ignored for 2D input.")
+    parser.add_argument("--eyes", dest="eyes", default="both", choices=["both", "left", "right", "packed"], help="Stereoscopic 3DS input: which eye to use. Decode mode: 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Play mode: 'both' shows the eyes side by side in one window, 'left'/'right' plays a single eye full-window, 'packed' plays the stream as stored (eyes alternating). Ignored for 2D input.")
+    parser.add_argument("--zoom", dest="zoom", type=float, default=0.0, help="Play mode: scale the window by this factor (e.g. 3 for a DS 256x192 clip). 0 = native size.")
 
     parsed = parser.parse_args()
     OUTDIR = parsed.outdir
@@ -340,8 +353,8 @@ def main():
     moaud = 0
     cvc = ""
     
-    if fmt == "decode":
-        mode = "decode"
+    if fmt in ("decode", "play"):
+        mode = fmt
         dmx = ""
         scale = ""
         moaud = 0
@@ -366,7 +379,7 @@ def main():
         # external helper. DS screen is 256x192; source is packed to rgb24.
         mode, dmx, scale, moaud, cvc = "vid", "rvid", "256:192", 0, "rvid"
     else:
-        print(f"unknown format '{fmt}' (decode|mo|moflex|moflex3d|mods|vx|thp|rvid)")
+        print(f"unknown format '{fmt}' (play|decode|mo|moflex|moflex3d|mods|vx|thp|rvid)")
         sys.exit(2)
 
 
@@ -376,7 +389,9 @@ def main():
         scale = "384:288"
     
     out_directory = parsed.outdir or "."
-    if out_directory:
+    # Play mode writes nothing, so don't create (or require) an output directory
+    # for it -- the default one lives on a removable volume.
+    if out_directory and mode != "play":
         os.makedirs(out_directory, exist_ok=True)
 
     def run_cmd(cmd, check=True, hide_err=False):
@@ -392,6 +407,99 @@ def main():
         if subprocess.run(cmd1).returncode != 0:
             if subprocess.run(cmd2).returncode != 0:
                 sys.exit(1)
+
+    if mode == "play":
+        # Play back a source file directly, with no intermediate file: our own
+        # ffplay links the same decoders as ffmpeg, so .mo/.moflex/.mods/.vx/
+        # .thp/.rvid/.h4m play natively even though no system player knows them.
+        inp = audio
+        if not os.path.isfile(inp):
+            print(f"input not found: {inp}")
+            sys.exit(2)
+        # ffplay is only built when the tree was configured with SDL2, which the
+        # portable/frozen builds are not. Without it, decode to a temp file and
+        # hand that to the system player: the filter chain is identical either
+        # way, so the split-screen view is the same picture.
+        have_ffplay = os.path.exists(FFPLAY)
+        ifmt = input_fmt(inp)
+        vf = []
+        if is_ycgco(inp, ifmt):
+            print("   (YCgCo input: applying inverse color transform)")
+            vf.append(YCGCO_INV_VF)
+
+        kind, inverted = stereo_layout(inp, ifmt)
+        want = parsed.eyes
+        if kind and want != "packed":
+            src = stereo_in_mode(kind, inverted)
+            if want == "both":
+                # One window, both eyes side by side. stereo3d does the
+                # de-interleaving itself, so a frame-alternate stream plays at
+                # its true per-eye rate instead of flickering between eyes.
+                # Name the options explicitly: the positional shorthand isn't
+                # accepted by every build's option parser.
+                vf.append(f"stereo3d=in={src}:out=sbsl")
+                shown = "left | right side by side"
+            else:
+                vf.append(f"stereo3d=in={src}:out=m{want[0]}")
+                shown = f"{want} eye only"
+            print(f">> playing  {inp}  (stereoscopic {kind}"
+                  f"{', eyes swapped' if inverted else ''}: {shown})")
+        else:
+            if kind:
+                print(f"   (stereoscopic {kind} input played as stored; "
+                      "--eyes both shows them side by side)")
+            print(f">> playing  {inp}")
+
+        if parsed.zoom and parsed.zoom > 0:
+            vf.append(f"scale=iw*{parsed.zoom}:ih*{parsed.zoom}:flags=neighbor")
+
+        if have_ffplay:
+            # Decode and filter in ffmpeg, then pipe raw frames to ffplay as a
+            # plain display sink. ffplay is built from whatever filter and
+            # decoder subset its own configure allowed -- the shipped one has no
+            # stereo3d at all -- so driving it directly would make 3D playback
+            # depend on how ffplay happened to be built. This way playback
+            # always uses the same decode path as the decode button, and ffplay
+            # only has to put frames on screen. (The cost is no seeking, since
+            # a pipe isn't seekable.)
+            dec = [FFENC, "-nostdin", "-v", "error"] + ifmt + ["-i", inp]
+            if vf:
+                dec += ["-vf", ",".join(vf)]
+            dec += ["-c:v", "rawvideo", "-c:a", "pcm_s16le", "-f", "nut", "-"]
+            play = [FFPLAY, "-hide_banner", "-loglevel", "error",
+                    "-window_title", os.path.basename(inp), "-autoexit", "-i", "-"]
+            src_proc = subprocess.Popen(dec, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, text=True)
+            rc = subprocess.run(play, stdin=src_proc.stdout).returncode
+            src_proc.stdout.close()
+            # Closing the window leaves ffmpeg blocked on a full pipe, so stop
+            # it rather than waiting for a reader that has gone away.
+            if src_proc.poll() is None:
+                src_proc.terminate()
+            err = (src_proc.communicate()[1] or "")
+            # Quitting early always ends the feeding ffmpeg with EPIPE; that is
+            # the normal way playback stops, not something to report.
+            err = "\n".join(l for l in err.splitlines()
+                            if "Broken pipe" not in l and l.strip())
+            if err:
+                print(err)
+            sys.exit(rc)
+
+        import tempfile
+        tmp = os.path.join(tempfile.gettempdir(),
+                           os.path.splitext(os.path.basename(inp))[0] + "_play.mp4")
+        print(f"   (no ffplay in this build: rendering {tmp} for the system player)")
+        cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp]
+        if vf:
+            cmd += ["-vf", ",".join(vf)]
+        cmd += ["-c:v", "mpeg4", "-q:v", "3", tmp]
+        if subprocess.run(cmd).returncode != 0:
+            # Sources whose audio codec has no decoder still give a usable video.
+            if subprocess.run(cmd[:-1] + ["-an", tmp]).returncode != 0:
+                sys.exit(1)
+        opener = ("open" if sys.platform == "darwin"
+                  else "start" if os.name == "nt" else "xdg-open")
+        sys.exit(subprocess.run([opener, tmp], shell=(os.name == "nt")).returncode)
 
     if mode == "decode":
         # In decode mode, audio argument is actually the input file
@@ -441,8 +549,18 @@ def main():
             cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp,
                    "-filter_complex", fc]
             for name, o in zip(labels, outs):
-                cmd += ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3", o]
-            run_cmd(cmd) or sys.exit(1)
+                # Each eye is a whole movie, so give it the soundtrack too.
+                # '0:a?' keeps the mapping optional for a video-only source.
+                cmd += ["-map", f"[{name}]", "-map", "0:a?",
+                        "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", o]
+            if not run_cmd(cmd, check=True):
+                # Fall back to video-only: some sources carry audio we can
+                # demux but not decode, and half a movie beats none.
+                cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + \
+                    ["-i", inp, "-filter_complex", fc]
+                for name, o in zip(labels, outs):
+                    cmd += ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3", o]
+                run_cmd(cmd) or sys.exit(1)
             print("\ndecode complete:")
             run_cmd(["ls", "-la"] + outs)
             sys.exit(0)
