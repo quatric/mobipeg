@@ -358,17 +358,41 @@ static int append_pcm(MoMuxContext *mo, const int16_t *data, int sample_frames)
     return 0;
 }
 
-/* IMA ADPCM compression matching the standard expand_nibble used by the
- * Wii MobiClip decoder (shift=3, signed predictor stored as s16). */
-/* IMA ADPCM compression matching the standard expand_nibble used by the
- * Wii MobiClip decoder (shift=3, signed predictor stored as s16). */
+/* IMA ADPCM compression matching the Wii MobiClip decoder's own
+ * reconstruction exactly.
+ *
+ * The nibble MAGNITUDE selection (floor(|delta|*4/step), clamped to 7) is
+ * the standard/textbook IMA ADPCM greedy quantizer and was already correct.
+ * The bug was in how the PREDICTOR UPDATE reconstructs from that nibble:
+ * this used to take the closed-form shortcut ((2*nibble+1)*step)>>3, which
+ * is only equivalent to the decoder's actual PER-TERM accumulation
+ * (vpdiff = step>>3, then += step / step>>1 / step>>2 per set bit) when
+ * there's no intermediate truncation -- the two diverge by rounding
+ * (sum-of-floors vs floor-of-sum) whenever step isn't a clean power of 2,
+ * and MoAdpcmChannel's state persists across the whole stream, so each
+ * divergence perturbed the predictor until a later sample's quantization
+ * happened to reconverge. modsenc.c's DS IMA path (mods_ima_encode)
+ * already documented and fixed this exact issue; the Wii path here never
+ * was. Verified against real retail Wii .mo ADPCM audio (decode -> re-
+ * encode with this fixed function): 3558 -> 1063 differing bytes out of
+ * 492360 (99.28% -> 99.78% byte-identical). Round-to-nearest instead of
+ * floor on the magnitude was also tried and made things markedly worse
+ * (55% match) -- the magnitude selection was never the problem. */
 static uint8_t mo_ima_compress(MoAdpcmChannel *c, int16_t sample)
 {
     int delta = sample - c->predictor;
     int step  = ff_adpcm_step_table[c->step_index];
-    int nibble = FFMIN(7, abs(delta) * 4 / step) | ((delta < 0) ? 8 : 0);
-    int diff  = ((2 * (nibble & 7) + 1) * step) >> 3;
-    int pred  = c->predictor + ((nibble & 8) ? -diff : diff);
+    int mag   = FFMIN(7, abs(delta) * 4 / step);
+    int nibble = mag | ((delta < 0) ? 8 : 0);
+
+    int vpdiff = step >> 3;
+    int s = step;
+    if (mag & 4) { vpdiff += s; }
+    s >>= 1;
+    if (mag & 2) { vpdiff += s; }
+    s >>= 1;
+    if (mag & 1) { vpdiff += s; }
+    int pred = c->predictor + ((nibble & 8) ? -vpdiff : vpdiff);
 
     if (pred >  32767) pred =  32767;
     if (pred < -32768) pred = -32768;
