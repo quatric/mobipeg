@@ -329,12 +329,14 @@ class EncodeGUI(tk.Tk):
         ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
         ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=2, column=2, padx=5, pady=5)
 
-        # Stereoscopic eye selection (3DS moflex)
+        # Stereoscopic eye selection (3DS moflex). "Both" means one file per eye
+        # when decoding and a single side-by-side window when playing, so the
+        # label says both things rather than naming only the decode behaviour.
         ttk.Label(self.decode_frame, text="3D eyes:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
         self.dec_eyes_var = tk.StringVar(value="both")
         eyes_frame = ttk.Frame(self.decode_frame)
         eyes_frame.grid(row=3, column=1, sticky="w", padx=5, pady=5)
-        for i, (val, label) in enumerate((("both", "Both (separate files)"),
+        for i, (val, label) in enumerate((("both", "Both (separate files / split-screen)"),
                                           ("left", "Left only"),
                                           ("right", "Right only"),
                                           ("packed", "Keep packed"))):
@@ -343,9 +345,23 @@ class EncodeGUI(tk.Tk):
         self.dec_eyes_note = ttk.Label(self.decode_frame, text="", foreground="grey")
         self.dec_eyes_note.grid(row=4, column=1, sticky="w", padx=5)
 
-        # Run Button
-        self.dec_run_btn = ttk.Button(self.decode_frame, text="▶ Run Decoding", command=self.run_decoding)
-        self.dec_run_btn.grid(row=5, column=1, pady=15)
+        # Playback zoom — DS/3DS clips are tiny (256x192, 400x240) on a modern
+        # display, so offer a whole-number blow-up for the preview window.
+        ttk.Label(self.decode_frame, text="Play zoom:").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+        self.dec_zoom_var = tk.StringVar(value="2x")
+        ttk.Combobox(self.decode_frame, textvariable=self.dec_zoom_var,
+                     values=["native", "2x", "3x", "4x"], state="readonly",
+                     width=8).grid(row=5, column=1, sticky="w", padx=5, pady=5)
+
+        # Buttons. Play is the no-output-file path: it decodes straight to a
+        # window, so it's the quick way to check a file before committing to a
+        # full decode.
+        btns = ttk.Frame(self.decode_frame)
+        btns.grid(row=6, column=1, pady=15, sticky="w")
+        self.dec_play_btn = ttk.Button(btns, text="▶ Play", command=self.run_play)
+        self.dec_play_btn.grid(row=0, column=0, padx=(0, 10))
+        self.dec_run_btn = ttk.Button(btns, text="▶ Run Decoding", command=self.run_decoding)
+        self.dec_run_btn.grid(row=0, column=1)
 
         self.dec_input_var.trace_add("write", lambda *a: self.on_decode_input_changed())
 
@@ -555,6 +571,29 @@ class EncodeGUI(tk.Tk):
                 cmd.append("--rvid-no-dither")
 
         self.execute_cmd(cmd, self.enc_run_btn)
+
+    def run_play(self):
+        """Play the selected file in a window without writing an output file."""
+        if not getattr(sys, 'frozen', False) and not os.path.exists(ENCODE_SCRIPT):
+            messagebox.showerror("Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}")
+            return
+
+        inp = self.dec_input_var.get()
+        if not inp:
+            messagebox.showwarning("Warning", "Please select a file to play.")
+            return
+
+        cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
+        cmd.extend(["play", inp])
+
+        eyes = self.dec_eyes_var.get()
+        if eyes and eyes != "both":
+            cmd.extend(["--eyes", eyes])
+        zoom = self.dec_zoom_var.get()
+        if zoom and zoom != "native":
+            cmd.extend(["--zoom", zoom.rstrip("x")])
+
+        self.execute_cmd(cmd, self.dec_play_btn)
 
     def run_decoding(self):
         if not getattr(sys, 'frozen', False) and not os.path.exists(ENCODE_SCRIPT):
