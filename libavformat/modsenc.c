@@ -119,6 +119,19 @@ typedef struct MODSMuxContext {
     int       kf_count;
     int       kf_cap;
 
+    /* Private mobiclip decoder used to find the TRUE video/audio split for
+     * embedded-audio chunks (ds_adpcm/FastAudio/PCM), matching what the
+     * demuxer's own mods_sx_video_split does on read -- see that function's
+     * comment. The RBSP-stop-bit heuristic below is kept only as a fallback
+     * when this decoder is unavailable; the heuristic mis-sizes the video
+     * field on rare frames (found via a step_index=-516 decode failure that
+     * only reproduced at specific frame counts, i.e. specific frame
+     * content), placing audio a few bytes off and corrupting the stream. */
+    AVCodecContext *venc_split_dec;
+    AVFrame        *venc_split_frame;
+    AVPacket       *venc_split_pkt;
+    int             venc_split_failed; /* 1 => alloc/open failed, don't retry */
+
     uint32_t max_chunk;     /* largest chunk size written (excl. the 4-byte word) */
 
     /* SX (FastAudio-codebook) path. The vx_audio encoder trains its
@@ -210,6 +223,57 @@ static int mods_record_keyframe(MODSMuxContext *m, uint32_t frame_no, uint32_t o
     return 0;
 }
 
+/* Decode `data` (one already-encoded video chunk) through a private
+ * mobiclip decoder to find exactly where the DS's own video decoder would
+ * stop reading -- the same "mobiclip_consumed_bytes" metadata the demuxer's
+ * mods_sx_video_split (mods.c) uses on read. Returns the consumed byte
+ * count, or -1 if the decoder is unavailable or decode fails (caller falls
+ * back to the RBSP-stop-bit heuristic). Lazily allocates/opens the decoder
+ * on first use; venc_split_failed sticks so a broken decoder doesn't get
+ * retried every frame. */
+static int mods_enc_video_split(AVFormatContext *s, const uint8_t *data, int size)
+{
+    MODSMuxContext *m = s->priv_data;
+    AVDictionaryEntry *e;
+    int consumed = -1, ret;
+
+    if (m->venc_split_failed)
+        return -1;
+    if (!m->venc_split_dec) {
+        const AVCodec *vc = avcodec_find_decoder(AV_CODEC_ID_MOBICLIP);
+        if (!vc) { m->venc_split_failed = 1; return -1; }
+        m->venc_split_dec = avcodec_alloc_context3(vc);
+        m->venc_split_frame = av_frame_alloc();
+        m->venc_split_pkt = av_packet_alloc();
+        if (!m->venc_split_dec || !m->venc_split_frame || !m->venc_split_pkt) {
+            m->venc_split_failed = 1;
+            return -1;
+        }
+        m->venc_split_dec->width  = s->streams[m->video_index]->codecpar->width;
+        m->venc_split_dec->height = s->streams[m->video_index]->codecpar->height;
+        m->venc_split_dec->thread_count = 1;
+        if (avcodec_open2(m->venc_split_dec, vc, NULL) < 0) {
+            m->venc_split_failed = 1;
+            return -1;
+        }
+    }
+    av_packet_unref(m->venc_split_pkt);
+    if (av_new_packet(m->venc_split_pkt, size) < 0)
+        return -1;
+    memcpy(m->venc_split_pkt->data, data, size);
+    ret = avcodec_send_packet(m->venc_split_dec, m->venc_split_pkt);
+    if (ret < 0)
+        return -1;
+    ret = avcodec_receive_frame(m->venc_split_dec, m->venc_split_frame);
+    if (ret < 0)
+        return -1;
+    e = av_dict_get(m->venc_split_frame->metadata, "mobiclip_consumed_bytes", NULL, 0);
+    if (e)
+        consumed = atoi(e->value);
+    av_frame_unref(m->venc_split_frame);
+    return (consumed >= 0 && consumed <= size) ? consumed : -1;
+}
+
 /* Write the pending video frame as one chunk, appending whole audio blocks.
  * When `final` is set (trailer), all remaining buffered audio is emitted,
  * including a trailing partial block. */
@@ -253,15 +317,27 @@ static int mods_flush_pending(AVFormatContext *s, int final)
      * stateful, block-granular FastAudio desynced every frame -> loud garbage.
      * Place audio at the decoder-stop boundary whenever audio is attached. */
     if (m->ds_adpcm || fa || m->audio_codec == MOBI_AUDIO_PCM) {
-        int e = vsize, mb_bits = 0;
-        while (e > 0 && m->pend_vid[e - 1] == 0)
-            e--;
-        if (e > 0) {
-            int lb = m->pend_vid[e - 1], k = 0;
-            while (!((lb >> k) & 1)) k++;   /* lowest set bit = RBSP stop bit */
-            mb_bits = (e - 1) * 8 + (7 - k);
+        /* Prefer actually decoding the video: exact, matches what the
+         * demuxer's mods_sx_video_split computes on read. The RBSP-stop-bit
+         * heuristic below is a fallback only -- it mis-sizes the video
+         * field on some frames (confirmed via a step_index=-516 decode
+         * failure reproducing only at specific frame content), disagreeing
+         * with the decode-based split and corrupting the audio stream from
+         * that chunk on. */
+        int decoded = mods_enc_video_split(s, m->pend_vid, vsize);
+        if (decoded >= 0) {
+            vfield = decoded;
+        } else {
+            int e = vsize, mb_bits = 0;
+            while (e > 0 && m->pend_vid[e - 1] == 0)
+                e--;
+            if (e > 0) {
+                int lb = m->pend_vid[e - 1], k = 0;
+                while (!((lb >> k) & 1)) k++;   /* lowest set bit = RBSP stop bit */
+                mb_bits = (e - 1) * 8 + (7 - k);
+            }
+            vfield = ((mb_bits + 15) / 16) * 2; /* decoder "consumed", 16-bit aligned */
         }
-        vfield = ((mb_bits + 15) / 16) * 2; /* decoder "consumed", 16-bit aligned */
         vwrite = FFMIN(vfield, vsize);      /* real MB bytes; rest zero-filled */
     } else {
         vfield = vsize + ((-vsize) & 3);
@@ -1018,6 +1094,12 @@ static void mods_deinit(AVFormatContext *s)
     av_freep(&m->sxv_size);
     av_freep(&m->sxv_kf);
     av_freep(&m->sx_cbk);
+    if (m->venc_split_dec)
+        avcodec_free_context(&m->venc_split_dec);
+    if (m->venc_split_frame)
+        av_frame_free(&m->venc_split_frame);
+    if (m->venc_split_pkt)
+        av_packet_free(&m->venc_split_pkt);
 }
 
 #include "libavutil/opt.h"
