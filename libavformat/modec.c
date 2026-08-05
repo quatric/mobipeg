@@ -563,14 +563,28 @@ static int mo_read_packet(AVFormatContext *s, AVPacket *pkt)
                 block_size = ch * 40;
             }
             if (block_size > 0) {
-                int total_available = mo->audio_size + mo->audio_padding;
                 int remainder = read_size % block_size;
                 if (remainder != 0) {
-                    int padding_needed = block_size - remainder;
-                    if (padding_needed <= (int)mo->audio_padding)
-                        read_size += padding_needed;
-                    else
-                        read_size = total_available;
+                    /* A non-whole-block audio_size means the muxer folded this
+                     * chunk's trailing alignment pad into the audio tail, so the
+                     * pad bytes are real audio and ALL of them must be reclaimed
+                     * — take the largest whole block that fits in
+                     * audio_size + audio_padding, not merely the next block
+                     * boundary above audio_size.
+                     *
+                     * Advancing to the next boundary only happens to be right
+                     * when block_size >= audio_padding.  Mono PCM has a 2-byte
+                     * frame and the first chunk is folded by 3 (the retail
+                     * pad-3 quirk in moenc.c), so the old rule recovered 1 of
+                     * those 3 bytes and silently dropped one 16-bit sample per
+                     * file at the first chunk boundary.  Stereo PCM's 4-byte
+                     * frame masked the bug.
+                     *
+                     * Unfolded chunks have remainder == 0 and never get here,
+                     * so their genuine pad bytes are still discarded. */
+                    int total_available = mo->audio_size + mo->audio_padding;
+                    int rounded = (total_available / block_size) * block_size;
+                    read_size = rounded > read_size ? rounded : total_available;
                 }
             }
             ret = av_get_packet(pb, pkt, read_size);
