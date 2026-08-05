@@ -112,15 +112,28 @@ jobs:
           printf '#!/bin/sh\nexec env PKG_CONFIG_LIBDIR=%s /usr/bin/pkg-config "$@"\n' "$PKGDIR" | sudo tee "$SHIM"
           sudo chmod +x "$SHIM"
 
-      - name: Cache libogg + libvorbis
-        id: cache-vorbis
+      # ONE cache entry for the whole $DEPS prefix, shared by every dependency
+      # installed into it.  Two actions/cache entries must never point at the
+      # same path: whichever restores last unpacks its snapshot over the other's
+      # freshly-built files.  x264 and libvorbis used to have separate entries
+      # here (the vorbis key a constant), so a stale vorbis snapshot could put an
+      # old x264.h back on top of a newly built one and break the ffmpeg build.
+      # Key on the upstream x264 commit — the patched x264 keeps adding
+      # x264_param_t fields, so anything longer-lived leaves ffmpeg compiling
+      # against a stale header.  Rebuilding vorbis on an x264 bump is cheap.
+      - name: Resolve x264 revision
+        id: x264-rev
+        run: echo "sha=$(git ls-remote https://github.com/quatric/x264.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache dependencies
+        id: cache-deps
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: vorbis-1.3.7-linux-${{ matrix.target }}-v1
+          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build libogg + libvorbis
-        if: steps.cache-vorbis.outputs.cache-hit != 'true'
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
           mkdir -p "$DEPS"
@@ -146,22 +159,8 @@ jobs:
           make -j$(nproc) && make install
           cd ..
 
-      # Key the cache on the upstream x264 commit rather than a hand-bumped
-      # version number: the patched x264 keeps adding x264_param_t fields, and a
-      # cache that outlives them leaves ffmpeg building against a stale x264.h.
-      - name: Resolve x264 revision
-        id: x264-rev
-        run: echo "sha=$(git ls-remote https://github.com/quatric/x264.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache x264
-        id: cache-x264
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: x264-linux-${{ matrix.target }}-${{ steps.x264-rev.outputs.sha }}
-
       - name: Build x264
-        if: steps.cache-x264.outputs.cache-hit != 'true'
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
           mkdir -p "$DEPS"
@@ -288,24 +287,31 @@ jobs:
           echo "/opt/llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64/bin" >> $GITHUB_PATH
 
       # x264 has no mingw apt package — build it from source.
-      # hashFiles('x264-src/**') used to be the cache key, but x264-src is only
-      # cloned by the *next* step, so the hash was always empty and the key
-      # constant — the cache never invalidated when quatric/x264 gained new
-      # x264_param_t fields. Key on the upstream commit instead, and no
-      # restore-keys: a prefix fallback would restore the stale headers anyway.
+      #
+      # ONE cache entry for the whole $DEPS prefix, shared by x264 and
+      # libogg/libvorbis.  These used to be two actions/cache entries on the same
+      # path, and because the vorbis key was a constant while x264's tracked the
+      # upstream commit, an x264 bump played out as: build fresh x264 into $DEPS
+      # -> restore the stale vorbis snapshot over it -> old x264.h and
+      # libx264.a are back -> ffmpeg fails to compile the new x264_param_t
+      # fields (i_mobi_cq_* was the one that finally caught it).  Two cache
+      # entries must never share a path; whichever restores last wins.
+      #
+      # Key on the upstream commit, and no restore-keys: a prefix fallback would
+      # restore the stale headers anyway.
       - name: Resolve x264 revision
         id: x264-rev
         run: echo "sha=$(git ls-remote https://github.com/quatric/x264.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache x264 for ${{ matrix.target }}
-        id: cache-x264
+      - name: Cache dependencies for ${{ matrix.target }}
+        id: cache-deps
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: x264-${{ matrix.target }}-${{ steps.x264-rev.outputs.sha }}
+          key: deps-${{ matrix.target }}-vorbis1.3.7-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build x264 for ${{ matrix.target }}
-        if: steps.cache-x264.outputs.cache-hit != 'true'
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
           mkdir -p "$DEPS"
@@ -339,15 +345,8 @@ jobs:
           fi
 
 
-      - name: Cache libogg + libvorbis for ${{ matrix.target }}
-        id: cache-vorbis
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: vorbis-1.3.7-mingw-${{ matrix.target }}-v4
-
       - name: Build libogg + libvorbis for ${{ matrix.target }}
-        if: steps.cache-vorbis.outputs.cache-hit != 'true'
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
           mkdir -p "$DEPS"
