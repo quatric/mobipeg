@@ -1097,6 +1097,31 @@ static int predict_motion(AVCodecContext *avctx,
         if (sidx < 0)
             sidx += 6;
 
+        /* Robustness only: retail streams never name a reference that does not
+         * exist yet -- all 17 known retail .mods samples decode without ever
+         * reaching this fallback. It exists because the retail encoder, when
+         * driven directly rather than through its normal lifecycle, will emit
+         * such a reference: its sub-block search probes one frame deeper than
+         * the parent block chose without clamping against how many frames have
+         * been coded since the last keyframe, and its slot ring always returns
+         * a pointer so it never notices. Substitute the nearest reference we
+         * actually have rather than failing the frame. */
+        if (!s->pic[sidx]->data[0]) {
+            for (int d = 1; d <= 5; d++) {
+                int cand = s->current_pic - d;
+
+                if (cand < 0)
+                    cand += 6;
+                if (s->pic[cand]->data[0]) {
+                    if (getenv("MOBI_DECDBG"))
+                        av_log(avctx, AV_LOG_INFO,
+                               "[DEC]   ref substituted sidx=%d -> %d\n", sidx, cand);
+                    sidx = cand;
+                    break;
+                }
+            }
+        }
+
         if (index > 0) {
             mv.x = mv.x + (unsigned)get_se_golomb(gb);
             mv.y = mv.y + (unsigned)get_se_golomb(gb);
@@ -1129,19 +1154,32 @@ static int predict_motion(AVCodecContext *avctx,
             av_assert0(s->pic[sidx]);
             av_assert0(s->pic[s->current_pic]);
             av_assert0(s->pic[s->current_pic]->data[i]);
-            if (!s->pic[sidx]->data[i])
+            if (!s->pic[sidx]->data[i]) {
+                if (getenv("MOBI_DECDBG"))
+                    av_log(avctx, AV_LOG_INFO, "[DEC]   no refplane sidx=%d i=%d\n", sidx, i);
                 return AVERROR_INVALIDDATA;
+            }
 
             method = (mv.x & 1) | ((mv.y & 1) << 1);
             src_linesize = s->pic[sidx]->linesize[i];
             dst_linesize = s->pic[s->current_pic]->linesize[i];
             dst = s->pic[s->current_pic]->data[i] + offsetx + offsety * dst_linesize;
 
+            /* Do not relax this to tolerate vectors that reach outside the
+             * frame. The directly-driven retail encoder emits such vectors
+             * because its reference planes carry an extra border row, but no
+             * retail stream does: all 17 known samples decode without tripping
+             * this. Widening it would only weaken the bounds check. */
             if (offsetx + (mv.x >> 1) < 0 ||
                 offsety + (mv.y >> 1) < 0 ||
                 offsetx + width  + (mv.x + 1 >> 1) > fwidth ||
-                offsety + height + (mv.y + 1 >> 1) > fheight)
+                offsety + height + (mv.y + 1 >> 1) > fheight) {
+                if (getenv("MOBI_DECDBG"))
+                    av_log(avctx, AV_LOG_INFO,
+                           "[DEC]   MV oob i=%d off=%d,%d %dx%d mv=%d,%d f=%dx%d\n",
+                           i, offsetx, offsety, width, height, mv.x, mv.y, fwidth, fheight);
                 return AVERROR_INVALIDDATA;
+            }
 
             switch (method) {
             case 0:
