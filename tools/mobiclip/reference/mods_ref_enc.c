@@ -62,6 +62,20 @@ extern int32_t mods_vfw_compress_begin_portable(
     uint32_t (*resolver)(void *, uint32_t),
     int (*host_create)(void *, uint8_t *, void *),
     void (*host_cleanup)(void *, uint8_t *, void *), void *opaque);
+/* mods_vfw_compress_query_input (the desktop VfW DriverProc gate that Begin
+ * calls before this) rejects any biWidth > 256 -- that cap is specific to
+ * that wrapper's own DriverProc contract, not the core codec: this function
+ * (what Begin calls *after* query_input passes) only requires width/height
+ * > 0 and a multiple of 16. Call it directly to drive resolutions the VfW
+ * wrapper's width policy would otherwise block, e.g. real retail titles'
+ * actual frame sizes. */
+extern int mods_vfw_encode_context_init_100441d0_contract(
+    uint8_t *ctx, int32_t width, int32_t height, const uint32_t settings[21],
+    uint32_t feature_flags,
+    void *(*alloc_fn)(void *, uint32_t),
+    uint32_t (*resolver)(void *, uint32_t),
+    int (*host_create)(void *, uint8_t *, const uint8_t *), void *opaque);
+extern void mods_vfw_set_qp(uint8_t *ctx, int32_t qp);
 extern int32_t mods_vfw_compress_end(uint8_t *instance,
     void (*free_fn)(void *, void *),
     void (*host_cleanup)(void *, uint8_t *, void *), void *opaque);
@@ -91,7 +105,7 @@ static void *low_alloc(void *opaque, uint32_t size)
 }
 static void low_free(void *opaque, void *p) { (void)opaque; (void)p; }
 static uint32_t resolve(void *opaque, uint32_t addr) { (void)opaque; return addr; }
-static int host_create(void *opaque, uint8_t *ctx, void *settings)
+static int host_create(void *opaque, uint8_t *ctx, const uint8_t *settings)
 { (void)opaque; (void)ctx; (void)settings; return 1; }
 static void host_cleanup(void *opaque, uint8_t *ctx, void *obj)
 { (void)opaque; (void)ctx; (void)obj; }
@@ -156,12 +170,21 @@ int main(int argc, char **argv)
     PolicyCallbacks cb = { mods_cq_pre_encode, mods_cq_force_iframe,
                            mods_cq_output_ready, mods_cq_reencode };
 
-    int32_t rc = mods_vfw_compress_begin_portable(instance, &in, &out, &opt,
-                    low_alloc, low_free, resolve, host_create, host_cleanup, NULL);
-    fprintf(stderr, "[dbg] calling Begin\n");
-    if (rc != 0) { fprintf(stderr, "Begin failed: %d\n", rc); return 1; }
-    fprintf(stderr, "[dbg] Begin ok\n");
+    (void)in; (void)out; /* format-descriptor fields unused now that we skip
+                             the VfW query_input width<=256 wrapper gate */
     uint8_t *ctx = instance + 0x234;
+    memset(ctx, 0, 0x728);
+    fprintf(stderr, "[dbg] calling context_init (bypassing VfW width<=256 gate)\n");
+    if (!mods_vfw_encode_context_init_100441d0_contract(
+            ctx, W, H, opt.settings, opt.feature_flags,
+            low_alloc, resolve, host_create, NULL)) {
+        fprintf(stderr, "context_init failed\n");
+        return 1;
+    }
+    if (QP >= 0 && QP <= 51)
+        mods_vfw_set_qp(ctx, QP);
+    instance[0xB0F4] = 1;
+    fprintf(stderr, "[dbg] context_init ok\n");
 
     FILE *fi = fopen(inpath, "rb");
     FILE *fo = fopen(outpath, "wb");
