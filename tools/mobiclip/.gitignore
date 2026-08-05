@@ -1,0 +1,6 @@
+# Generated test inputs and locally-built harness binaries.
+*.yuv
+*.mods
+reconcheck
+pktdump
+reference/mods_ref_enc
