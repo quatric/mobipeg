@@ -129,6 +129,9 @@ typedef struct X264Context {
     int i_mobiclip;
     int b_moflex;
     int i_mobi_qyx;
+    int i_mobi_cq_iboost;
+    int i_mobi_cq_ithreshold;
+    int i_mobi_cq_interval;
     int b_mobi_pktdbg;
     int b_mobi_dbg;
 } X264Context;
@@ -1138,6 +1141,9 @@ static av_cold int X264_init(AVCodecContext *avctx)
         x4->b_moflex = x4->i_mobiclip ? 1 : 0;
     x4->params.b_moflex   = x4->b_moflex;
     x4->params.i_mobi_qyx = x4->i_mobi_qyx;
+    x4->params.i_mobi_cq_iboost     = x4->i_mobi_cq_iboost;
+    x4->params.i_mobi_cq_ithreshold = x4->i_mobi_cq_ithreshold;
+    x4->params.i_mobi_cq_interval   = x4->i_mobi_cq_interval;
 
     if (avctx->level > 0)
         x4->params.i_level_idc = avctx->level;
@@ -1660,6 +1666,9 @@ static const AVOption options[] = {
     { "mobiclip",     "MobiClip H.264 mode: 0=standard H.264, 1=MO/MOFLEX tables, 2=MODS tables, 3=MO table 2", OFFSET(i_mobiclip), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 3, VE },
     { "moflex",       "MobiClip MOFLEX mode (flexible=1, standard=0, -1=auto: on when mobiclip)", OFFSET(b_moflex), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, VE },
     { "mobi_qyx",     "MobiClip QY extension tier (0-15)", OFFSET(i_mobi_qyx), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 15, VE },
+    { "mobi-cq-iboost",     "MobiClip retail CQ policy: IBoostPercent, 0-100 (-1=off, use plain CQP)", OFFSET(i_mobi_cq_iboost), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 100, VE },
+    { "mobi-cq-ithreshold", "MobiClip retail CQ policy: IThreshold, 0-100 (-1=off, use plain CQP)", OFFSET(i_mobi_cq_ithreshold), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 100, VE },
+    { "mobi-cq-interval",   "MobiClip retail CQ policy: keyframe interval in frames (-1=use gop_size)", OFFSET(i_mobi_cq_interval), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, VE },
     { "mobi_pktdbg",  "MobiClip Packet Debug", OFFSET(b_mobi_pktdbg), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { "mobi_dbg",     "MobiClip Debug", OFFSET(b_mobi_dbg), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { NULL },
