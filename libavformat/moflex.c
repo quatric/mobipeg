@@ -417,7 +417,12 @@ static int moflex_read_packet(AVFormatContext *s, AVPacket *pkt)
                     /* one shared header (ch*4), then ch*128 nibbles per subframe */ \
                     _dur = _ch > 0 ? ((p)->size - 4 * _ch) * 2 / _ch : 0;     \
                 } else if (_par->codec_id == AV_CODEC_ID_FASTAUDIO) {           \
-                    _dur = 256;                                                   \
+                    /* 40 bytes per channel decode to 256 samples, and a packet \
+                     * can hold several of those blocks -- assuming exactly one \
+                     * stamps every packet 256 long however much audio it       \
+                     * carries, so the timestamps advance slower than the sound \
+                     * and the stream reports a fraction of its real length. */ \
+                    _dur = (p)->size / (40 * _ch) * 256;                         \
                 }                                                                \
                 (p)->duration = _dur;                                             \
                 if ((si_idx) < FF_ARRAY_ELEMS(m->stream_pts))                    \
