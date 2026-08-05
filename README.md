@@ -64,6 +64,27 @@ For layout 1 (right-first), exchange `al` for `ar`. Layouts 2/3 and 4/5 are
 top/bottom and side-by-side respectively and can be separated with the
 corresponding `stereo3d` input mode.
 
+`encode.py decode` does this automatically — it reads the layout from the side
+data and writes `name_left.mp4` / `name_right.mp4`, or just one eye with
+`--eyes left|right`, or the untouched stream with `--eyes packed`.
+
+### Playback
+
+`encode.py play <file>` opens any supported input in a window without writing
+anything to disk, which is the quickest way to check a file:
+
+```sh
+python3 encode.py play movie.mods --zoom 3          # blow a DS clip up 3x
+python3 encode.py play movie.moflex                 # 3D: both eyes side by side
+python3 encode.py play movie.moflex --eyes left     # 3D: one eye, full window
+```
+
+Decoding and filtering happen in `ffmpeg`, which then pipes raw frames to
+`ffplay` as a display sink, so playback uses the same decode path as `decode`
+regardless of which filters `ffplay` itself was built with. When the build has
+no `ffplay` at all (the portable builds are configured `--disable-sdl2`), the
+clip is rendered to a temporary file and handed to the system player instead.
+
 ## Tools
 
 * [ffmpeg](https://ffmpeg.org/ffmpeg.html) is a command line toolbox to
