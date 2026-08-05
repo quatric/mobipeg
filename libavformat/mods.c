@@ -468,6 +468,34 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                     audio_size  = audio_blocks * m->audio_channels * 128;
                     if (is_key && audio_blocks > 0)
                         audio_size += 4 + 4 * m->audio_channels;
+
+                    /* vfield is an UPPER BOUND, not the exact split: the video
+                     * decoder's final bit position sometimes lands 1-2 bits past
+                     * the last bit the encoder wrote, which pushes the 16-bit
+                     * round-up one word too far and puts audio_start 2 bytes too
+                     * high.  It is invisible unless the true end sits exactly on
+                     * a 16-bit boundary, so it hits a minority of frames (6 of 76
+                     * keyframes in americ1 movie_01) -- and there it made the
+                     * decoder read the IMA re-prime header 2 bytes late and abort
+                     * the packet with a bogus step_index.
+                     *
+                     * Retail chunks always leave 4 or 6 pad bytes after the audio
+                     * (verified over every unambiguous keyframe in that file), so
+                     * exactly two starts are legal, 2 bytes apart, and the error
+                     * is always upward.  Clamp the overshoot to the pad-4
+                     * candidate, then choose between the two on the bytes in
+                     * question: both zero means they are the encoder's zero-fill
+                     * of the final 16-bit word rather than video, so the real
+                     * split is the pad-6 one.  Bounded to those two candidates,
+                     * so this can never invent an offset of its own. */
+                    if (audio_size > 0) {
+                        int pad4 = (int)size - 4 - audio_size;
+                        if (audio_start > pad4 && pad4 >= 0)
+                            audio_start = pad4;          /* clamp the overshoot */
+                        if (audio_start == pad4 && pad4 >= 2 &&
+                            pkt->data[pad4 - 1] == 0 && pkt->data[pad4 - 2] == 0)
+                            audio_start = pad4 - 2;      /* zero-fill, so pad is 6 */
+                    }
                 } else { /* FASTAUDIO: 4-byte keyframe word precedes blocks */
                     int kf_word = (is_key && audio_blocks > 0) ? 4 : 0;
                     audio_start = vfield + kf_word;
