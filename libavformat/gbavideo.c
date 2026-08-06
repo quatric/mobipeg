@@ -46,6 +46,7 @@
 #include "avformat.h"
 #include "demux.h"
 #include "internal.h"
+#include "libavcodec/defs.h"
 
 #define T_VIDEO 1
 #define T_AUDIO 2
@@ -59,6 +60,7 @@ typedef struct GBAVideoDemuxContext {
     int sample_rate;
     const char *resource;       /* SFCD member to play, NULL = the largest */
     int64_t best_size;
+    int inflate;                /* Hydrogen carts compress with Inflate */
 
     int video_idx, audio_idx;
 
@@ -172,6 +174,9 @@ static int parse_video_resource(AVFormatContext *avctx, int64_t off,
 
     st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     st->codecpar->codec_id   = AV_CODEC_ID_ADS_GBA;
+    if (ff_alloc_extradata(st->codecpar, 1) < 0)
+        return AVERROR(ENOMEM);
+    st->codecpar->extradata[0] = s->inflate;
     st->codecpar->width      = 240;
     st->codecpar->height     = 160;
     st->nb_frames            = (w0 >> 8) & 0xFFFF;
@@ -278,6 +283,8 @@ static int read_mmstr(AVFormatContext *avctx, int64_t base)
     return 0;
 }
 
+static int gbavideo_scan_rom(AVFormatContext *avctx);
+
 static int gbavideo_read_header(AVFormatContext *avctx)
 {
     return read_mmstr(avctx, 0);
@@ -314,11 +321,13 @@ static int gbavideo_rom_read_header(AVFormatContext *avctx)
     int64_t sfcd, data_base, pos, want = -1;
     uint32_t count;
 
+    s->video_idx = s->audio_idx = -1;
+
     sfcd = find_sfcd(pb);
     if (sfcd < 0) {
-        av_log(avctx, AV_LOG_ERROR,
-               "no SFCD archive found; not an ADS-era GBA Video ROM\n");
-        return AVERROR_INVALIDDATA;
+        /* No archive: a Hydrogen-era cart, whose streams are found by scan. */
+        av_log(avctx, AV_LOG_VERBOSE, "no SFCD archive; scanning for streams\n");
+        return gbavideo_scan_rom(avctx);
     }
     av_log(avctx, AV_LOG_VERBOSE, "SFCD archive at 0x%"PRIx64"\n", sfcd);
 
@@ -370,6 +379,115 @@ static int gbavideo_rom_read_header(AVFormatContext *avctx)
     return read_mmstr(avctx, want);
 }
 
+/*
+ * Hydrogen-era carts (Dora the Explorer) have no SFCD archive and no resource
+ * directory that has been located, but their video streams sit in the ROM
+ * uncompressed and every chunk header states how long it is. So the streams
+ * can be found by walking: take the first header that validates, follow the
+ * chain to its end, and that span is one stream. Because streams are laid out
+ * back to back this stays linear over the ROM.
+ */
+static int chunk_header_ok(const uint8_t *h)
+{
+    uint32_t w0 = AV_RL32(h), w1 = AV_RL32(h + 4);
+    unsigned desc = w0 & 0xFFFF, nb = w0 >> 16;
+    unsigned sa = (w1 & 0x1FFF) * 4, sb = (w1 >> 13) * 4;
+
+    return (desc & 0xFFF0) == 0x4030 && nb >= 1 && nb <= 300 &&
+           sa > 500 && sb > 500;
+}
+
+static int64_t walk_chain(AVIOContext *pb, int64_t pos, int64_t size,
+                          int *nb_chunks, int64_t *nb_frames)
+{
+    uint8_t h[8];
+
+    *nb_chunks = 0;
+    *nb_frames = 0;
+    while (pos + 8 <= size) {
+        avio_seek(pb, pos, SEEK_SET);
+        if (avio_read(pb, h, 8) != 8 || !chunk_header_ok(h))
+            break;
+        (*nb_chunks)++;
+        *nb_frames += AV_RL32(h) >> 16;
+        pos += 8 + (AV_RL32(h + 4) & 0x1FFF) * 4 + (AV_RL32(h + 4) >> 13) * 4;
+    }
+    return pos;
+}
+
+#define MIN_CHUNKS 8            /* enough to not fire on random data */
+
+static int gbavideo_scan_rom(AVFormatContext *avctx)
+{
+    GBAVideoDemuxContext *s = avctx->priv_data;
+    AVIOContext *pb = avctx->pb;
+    int64_t size = avio_size(pb), pos = 0, best = -1, best_frames = 0;
+    int want = s->resource ? atoi(s->resource) : -1, idx = 0, best_chunks = 0;
+    uint8_t h[8];
+
+    if (size <= 0)
+        return AVERROR_INVALIDDATA;
+
+    while (pos + 8 <= size) {
+        int64_t end, frames;
+        int chunks;
+
+        avio_seek(pb, pos, SEEK_SET);
+        if (avio_read(pb, h, 8) != 8)
+            break;
+        if (!chunk_header_ok(h)) {
+            pos += 4;
+            continue;
+        }
+
+        end = walk_chain(pb, pos, size, &chunks, &frames);
+        if (chunks < MIN_CHUNKS) {
+            pos += 4;
+            continue;
+        }
+
+        av_log(avctx, AV_LOG_VERBOSE,
+               "  [%d] stream at 0x%"PRIx64", %d chunks, %"PRId64" frames\n",
+               idx, pos, chunks, frames);
+
+        if (want >= 0 ? idx == want : frames > best_frames) {
+            best        = pos;
+            best_frames = frames;
+            best_chunks = chunks;
+        }
+        idx++;
+        pos = end;
+    }
+
+    if (best < 0) {
+        av_log(avctx, AV_LOG_ERROR, "no video stream found in this ROM\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    s->inflate   = 1;
+    s->chunk_pos = best;
+    s->chunk_end = walk_chain(pb, best, size, &best_chunks, &best_frames);
+    s->nb_video_frames = best_frames;
+
+    {
+        AVStream *st = avformat_new_stream(avctx, NULL);
+
+        if (!st)
+            return AVERROR(ENOMEM);
+        st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        st->codecpar->codec_id   = AV_CODEC_ID_ADS_GBA;
+        st->codecpar->width      = 240;
+        st->codecpar->height     = 160;
+        st->nb_frames            = best_frames;
+        if (ff_alloc_extradata(st->codecpar, 1) < 0)
+            return AVERROR(ENOMEM);
+        st->codecpar->extradata[0] = 1;
+        s->video_idx = st->index;
+        avpriv_set_pts_info(st, 64, 1, s->frame_rate);
+    }
+    return 0;
+}
+
 static int gbavideo_rom_probe(const AVProbeData *p)
 {
     /* Every GBA cartridge header carries a fixed 0x96 at 0xb2; requiring the
@@ -380,6 +498,11 @@ static int gbavideo_rom_probe(const AVProbeData *p)
     for (int i = 0; i + 4 <= p->buf_size; i++)
         if (AV_RB32(p->buf + i) == MKBETAG('S', 'F', 'C', 'D'))
             return AVPROBE_SCORE_MAX;
+
+    /* A Hydrogen-era cart has no archive to key off, so look for the maker
+     * code Majesco used; the scan in read_header is the real test. */
+    if (!memcmp(p->buf + 0xb0, "5G", 2))
+        return AVPROBE_SCORE_MAX / 2;
 
     return 0;
 }

@@ -628,7 +628,7 @@ LZMA layer, the colour transform and the audio context table are solid.
 
 
 
-## The Hydrogen lineage (Dora the Explorer) — in progress
+## The Hydrogen lineage (Dora the Explorer) — video solved
 
 Dragon Ball GT is not the only ADS-era stack. **Dora the Explorer Volume 1**
 (`MDRE`, maker `5G`, 32 MB) is a third lineage, built on Majesco's **Hydrogen
@@ -679,11 +679,39 @@ block, and above that the symbol indexes an 8-byte-per-entry table holding
 layout already sitting unused in `majesco_dist_len_table`. In the static path
 the distance code is a fixed 5 bits.
 
-**Still to do:** the dynamic path (states 1, 3 and 7), the canonical-code table
-construction, then Dora's container -- which is not yet located, since
-everything past the string block is compressed and no resource pointer table
-turned up in the first 2 MB. Note also that Dora's **audio is a different
-codec**: it uses `SoundPlayer_ADPCM.cpp` and carries the string "not adpcm
-audio stream in adpcm only build", so it is ADPCM rather than the adaptive PCM
-codec Dragon Ball GT uses. The video half is expected to be shared, since the
-block-geometry table at ROM `0xea70` is byte-identical.
+Structurally it is **DEFLATE** -- same block types, same code-length alphabet
+and permutation, same length and distance ladders -- with exactly two
+deviations: bits are read **most significant first**, and a blob carries a
+plain `uint32` size instead of a zlib header. `libavcodec/majesco.c` implements
+this and is verified against every chunk in the cart: 187 codebooks and 187
+index planes across nine streams decompress to their declared sizes with no
+failures. The fourth block type is never used by any of them.
+
+### Container
+
+Dora has no archive and no resource directory has been found -- everything past
+the string block is compressed, and no pointer table turned up. But the video
+streams themselves sit in the ROM **uncompressed**, in the same chunk format as
+Dragon Ball GT, and every chunk header states its own length. So the demuxer
+finds them by walking: take the first header that validates, follow the chain to
+its end, and that span is one stream. Streams are laid out back to back, so the
+scan stays linear. Nine streams turn up, the largest 91 chunks and 7216 frames.
+`-resource <n>` selects one by index.
+
+### What this cart forced fixing
+
+Dora uses mode 5, which Dragon Ball GT never does, and it exposed two bugs in
+the shared video path:
+
+  * the grid is **not always 60 blocks wide** -- it is `240 / blk_w`, so mode 5
+    (3x3) is an 80x53 grid, not 60-wide;
+  * chroma is **not simply one sample per block row for odd modes**. The switch
+    in `UnPredictChrominance` gives `{1, 4, 1, 3, 1, 2, 1, 2}` per mode, and
+    mode 5 keeps **two** Cb/Cr for a 3x3 block rather than three.
+
+Both were invisible on Dragon Ball GT, whose streams only use modes 3 and 7.
+
+**Still to do:** Dora's **audio is a different codec** -- it uses
+`SoundPlayer_ADPCM.cpp` and carries the string "not adpcm audio stream in adpcm
+only build", so it is ADPCM rather than the adaptive PCM codec Dragon Ball GT
+uses. Only video is wired up for this lineage.
