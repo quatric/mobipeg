@@ -74,16 +74,16 @@ data and writes `name_left.mp4` / `name_right.mp4`, or just one eye with
 anything to disk, which is the quickest way to check a file:
 
 ```sh
-python3 encode.py play movie.mods --zoom 3          # blow a DS clip up 3x
+python3 encode.py play movie.mods                   # DS clip, in a window
 python3 encode.py play movie.moflex                 # 3D: both eyes side by side
 python3 encode.py play movie.moflex --eyes left     # 3D: one eye, full window
 ```
 
-Decoding and filtering happen in `ffmpeg`, which then pipes raw frames to
-`ffplay` as a display sink, so playback uses the same decode path as `decode`
-regardless of which filters `ffplay` itself was built with. When the build has
-no `ffplay` at all (the portable builds are configured `--disable-sdl2`), the
-clip is rendered to a temporary file and handed to the system player instead.
+Playback uses the bundled `ffplay`, which links the same decoders as `ffmpeg`,
+so nothing is written to disk and no external player is involved. `ffplay` is
+only built when the tree is configured with SDL2 (`--enable-sdl2`, the default
+when SDL2 is installed); without it, `play` says so rather than falling back to
+a system player that cannot read these formats.
 
 ## Tools
 
