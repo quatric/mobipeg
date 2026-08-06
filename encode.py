@@ -49,10 +49,17 @@ def is_ycgco(inp, ifmt):
     than the container header (which reports 'unknown'). Works for any input
     type, so vx/other YCgCo sources get corrected the same as .mods.
 
-    .mods and .vx are *always* YCgCo, so short-circuit on extension: the ffprobe
-    frame probe can fail silently (e.g. FFPROBE path issues in the frozen GUI
-    build), and we must not skip the color transform for those known formats."""
-    if os.path.splitext(inp)[1].lower() in (".mods", ".vx"):
+    .mods is *always* YCgCo, so short-circuit on extension: the ffprobe frame
+    probe can fail silently (e.g. FFPROBE path issues in the frozen GUI build),
+    and we must not skip the color transform for that format.
+
+    .vx must NOT be listed here even though its bitstream is equally YCgCo: the
+    vx decoder converts to RGB24 itself (see vx.c, avctx->pix_fmt), so applying
+    the inverse on top of that transforms already-correct color a second time.
+    That wrecks the chroma by a fixed amount at every quantizer, which reads as
+    "the quantizer setting does nothing" -- decoded PSNR sat at ~20 dB for every
+    QP until this was removed, and is ~43 dB at QP 12 without it."""
+    if os.path.splitext(inp)[1].lower() == ".mods":
         return True
     try:
         p = subprocess.run(
@@ -70,7 +77,12 @@ def stereo_layout(inp, ifmt):
 
     type is ffmpeg's stereo3d name: "frameseq", "tb" or "sbs". inverted means
     the right eye comes first. MobiClip carries this as the moflex descriptor's
-    ImageLayout, which the demuxer exports as AV_PKT_DATA_STEREO3D."""
+    ImageLayout, which the demuxer exports as AV_PKT_DATA_STEREO3D.
+
+    A file that carries no such tag is indistinguishable from a 2D one here, so
+    a probe that cannot run must say so: silently returning "not stereoscopic"
+    turns a broken ffprobe into a 3D file that quietly decodes as one flat
+    double-width video. Use --stereo to state the layout when it is missing."""
     try:
         p = subprocess.run(
             [FFPROBE, "-v", "error"] + ifmt +
@@ -79,7 +91,14 @@ def stereo_layout(inp, ifmt):
              "-of", "default=nw=1", inp],
             stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         out = (p.stdout or "").lower()
-    except Exception:
+        if p.returncode != 0:
+            print(f"   (warning: ffprobe failed on {os.path.basename(inp)}, so a 3D "
+                  f"layout can't be detected — pass --stereo to set it)\n"
+                  f"   {(p.stderr or '').strip().splitlines()[-1] if p.stderr else ''}")
+            return None, False
+    except Exception as e:
+        print(f"   (warning: could not run ffprobe at {FFPROBE} ({e}) — 3D layout "
+              "detection is unavailable; pass --stereo to set it)")
         return None, False
     if "stereo 3d" not in out and "stereo3d" not in out:
         return None, False
@@ -93,6 +112,15 @@ def stereo_layout(inp, ifmt):
     if "side by side" in out or "sidebyside" in out:
         return "sbs", inverted
     return None, False
+
+
+def resolve_stereo(inp, ifmt, override):
+    """(kind, inverted) for the input, letting --stereo overrule detection."""
+    if override == "none":
+        return None, False
+    if override != "auto":
+        return override[:-2] if override.endswith("-r") else override, override.endswith("-r")
+    return stereo_layout(inp, ifmt)
 
 
 def stereo_in_mode(kind, inverted):
@@ -270,8 +298,8 @@ def main():
     parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
     parser.add_argument("-o", "--output", dest="output", default="", help="Output filename (decode mode). Default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4.")
+    parser.add_argument("--stereo", dest="stereo", default="auto", choices=["auto", "none", "frameseq", "frameseq-r", "tb", "tb-r", "sbs", "sbs-r"], help="Decode/play mode: force the stereoscopic layout instead of reading it from the file. Use this when a 3D file carries no layout descriptor (nothing to detect) so --eyes still splits it. The '-r' variants mean the right eye is stored first. 'none' treats the input as 2D.")
     parser.add_argument("--eyes", dest="eyes", default="both", choices=["both", "left", "right", "packed"], help="Stereoscopic 3DS input: which eye to use. Decode mode: 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Play mode: 'both' shows the eyes side by side in one window, 'left'/'right' plays a single eye full-window, 'packed' plays the stream as stored (eyes alternating). Ignored for 2D input.")
-    parser.add_argument("--zoom", dest="zoom", type=float, default=0.0, help="Play mode: scale the window by this factor (e.g. 3 for a DS 256x192 clip). 0 = native size.")
 
     parsed = parser.parse_args()
     OUTDIR = parsed.outdir
@@ -416,18 +444,18 @@ def main():
         if not os.path.isfile(inp):
             print(f"input not found: {inp}")
             sys.exit(2)
-        # ffplay is only built when the tree was configured with SDL2, which the
-        # portable/frozen builds are not. Without it, decode to a temp file and
-        # hand that to the system player: the filter chain is identical either
-        # way, so the split-screen view is the same picture.
-        have_ffplay = os.path.exists(FFPLAY)
+        if not os.path.exists(FFPLAY):
+            print(f"ffplay not found at {FFPLAY}\n"
+                  "It is only built when the tree is configured with SDL2; "
+                  "install SDL2 and rebuild, or point FFPLAY at one.")
+            sys.exit(2)
         ifmt = input_fmt(inp)
         vf = []
         if is_ycgco(inp, ifmt):
             print("   (YCgCo input: applying inverse color transform)")
             vf.append(YCGCO_INV_VF)
 
-        kind, inverted = stereo_layout(inp, ifmt)
+        kind, inverted = resolve_stereo(inp, ifmt, parsed.stereo)
         want = parsed.eyes
         if kind and want != "packed":
             src = stereo_in_mode(kind, inverted)
@@ -450,56 +478,11 @@ def main():
                       "--eyes both shows them side by side)")
             print(f">> playing  {inp}")
 
-        if parsed.zoom and parsed.zoom > 0:
-            vf.append(f"scale=iw*{parsed.zoom}:ih*{parsed.zoom}:flags=neighbor")
-
-        if have_ffplay:
-            # Decode and filter in ffmpeg, then pipe raw frames to ffplay as a
-            # plain display sink. ffplay is built from whatever filter and
-            # decoder subset its own configure allowed -- the shipped one has no
-            # stereo3d at all -- so driving it directly would make 3D playback
-            # depend on how ffplay happened to be built. This way playback
-            # always uses the same decode path as the decode button, and ffplay
-            # only has to put frames on screen. (The cost is no seeking, since
-            # a pipe isn't seekable.)
-            dec = [FFENC, "-nostdin", "-v", "error"] + ifmt + ["-i", inp]
-            if vf:
-                dec += ["-vf", ",".join(vf)]
-            dec += ["-c:v", "rawvideo", "-c:a", "pcm_s16le", "-f", "nut", "-"]
-            play = [FFPLAY, "-hide_banner", "-loglevel", "error",
-                    "-window_title", os.path.basename(inp), "-autoexit", "-i", "-"]
-            src_proc = subprocess.Popen(dec, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, text=True)
-            rc = subprocess.run(play, stdin=src_proc.stdout).returncode
-            src_proc.stdout.close()
-            # Closing the window leaves ffmpeg blocked on a full pipe, so stop
-            # it rather than waiting for a reader that has gone away.
-            if src_proc.poll() is None:
-                src_proc.terminate()
-            err = (src_proc.communicate()[1] or "")
-            # Quitting early always ends the feeding ffmpeg with EPIPE; that is
-            # the normal way playback stops, not something to report.
-            err = "\n".join(l for l in err.splitlines()
-                            if "Broken pipe" not in l and l.strip())
-            if err:
-                print(err)
-            sys.exit(rc)
-
-        import tempfile
-        tmp = os.path.join(tempfile.gettempdir(),
-                           os.path.splitext(os.path.basename(inp))[0] + "_play.mp4")
-        print(f"   (no ffplay in this build: rendering {tmp} for the system player)")
-        cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp]
+        cmd = [FFPLAY, "-hide_banner", "-loglevel", "error",
+               "-window_title", os.path.basename(inp)] + ifmt + ["-i", inp]
         if vf:
             cmd += ["-vf", ",".join(vf)]
-        cmd += ["-c:v", "mpeg4", "-q:v", "3", tmp]
-        if subprocess.run(cmd).returncode != 0:
-            # Sources whose audio codec has no decoder still give a usable video.
-            if subprocess.run(cmd[:-1] + ["-an", tmp]).returncode != 0:
-                sys.exit(1)
-        opener = ("open" if sys.platform == "darwin"
-                  else "start" if os.name == "nt" else "xdg-open")
-        sys.exit(subprocess.run([opener, tmp], shell=(os.name == "nt")).returncode)
+        sys.exit(subprocess.run(cmd).returncode)
 
     if mode == "decode":
         # In decode mode, audio argument is actually the input file
@@ -525,7 +508,7 @@ def main():
         if ycgco:
             print("   (YCgCo input: applying inverse color transform)")
 
-        kind, inverted = stereo_layout(inp, ifmt)
+        kind, inverted = resolve_stereo(inp, ifmt, parsed.stereo)
         want = parsed.eyes
         if kind and want != "packed":
             # Stereoscopic: 3DS layout 0/1 stores the eyes as alternating
