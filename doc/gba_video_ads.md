@@ -626,3 +626,64 @@ bugs: video drifts because the predictor is still unknown, and audio degrades
 because the sample loop is not yet an exact transcription. The container, the
 LZMA layer, the colour transform and the audio context table are solid.
 
+
+
+## The Hydrogen lineage (Dora the Explorer) — in progress
+
+Dragon Ball GT is not the only ADS-era stack. **Dora the Explorer Volume 1**
+(`MDRE`, maker `5G`, 32 MB) is a third lineage, built on Majesco's **Hydrogen
+Library**, and it is the cart that gave up the video predictor above. It has
+**no SFCD and no VXDS**, and it compresses with `hyCompressionManager::Inflate`
+-- the US Patent 7353233 Huffman scheme -- rather than LZMA. So
+`libavcodec/majesco.c`, previously recorded as being on no decode path, is the
+right decompressor for *this* cart; it is only a partial port, because the C#
+prototype it came from never reversed the literal/length/distance loop.
+
+Dora ships that loop as uncompressed ARM at the ROM tail with asserts intact,
+so it can be read directly. What is established so far:
+
+**Layout.** The codec overlay occupies file `0x1ff8000`..`0x1ffc66c` and runs
+from IWRAM around `0x03002xxx`. Functions of interest:
+
+| file offset | routine |
+|---|---|
+| `0x1ff96d8` | `Inflate::Initialize(const void*, void*, bool)` |
+| `0x1ff9788` | `Inflate::CoreExpand_Static()` |
+| `0x1ff997c` | fixed-Huffman table builder |
+| `0x1ff9ad4` | stored-block copy |
+| `0x1ff9c0c` | `Inflate::UncompressBlock(unsigned long)` |
+| `0x1ffc388` | read-n-bits helper |
+
+**Stream header.** `[uint32 uncompressed_size]` then the coded data as
+**little-endian halfwords**, starting at `src + 4`.
+
+**Bit reader.** A 32-bit accumulator held **MSB-justified**, refilled 16 bits
+at a time: when `nbits < n`, `acc |= halfword << (16 - nbits); nbits += 16`.
+Reading is `result = acc >> (32 - n); acc <<= n; nbits -= n`. Note this is
+MSB-first, the opposite of stock DEFLATE.
+
+**Object layout.** `+0x04` flag, `+0x08` output cursor, `+0x0c` bit
+accumulator, `+0x10` bit count, `+0x14` halfword pointer, `+0x18` table
+descriptor, `+0x38` bytes produced, `+0x3c` state, `+0x40` output base,
+`+0x44` output end, `+0x48` bytes remaining.
+
+**State machine.** `+0x3c` selects one of eight states through a jump table at
+`0x1ff9cc0`. State 0 reads a 2-bit block type and dispatches: `0` -> stored
+(state 5), `1` -> fixed (state 2), `2` -> dynamic (state 1), `3` -> state 7 --
+a fourth block type that DEFLATE does not have.
+
+**Symbol decode.** A 9-bit primary lookup indexes a halfword table; an entry is
+`length << 9 | symbol`. Symbols below `0x100` are literals, `0x100` ends the
+block, and above that the symbol indexes an 8-byte-per-entry table holding
+`{dist_base, dist_extra, len_base, len_extra}` -- exactly the interleaved
+layout already sitting unused in `majesco_dist_len_table`. In the static path
+the distance code is a fixed 5 bits.
+
+**Still to do:** the dynamic path (states 1, 3 and 7), the canonical-code table
+construction, then Dora's container -- which is not yet located, since
+everything past the string block is compressed and no resource pointer table
+turned up in the first 2 MB. Note also that Dora's **audio is a different
+codec**: it uses `SoundPlayer_ADPCM.cpp` and carries the string "not adpcm
+audio stream in adpcm only build", so it is ADPCM rather than the adaptive PCM
+codec Dragon Ball GT uses. The video half is expected to be shared, since the
+block-geometry table at ROM `0xea70` is byte-identical.
