@@ -888,6 +888,77 @@ All four streams decode end to end with no errors:
 The chapter table comes out as real chapters, and the stream duration comes
 from the frame count at 7 fps.
 
+### The video bitstream — structure recovered
+
+The decoder is IWRAM code, and the way in was a **write watchpoint**. Break the
+YUV blitter at `0x03000370` (the only `bl` to it is at `0x03007cc8`), read its
+argument — a three-word struct `{Y plane, UV plane, VRAM}` — then set a write
+watchpoint inside that Y plane. The next time the rotating buffer comes back
+round, the watchpoint fires *inside the decoder*, at `0x0300190c`. Everything
+below follows from disassembling outward from there.
+
+**Frame buffers.** Four of them, each a 256-stride Y plane of 0xa000 bytes
+followed by an **interleaved UV** plane of 0x5000 (`0x020302c8` / `0x0203a2c8`
+in one run). So 4:2:0 with U and V byte-interleaved, both planes at stride 256.
+
+**Bit reader** (`0x030007a8`). A 32-bit MSB-justified accumulator refilled
+**16 bits at a time from little-endian halfwords** — the same shape as the
+Hydrogen Inflate reader. Everything is Exp-Golomb:
+
+  * `0x0300076c` — **ue(v)**: count leading zeros `n`, take `n` more bits,
+    value = `(1 << n) + suffix - 1`;
+  * `0x0300081c` — **se(v)**: same, then the H.264 zig-zag mapping
+    (`k` odd → `(1-k)>>1`, else `k>>1`).
+
+There is no CAVLC anywhere, which is the clean break from the DS codec.
+
+**Motion vectors** are predicted by the **component-wise median of three
+neighbours** — left, above, above-right — exactly as the DS decoder's
+`mid_pred3` does (`0x03000548`). They are stored packed as two `int8` in a
+halfword, in a per-row array of stride 0x24, and are **full-pel**: the luma
+byte offset is `mvx + mvy*256`, and chroma is `(mvx & ~1) + (mvy & ~1)*128`.
+
+**The inter macroblock** (`0x03001854`) reads **five se(v) values**: `mvx`,
+`mvy`, and then a DC offset for Y, U and V. It copies **16 luma pixels wide by
+H rows** from reference + MV, adding `2*dcY` to every byte with a clamp to
+0..255, then the matching 8 chroma pairs by H/2 rows with `2*dcU` / `2*dcV`.
+That is the whole inter path: full-pel copy plus a per-plane DC correction, no
+transform.
+
+**Intra prediction** is dispatched through two function-pointer tables, both
+indexed by a ue(v):
+
+    0x03000864  6 entries   0x30009b8 0x3000a04 0x3000a54 0x3000ba4 0x3000c08 0x3000d90
+    0x030008d8  9 entries   0x3000ecc 0x3000eec 0x3000f90 0x3000fe0 0x30010c4
+                            0x30011ac 0x30012b0 0x30013b4 0x30014b0
+
+and they are H.264-shaped: `0x030009b8` replicates the row above down the block
+(vertical), `0x03000a04` replicates the left column (horizontal), and the
+nine-entry set is the same idea at 4x4. `0x03000884` reads two ue(v) and calls
+one handler from each table, so a macroblock's two halves take independent
+modes. Six macroblock-level handlers sit between `0x03001b00` and `0x03002900`,
+each calling the same five workers (`0x03001578`, `0x030015a4`, `0x03001854`,
+`0x03000884`, `0x030008fc`).
+
+**Output** (`0x03000370`) converts YUV to BGR555 through three lookup tables
+and writes VRAM at stride 480, centred for the movie's geometry. Its width and
+height are **self-modified into the code** as `mov` immediates by the open
+routine at `0x03006df8`, which is also where the `VX++` tag is checked.
+
+**How the bitstream reaches the decoder.** A 64 MB cartridge does not fit the
+GBA bus, so the cart pages ROM into a **4 KB window at `0x08001000`** and the
+decoder reads its bits straight from there (`r1 = 0x08001096` when the
+watchpoint fired); the reader tests the pointer against the window end after
+every refill and kicks a DMA when it crosses. That is also why the open routine
+appears to compare `VX++` against `0x08001000` — it is comparing against the
+window, not a fixed ROM address.
+
+**What is still missing for a decoder:** the frame header, the macroblock mode
+syntax that selects among the six handlers, and whatever the four handlers
+other than the plain inter one add — in particular whether any of them carries
+a real residual, since nothing seen so far codes one. Those are all reachable
+from the same disassembly; none of them is a research problem any more.
+
 ### Driving the cart under mGBA
 
 Worth recording, because the obvious routes do not work: synthetic keystrokes
