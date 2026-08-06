@@ -2023,6 +2023,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
+        .id        = AV_CODEC_ID_ADS_GBA,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "ads_gba",
+        .long_name = NULL_IF_CONFIG_SMALL("ADS-era GBA Video (Majesco)"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "pcm_s16le",
@@ -3620,6 +3627,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "vx_audio",
         .long_name = NULL_IF_CONFIG_SMALL("ActImagine VX Audio"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_ADS_GBA_AUDIO,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "ads_gba_audio",
+        .long_name = NULL_IF_CONFIG_SMALL("ADS-era GBA Video audio (Majesco)"),
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
