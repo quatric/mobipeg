@@ -24,7 +24,7 @@ unpacks a ROM for inspection, `ads_audio.py` is the ported audio decode loop,
 | Video output stage (clamp/brightness) | **solved** |
 | Video codebook layout + colour transform | **solved** — recovered from the ROM |
 | Video prediction (residual → pixels) | **solved** — both logo and movie streams render clean |
-| Type-2 audio codec (decode loop) | **solved** — algorithm recovered, ported |
+| Type-2 audio codec (decode loop) | **solved** — decodes clean end to end |
 | Type-2 audio framing | **solved**, byte-exact on every audio resource |
 | Type-2 audio context table | **solved**, verified bit-exact against hardware |
 
@@ -582,15 +582,26 @@ confirmed dynamically rather than inferred:
 
 So a block is `[preamble][64 VLC-coded context entries][samples]`.
 
-### What is still wrong
+### The sample loop — solved by the other cart (2026-08-06)
 
-Decoding jingle block 0 with its recovered table now produces a correct silent
-lead-in (40 samples of exact zero, matching the jingle's fade-in) and a signal
-at a plausible amplitude (sd 35 rather than the full-scale 100 of noise), but
-the body still degrades. The context table is no longer the suspect - it is
-verified - so a bug remains in the sample loop transcription. The emulator route
-is now the way to find it: break on `0x03002b4c`, single-step the ARM loop, and
-diff the struct against `ads_audio.py` sample by sample.
+The loop degraded after a correct silent lead-in, and the bug was found not by
+stepping Dragon Ball GT but by reading Dora's copy of the same routine, which
+the Hydrogen cart keeps as plain ARM (see below). Three corrections came out of
+it, and all three matter:
+
+  * **the `f1` update saturates at ±0x4000, not at ±2^29.** `0x03002c58` builds
+    the bound as `mov fp, #64, #24` — that is `64 << 8`, so the test is
+    `(unsigned)(t + 0x1fff) <= 0x3fff` and the ±0x100/0xff clamp is reached
+    constantly. An earlier pass read this as `0x1fffffff/0x3fffffff`, which
+    made the clamp dead code; that is what let the signal run away.
+  * **a block's 25-bit preamble is not padding.** It is one flag bit plus, when
+    that bit is clear, a **signed 24-bit initial level** for the log-domain
+    state. Set means the block continues the previous one instead.
+  * **the reset is not to zero.** `prev` and `h0` start at 1, and `f1`/`h1`
+    survive across blocks — only `step`, `prev`, `h0`, `f0`, `f2` and the two
+    sign bits are reset.
+
+With those, both carts decode to a clean waveform end to end.
 
 ## Native support in mobipeg
 
@@ -628,7 +639,7 @@ LZMA layer, the colour transform and the audio context table are solid.
 
 
 
-## The Hydrogen lineage (Dora the Explorer) — video solved
+## The Hydrogen lineage (Dora the Explorer) — solved
 
 Dragon Ball GT is not the only ADS-era stack. **Dora the Explorer Volume 1**
 (`MDRE`, maker `5G`, 32 MB) is a third lineage, built on Majesco's **Hydrogen
@@ -711,7 +722,54 @@ the shared video path:
 
 Both were invisible on Dragon Ball GT, whose streams only use modes 3 and 7.
 
-**Still to do:** Dora's **audio is a different codec** -- it uses
-`SoundPlayer_ADPCM.cpp` and carries the string "not adpcm audio stream in adpcm
-only build", so it is ADPCM rather than the adaptive PCM codec Dragon Ball GT
-uses. Only video is wired up for this lineage.
+### Audio — the same codec, and the key to the ADS one (2026-08-06)
+
+`SoundPlayer_ADPCM.cpp` is a misleading name: Dora's audio is **not** ADPCM and
+**not** a different codec. It is bit-for-bit the same adaptive predictive PCM
+that Dragon Ball GT uses, down to the three-bit sample VLC table
+(`{01 01 01 01 12 12 23 33}`) and the four-entry escape table `0c 0d 08 06`.
+The single difference is how the 64-entry context table is coded: ADS uses a
+VLC over a seven-value palette with `11` as an escape, Hydrogen always sends
+the escape form, a flat **five bits** per entry (`a:2, b:2, selector:1`).
+
+The reason this cart matters is that its decoder is readable. `SetSoundFile` is
+plain THUMB in the ROM at `0x08006600`, the block loop is ARM in IWRAM at
+`0x03002ad0` (reached through the veneer at `0x0800d420`), and the bit-reader
+refill sits at `0x08005cb8`. Dumping IWRAM under mGBA and disassembling that
+loop is what fixed the shared sample loop; see "The sample loop — solved by the
+other cart" above.
+
+**Block length is a constant.** `0x08005f54` reloads the sample counter with
+`0x404a`, so a block is exactly **16458 samples** — which is also what the
+block-size table in the audio resource covers, to within the word padding.
+Since nothing in the container states a frame rate, that constant dates the
+movie: `frames * sample_rate / (16458 * nb_blocks)` gives **12 fps** for every
+Dora stream.
+
+### Container — Dora does have `.mmstr` after all
+
+The earlier conclusion that this cart has no resource directory was wrong. The
+game's own lookup is at `0x08005c82` and it walks an ordinary `.mmstr` table.
+Two things hid it:
+
+  * a Hydrogen resource states its size **in bytes**, where an ADS one states
+    it in words;
+  * the resource count is the low **nibble** of the count word, not the low
+    byte, and the rest of that word is junk.
+
+So the ROM demuxer now scans for `.mmstr` tables instead of chasing loose chunk
+chains. A candidate is accepted only when its audio resource's block table adds
+up to the resource size exactly, which is an arithmetic identity over several
+thousand bytes and does not fire on unrelated data. Dora yields **four**
+movies, not the nine the chunk-walk reported — six of those nine were false
+starts inside two long streams, which also showed the walk's `nb <= 300`
+frames-per-chunk guard was too tight.
+
+    [0] 0x109b8    51 KB    splash, 59 frames,  5 blocks
+    [1] 0x20ca4    15.9 MB  15964 frames,    1331 blocks (22 min)
+    [2] 0xf4390c   16.7 MB  1339 blocks
+    [3] 0x1f3216c  685 KB   502 frames,        42 blocks
+
+`-resource <n>` picks one by index; the default is the largest. A movie with no
+chapters carries no title string either, so its chunks start straight after the
+three header words.
