@@ -8,10 +8,24 @@ import sys
 
 ENCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode.py")
 
+# Grouped so the file dialog's type menu is readable; "All supported" first so
+# the default view still shows everything decodable.
+DECODE_FILETYPES = [
+    ("All supported", "*.mo *.moflex *.mods *.vx *.thp *.rvid *.h4m *.ty *.ty+ *.tmf *.ppm *.kwz"),
+    ("Mobiclip", "*.mo *.moflex *.mods"),
+    ("ActImagine VX", "*.vx"),
+    ("THP", "*.thp"),
+    ("RocketVideo", "*.rvid"),
+    ("HVQM4", "*.h4m"),
+    ("TiVo TyStream", "*.ty *.ty+ *.tmf"),
+    ("Flipnote", "*.ppm *.kwz"),
+    ("All files", "*.*"),
+]
+
 class EncodeGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("mobipeg v1.2")
+        self.title("mobipeg v1.3")
         self.geometry("750x650")
         self.minsize(650, 500)
         self.configure(padx=15, pady=15)
@@ -308,50 +322,72 @@ class EncodeGUI(tk.Tk):
     def setup_decode_tab(self):
         self.decode_frame.columnconfigure(1, weight=1)
         
-        # Input File
-        ttk.Label(self.decode_frame, text="Input (.mo/.moflex/.mods/.vx/.thp/.rvid/.ppm/.kwz/.h4m/.ty):").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        # Input File. The supported extensions used to sit in the label, which
+        # made one very wide line; they live in the file dialog's type filter
+        # and in the wrapped hint underneath instead.
+        ttk.Label(self.decode_frame, text="Input File:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
         self.dec_input_var = tk.StringVar()
         ttk.Entry(self.decode_frame, textvariable=self.dec_input_var).grid(row=0, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.decode_frame, text="Browse...", command=lambda: self.browse_file(self.dec_input_var)).grid(row=0, column=2, padx=5, pady=5)
-        
+        ttk.Button(self.decode_frame, text="Browse...",
+                   command=lambda: self.browse_file(self.dec_input_var,
+                                                    DECODE_FILETYPES)
+                   ).grid(row=0, column=2, padx=5, pady=5)
+
+        hint = ttk.Label(self.decode_frame, foreground="grey", justify="left",
+                         text=("Mobiclip: .mo (Wii)  ·  .moflex (3DS)  ·  .mods (DS)\n"
+                               "Other: .vx  ·  .thp  ·  .rvid  ·  .h4m  ·  .ty/.ty+/.tmf\n"
+                               "Flipnote: .ppm  ·  .kwz          (plus any format ffmpeg reads)"))
+        hint.grid(row=1, column=1, sticky="w", padx=5, pady=(0, 6))
+
         # Output Dir
-        ttk.Label(self.decode_frame, text="Output Dir:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="Output Dir:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
         self.dec_outdir_var = tk.StringVar(value="")
-        ttk.Entry(self.decode_frame, textvariable=self.dec_outdir_var).grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.decode_frame, text="Browse...", command=lambda: self.browse_dir(self.dec_outdir_var)).grid(row=1, column=2, padx=5, pady=5)
+        ttk.Entry(self.decode_frame, textvariable=self.dec_outdir_var).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.decode_frame, text="Browse...", command=lambda: self.browse_dir(self.dec_outdir_var)).grid(row=2, column=2, padx=5, pady=5)
 
         # Output file. Pre-filled from the input's own name so decoding several
         # files into one directory doesn't overwrite itself; "Save As..." lets
         # the user pick something else. For a stereoscopic input the eye is
         # appended to whatever is here (name_left.mp4 / name_right.mp4).
-        ttk.Label(self.decode_frame, text="Output File:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="Output File:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
         self.dec_output_var = tk.StringVar(value="")
-        ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=2, column=2, padx=5, pady=5)
+        ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=3, column=2, padx=5, pady=5)
 
         # Stereoscopic eye selection (3DS moflex). "Both" means one file per eye
         # when decoding and a single side-by-side window when playing, so the
         # label says both things rather than naming only the decode behaviour.
-        ttk.Label(self.decode_frame, text="3D eyes:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="3D eyes:").grid(row=4, column=0, sticky="e", padx=5, pady=5)
         self.dec_eyes_var = tk.StringVar(value="both")
         eyes_frame = ttk.Frame(self.decode_frame)
-        eyes_frame.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        eyes_frame.grid(row=4, column=1, sticky="w", padx=5, pady=5)
         for i, (val, label) in enumerate((("both", "Both (separate files / split-screen)"),
                                           ("left", "Left only"),
                                           ("right", "Right only"),
                                           ("packed", "Keep packed"))):
             ttk.Radiobutton(eyes_frame, text=label, value=val,
                             variable=self.dec_eyes_var).grid(row=0, column=i, padx=(0, 8))
-        self.dec_eyes_note = ttk.Label(self.decode_frame, text="", foreground="grey")
-        self.dec_eyes_note.grid(row=4, column=1, sticky="w", padx=5)
+        # How the eyes are packed. Normally read from the file, but a 3D file
+        # that carries no layout descriptor is indistinguishable from a 2D one,
+        # and then eye selection silently does nothing — so allow saying it.
+        self.dec_stereo_var = tk.StringVar(value="Auto (from file)")
+        self.dec_stereo_map = {
+            "Auto (from file)": "auto",
+            "Force 2D": "none",
+            "Frame alternate": "frameseq",
+            "Frame alternate, right first": "frameseq-r",
+            "Top/bottom": "tb",
+            "Top/bottom, right first": "tb-r",
+            "Side by side": "sbs",
+            "Side by side, right first": "sbs-r",
+        }
+        ttk.Combobox(eyes_frame, textvariable=self.dec_stereo_var,
+                     values=list(self.dec_stereo_map.keys()), state="readonly",
+                     width=26).grid(row=1, column=0, columnspan=4, sticky="w",
+                                    pady=(6, 0))
 
-        # Playback zoom — DS/3DS clips are tiny (256x192, 400x240) on a modern
-        # display, so offer a whole-number blow-up for the preview window.
-        ttk.Label(self.decode_frame, text="Play zoom:").grid(row=5, column=0, sticky="e", padx=5, pady=5)
-        self.dec_zoom_var = tk.StringVar(value="2x")
-        ttk.Combobox(self.decode_frame, textvariable=self.dec_zoom_var,
-                     values=["native", "2x", "3x", "4x"], state="readonly",
-                     width=8).grid(row=5, column=1, sticky="w", padx=5, pady=5)
+        self.dec_eyes_note = ttk.Label(self.decode_frame, text="", foreground="grey")
+        self.dec_eyes_note.grid(row=5, column=1, sticky="w", padx=5)
 
         # Buttons. Play is the no-output-file path: it decodes straight to a
         # window, so it's the quick way to check a file before committing to a
@@ -401,8 +437,8 @@ class EncodeGUI(tk.Tk):
         if self.enc_audio_var.get() not in options:
             self.enc_audio_var.set(options[0])
 
-    def browse_file(self, var):
-        filename = filedialog.askopenfilename()
+    def browse_file(self, var, filetypes=None):
+        filename = filedialog.askopenfilename(filetypes=filetypes or [("All files", "*.*")])
         if filename:
             var.set(filename)
             
@@ -589,9 +625,9 @@ class EncodeGUI(tk.Tk):
         eyes = self.dec_eyes_var.get()
         if eyes and eyes != "both":
             cmd.extend(["--eyes", eyes])
-        zoom = self.dec_zoom_var.get()
-        if zoom and zoom != "native":
-            cmd.extend(["--zoom", zoom.rstrip("x")])
+        stereo = self.dec_stereo_map.get(self.dec_stereo_var.get(), "auto")
+        if stereo != "auto":
+            cmd.extend(["--stereo", stereo])
 
         self.execute_cmd(cmd, self.dec_play_btn)
 
@@ -618,6 +654,9 @@ class EncodeGUI(tk.Tk):
         eyes = self.dec_eyes_var.get()
         if eyes and eyes != "both":
             cmd.extend(["--eyes", eyes])
+        stereo = self.dec_stereo_map.get(self.dec_stereo_var.get(), "auto")
+        if stereo != "auto":
+            cmd.extend(["--stereo", stereo])
 
         self.execute_cmd(cmd, self.dec_run_btn)
 
