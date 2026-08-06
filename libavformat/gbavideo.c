@@ -613,8 +613,18 @@ static int gbavideo_rom_probe(const AVProbeData *p)
 
     /* A Hydrogen-era cart has no archive to key off, so look for the maker
      * code Majesco used; the scan in read_header is the real test. */
-    if (!memcmp(p->buf + 0xb0, "5G", 2))
+    if (!memcmp(p->buf + 0xb0, "5G", 2)) {
+        /* Not every Majesco cart is ours: Shrek + Shark Tale carries the same
+         * maker code but is an ActImagine VX++ one, which gbavx.c takes. Its
+         * first stream sits past 128 KB, so stay below AVPROBE_SCORE_RETRY
+         * until the probe buffer is large enough to tell the two apart. */
+        for (int i = 0; i + 4 <= p->buf_size; i += 4)
+            if (AV_RL32(p->buf + i) == MKTAG('V', 'X', '+', '+'))
+                return 0;
+        if (p->buf_size < (1 << 18))
+            return AVPROBE_SCORE_RETRY - 1;
         return AVPROBE_SCORE_MAX / 2;
+    }
 
     return 0;
 }
