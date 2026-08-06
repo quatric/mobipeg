@@ -858,12 +858,35 @@ whereas here `+14` is zero and every frame opens with a near-constant halfword
 format has no place for. This is an earlier generation of the codec and needs
 its own reverse engineering, from the IWRAM code at ROM `0xbcc8`.
 
-The audio may be cheaper: the extradata block is bit-for-bit the DS layout, so
-`decode_aframe()` in `libavcodec/vx_audio.c` is likely to work as-is. What
-stops it being a drop-in is the multiplexing — on DS the audio bits sit *after*
-the video bits inside a shared frame payload, and the decoder replays the video
-bit consumption to find them, whereas here audio is its own region with its own
-byte offsets. It would need an entry point that just starts at the packet.
+### The audio is the DS codec, and it works
+
+The audio needed no decoder work at all. `libavcodec/vx_audio.c` already has a
+mode where the packet carries no leading video bits — `width == 0` skips the
+video replay, which is how `.mods` is handled — so `libavformat/gbavx.c` just
+declares that shape and hands over the cart's own 3124-byte codebook block.
+
+The one thing the demuxer has to do is cut packets on AFrame boundaries, and
+that is free: an AFrame is 32 header bits plus 16 per pulse word, so it is
+always a whole number of 16-bit words, and its length is stated by its own
+first two words (`4 + 2 * {8,5,4,3}[(word2 >> 12) & 3]` bytes). Walking that
+over the reference cart tiles all 9,719,808 bytes of the audio region exactly,
+with nothing left over, and lands on **every one of the 181 audio offsets the
+seek table states** — 181 independent confirmations that the walk is right.
+
+That walk is also what dates the movies. Between consecutive seek entries the
+ratio is 128 AFrames per 7 video frames, everywhere along the stream; at 128
+samples per AFrame and 16384 Hz that is exactly **7 fps**, not the 12.19 fps a
+naive reading of `+10` suggests. Which makes stream 0 run 1:23:02 rather than
+47 minutes — a feature-length film, as it should be. So `+10` is *not* a frame
+rate; it is 0x30c3 on every stream and remains unidentified.
+
+All four streams decode end to end with no errors:
+
+    ffmpeg -f gbavx -i rom.gba out.wav          # the longest movie
+    ffmpeg -f gbavx -resource 2 -i rom.gba ...  # pick one by index
+
+The chapter table comes out as real chapters, and the stream duration comes
+from the frame count at 7 fps.
 
 ### Driving the cart under mGBA
 
