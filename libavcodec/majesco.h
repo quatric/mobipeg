@@ -37,12 +37,8 @@
  * another title, another asset class, or a later revision, but it has not
  * been located in any sample yet, so nothing here is on a decode path.
  *
- * Ported from Gericom's unfinished C# prototype (MobiclipDecoder repo,
- * commit c88b67d "Improved the encoder a lot!", LibMobiclip/Codec/Majesco).
- * That prototype never implemented the full block-decode state machine
- * (only states 0 and 1 of what is clearly a larger switch existed, and
- * Inflate() returned NULL) - this port preserves that boundary instead of
- * guessing at the missing states.
+ * Reversed from the uncompressed ARM that Dora the Explorer Volume 1 keeps at
+ * the tail of its ROM; see majesco.c for the deviations from stock DEFLATE.
  */
 
 #ifndef AVCODEC_MAJESCO_H
@@ -50,13 +46,12 @@
 
 #include <stdint.h>
 
-/* Returns 1 while progress toward a full decoder can still be made from
- * what has been reverse engineered, 0 once state machine states beyond
- * what's known are hit. On 0, *out_size bytes have not necessarily all
- * been produced - the caller must treat the result as unusable and this
- * as a marker that further RE (Ghidra pass) is needed for that block. */
+/* Decompresses a blob into dst, which must be exactly the size the blob's
+ * uint32 prefix declares. Returns the number of bytes produced, or a negative
+ * AVERROR - notably AVERROR_PATCHWELCOME for the fourth block type, which no
+ * known stream uses. */
 int ff_majesco_inflate(const uint8_t *src, int src_size,
-                        uint8_t *dst, uint32_t dst_size);
+                       uint8_t *dst, uint32_t dst_size);
 
 /* First 4 bytes of a Majesco-compressed blob: little-endian output size. */
 uint32_t ff_majesco_get_output_size(const uint8_t *src, int src_size);
