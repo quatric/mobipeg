@@ -25,15 +25,21 @@
  * before the GCC-era carts moved to ActImagine VX.
  *
  * A packet is one chunk: an 8-byte header, an LZMA-compressed codebook and an
- * LZMA-compressed plane of block indices covering several frames. A codebook
- * always holds 256 entries and an entry is planar - blk_w*blk_h luma bytes,
- * then blk_h Cb and blk_h Cr, so chroma is subsampled 4:1 horizontally with
- * one sample per block row.
+ * LZMA-compressed plane of block indices covering several frames.
  *
- * Entries are signed residuals accumulated over time. The exact predictor is
- * not yet recovered (see doc/gba_video_ads.md); plain per-frame accumulation
- * is implemented here, which gets the picture out recognisably but drifts on
- * flat areas.
+ * A codebook always holds 256 entries and is planar *across* entries, not
+ * within one: all 256 entries' luma first, then all their Cb, then all their
+ * Cr. Chroma is subsampled 4:1 horizontally, with either one sample per block
+ * row or a single sample for the whole block depending on the stream's mode
+ * (see setup_geometry).
+ *
+ * Both the luma region and the chroma region are delta-coded: each is a
+ * running sum modulo 256, which the ROM undoes in StreamBase::UnPredictLuminance
+ * and StreamBase::UnPredictChrominance. The two chroma components are summed as
+ * one contiguous run, Cb flowing into Cr.
+ *
+ * Frames are then intra: a frame is a plain lookup of absolute pixels out of
+ * that codebook, with no temporal prediction at all.
  *
  * The colour transform is exact, taken from the IWRAM converter at 0x030004f8:
  *     R = clip(Y + 2*Cr)   G = clip(Y - Cr - Cb/2)   B = clip(Y + 2*Cb)
@@ -51,12 +57,15 @@
 
 #define GRID_W 60               /* every known stream is 60 blocks wide */
 
+#define NB_ENTRIES 256
+
 typedef struct ADSVideoContext {
     int blk_w, blk_h;
     int grid_h;
-    int entry_size;
+    int chroma_rows;            /* chroma samples per block, per component */
+    int luma_region;            /* bytes of luma in the codebook */
 
-    uint8_t *luma;              /* accumulated planes, one byte per sample */
+    uint8_t *luma;              /* expanded planes, one byte per sample */
     int8_t  *cb, *cr;
 
     uint8_t *codebook;
@@ -88,44 +97,54 @@ static av_cold int ads_video_close(AVCodecContext *avctx)
     return 0;
 }
 
+/* ROM 0xea70 in the Hydrogen build, and the same switch in every IWRAM
+ * routine that walks pixels: the mode nibble picks the block size. */
+static const uint8_t block_dims[8][2] = {
+    { 4, 4 }, { 4, 4 }, { 4, 3 }, { 4, 3 },
+    { 3, 3 }, { 3, 3 }, { 4, 2 }, { 4, 2 },
+};
+
 /**
- * Work the block geometry out from the size of one frame's index plane.
- *
- * The grid is always 60 blocks wide and a frame is 240 pixels wide, so
- * blk_w is 4; the height follows from how many index rows there are.
+ * Block geometry comes from the mode nibble in the chunk header; the grid is
+ * always 60 blocks wide, so the height follows from the index plane's size.
  */
-static int setup_geometry(AVCodecContext *avctx, int per_frame)
+static int setup_geometry(AVCodecContext *avctx, int per_frame, int mode)
 {
     ADSVideoContext *s = avctx->priv_data;
-    int grid_h, blk_h;
+    int grid_h, blk_w = block_dims[mode][0], blk_h = block_dims[mode][1];
 
     if (per_frame <= 0 || per_frame % GRID_W)
         return AVERROR_INVALIDDATA;
 
     grid_h = per_frame / GRID_W;
-    blk_h  = 160 / grid_h;
-    if (blk_h < 2 || blk_h > 4)
-        return AVERROR_INVALIDDATA;
 
-    if (s->grid_h == grid_h && s->luma)
+    if (s->grid_h == grid_h && s->blk_h == blk_h && s->luma)
         return 0;
 
-    s->blk_w      = 4;
-    s->blk_h      = blk_h;
-    s->grid_h     = grid_h;
-    s->entry_size = s->blk_w * s->blk_h + 2 * s->blk_h;
+    s->blk_w  = blk_w;
+    s->blk_h  = blk_h;
+    s->grid_h = grid_h;
 
     av_freep(&s->luma);
     av_freep(&s->cb);
     av_freep(&s->cr);
 
-    s->luma = av_calloc(GRID_W * s->blk_w, grid_h * blk_h);
+    s->luma = av_calloc(GRID_W * blk_w, grid_h * blk_h);
     s->cb   = av_calloc(GRID_W, grid_h * blk_h);
     s->cr   = av_calloc(GRID_W, grid_h * blk_h);
     if (!s->luma || !s->cb || !s->cr)
         return AVERROR(ENOMEM);
 
-    return ff_set_dimensions(avctx, GRID_W * s->blk_w, grid_h * blk_h);
+    return ff_set_dimensions(avctx, GRID_W * blk_w, grid_h * blk_h);
+}
+
+/** Running sum modulo 256, the inverse of the encoder's byte-wise delta. */
+static void undelta(uint8_t *p, int len)
+{
+    unsigned acc = 0;
+
+    for (int i = 0; i < len; i++)
+        p[i] = acc = (acc + p[i]) & 0xff;
 }
 
 static int decode_chunk(AVCodecContext *avctx, const AVPacket *avpkt)
@@ -159,16 +178,26 @@ static int decode_chunk(AVCodecContext *avctx, const AVPacket *avpkt)
         return ret;
 
     per_frame = s->index_size / s->nb_frames;
-    ret = setup_geometry(avctx, per_frame);
+    ret = setup_geometry(avctx, per_frame, AV_RL32(buf) & 7);
     if (ret < 0)
         return ret;
 
-    if (s->codebook_size < 256 * s->entry_size) {
+    /* The mode's low bit picks the chroma resolution: odd modes store one
+     * Cb/Cr per block row, even modes a single pair for the whole block. */
+    s->luma_region = NB_ENTRIES * s->blk_w * s->blk_h;
+    s->chroma_rows = (AV_RL32(buf) & 1) ? s->blk_h : 1;
+
+    if (s->codebook_size < s->luma_region + 2 * NB_ENTRIES * s->chroma_rows) {
         av_log(avctx, AV_LOG_ERROR,
-               "codebook holds %d bytes, need %d for %dx%d blocks\n",
-               s->codebook_size, 256 * s->entry_size, s->blk_w, s->blk_h);
+               "codebook holds %d bytes, which is not a %dx%d codebook\n",
+               s->codebook_size, s->blk_w, s->blk_h);
         return AVERROR_INVALIDDATA;
     }
+
+    /* Undo the delta coding: luma is one run, Cb and Cr together are another
+     * (StreamBase::UnPredictLuminance / UnPredictChrominance). */
+    undelta(s->codebook, s->luma_region);
+    undelta(s->codebook + s->luma_region, 2 * NB_ENTRIES * s->chroma_rows);
 
     s->next_frame = 0;
     s->chunk_pts  = avpkt->pts;
@@ -176,27 +205,33 @@ static int decode_chunk(AVCodecContext *avctx, const AVPacket *avpkt)
     return 0;
 }
 
-/** Fold one frame of residuals into the accumulated planes. */
-static void apply_residuals(ADSVideoContext *s, const uint8_t *idx)
+/**
+ * Expand one frame out of the codebook. Frames are intra: once the codebook
+ * has been un-delta'd its entries are absolute pixels, so a frame is a plain
+ * lookup with no dependency on the frame before it.
+ */
+static void expand_frame(ADSVideoContext *s, const uint8_t *idx)
 {
-    const int bw = s->blk_w, bh = s->blk_h;
+    const int bw = s->blk_w, bh = s->blk_h, cr = s->chroma_rows;
     const int width = GRID_W * bw;
-    const int npx = bw * bh;
+    const uint8_t *cb_base = s->codebook + s->luma_region;
+    const uint8_t *cr_base = cb_base + NB_ENTRIES * cr;
 
     for (int by = 0; by < s->grid_h; by++) {
         for (int bx = 0; bx < GRID_W; bx++) {
-            const uint8_t *e = s->codebook + idx[by * GRID_W + bx] * s->entry_size;
+            unsigned e = idx[by * GRID_W + bx];
+            const uint8_t *l = s->codebook + e * bw * bh;
 
             for (int j = 0; j < bh; j++) {
                 int row = (by * bh + j) * width + bx * bw;
                 int c   = (by * bh + j) * GRID_W + bx;
+                int k   = e * cr + (cr == 1 ? 0 : j);
 
                 for (int i = 0; i < bw; i++)
-                    s->luma[row + i] = av_clip_uint8(s->luma[row + i] +
-                                                     (int8_t)e[j * bw + i]);
+                    s->luma[row + i] = l[j * bw + i];
 
-                s->cb[c] = av_clip_int8(s->cb[c] + (int8_t)e[npx + j]);
-                s->cr[c] = av_clip_int8(s->cr[c] + (int8_t)e[npx + bh + j]);
+                s->cb[c] = (int8_t)cb_base[k];
+                s->cr[c] = (int8_t)cr_base[k];
             }
         }
     }
@@ -224,8 +259,8 @@ static int emit_frame(AVCodecContext *avctx, AVFrame *frame)
         }
     }
 
-    frame->pict_type = s->next_frame ? AV_PICTURE_TYPE_P : AV_PICTURE_TYPE_I;
-    frame->flags    &= ~AV_FRAME_FLAG_KEY;
+    frame->pict_type = AV_PICTURE_TYPE_I;
+    frame->flags    |= AV_FRAME_FLAG_KEY;
     return 0;
 }
 
@@ -248,7 +283,7 @@ static int ads_video_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     }
 
     per_frame = s->index_size / s->nb_frames;
-    apply_residuals(s, s->index + s->next_frame * per_frame);
+    expand_frame(s, s->index + s->next_frame * per_frame);
 
     ret = emit_frame(avctx, frame);
     if (ret < 0)
@@ -269,11 +304,6 @@ static void ads_video_flush(AVCodecContext *avctx)
     ADSVideoContext *s = avctx->priv_data;
 
     s->nb_frames = s->next_frame = 0;
-    if (s->luma) {
-        memset(s->luma, 0, (size_t)avctx->width * avctx->height);
-        memset(s->cb, 0, (size_t)GRID_W * avctx->height);
-        memset(s->cr, 0, (size_t)GRID_W * avctx->height);
-    }
 }
 
 const FFCodec ff_ads_gba_decoder = {
