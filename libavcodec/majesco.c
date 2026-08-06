@@ -19,274 +19,308 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/* See majesco.h for background, including why this is NOT the codec that
- * retail ADS-era GBA Video actually uses (that one is LZMA - see
- * doc/gba_video_ads.md). This is a direct port of the reverse engineered
- * pieces from Gericom's C# prototype - it does not invent anything past
- * what that prototype had working, so ff_majesco_inflate() still bails
- * out once the block-decode state machine runs off the end of the known
- * states (only "read block-type selector" and "read code length alphabet
- * + build its Huffman table" were ever reversed). */
+/**
+ * @file
+ * The compressor the Hydrogen-era GBA Video carts use, in place of the LZMA
+ * that the Dragon Ball GT lineage uses. Reversed from Dora the Explorer
+ * Volume 1, which ships hyCompressionManager::Inflate as uncompressed ARM at
+ * the tail of the ROM (Initialize 0x1ff96d8, UncompressBlock 0x1ff9c0c,
+ * CoreExpand_Static 0x1ff9788, read-bits helper 0x1ffc388).
+ *
+ * Structurally it is DEFLATE - same block types, same code-length alphabet
+ * and permutation, same length and distance ladders - with two deviations:
+ *
+ *   - bits are read most significant first, out of a 32-bit accumulator that
+ *     is refilled sixteen at a time from little-endian halfwords, where
+ *     DEFLATE reads least significant first;
+ *   - a blob is prefixed with a plain uint32 uncompressed size and the coded
+ *     data starts at src + 4, with no zlib header.
+ *
+ * The ROM also carries a fourth block type that DEFLATE does not have (the
+ * 2-bit selector's case 3, state 7). No stream seen so far uses it, so it is
+ * rejected rather than guessed at.
+ */
 
 #include <string.h>
 #include "majesco.h"
-#include "libavutil/attributes.h"
+#include "libavutil/error.h"
+#include "libavutil/intreadwrite.h"
+#include "libavutil/macros.h"
 
-#define MAJESCO_LITERALS      (256 + 32)
-#define MAJESCO_DISTANCES     32
-#define MAJESCO_CODE_MAXBITS  15
-#define MAJESCO_PRIMARY_BITS  8
+#define MAX_BITS   15
+#define NB_LITERAL 288
+#define NB_DIST    32
+#define NB_CLEN    19
 
-/* Distance code base value / extra bits, and length code base / extra
- * bits, interleaved exactly as in the C# mDistanceAndBytesToCopy table.
- * Unused until the literal/length/distance decode loop is reversed and
- * implemented; kept here so that work has the table ready to go. */
-static av_unused const uint16_t majesco_dist_len_table[30 * 4] = {
-     0x0001,  0,     0,  0,
-     0x0002,  0,     3,  0,
-     0x0003,  0,     4,  0,
-     0x0004,  0,     5,  0,
-     0x0005,  1,     6,  0,
-     0x0007,  1,     7,  0,
-     0x0009,  2,     8,  0,
-     0x000d,  2,     9,  0,
-     0x0011,  3,    10,  0,
-     0x0019,  3,    11,  1,
-     0x0021,  4,    13,  1,
-     0x0031,  4,    15,  1,
-     0x0041,  5,    17,  1,
-     0x0061,  5,    19,  2,
-     0x0081,  6,    23,  2,
-     0x00c1,  6,    27,  2,
-     0x0101,  7,    31,  2,
-     0x0181,  7,    35,  3,
-     0x0201,  8,    43,  3,
-     0x0301,  8,    51,  3,
-     0x0401,  9,    59,  3,
-     0x0601,  9,    67,  4,
-     0x0801, 10,    83,  4,
-     0x0c01, 10,    99,  4,
-     0x1001, 11,   115,  4,
-     0x1801, 11,   131,  5,
-     0x2001, 12,   163,  5,
-     0x3001, 12,   195,  5,
-     0x4001, 13,   227,  5,
-     0x6001, 13,   258,  0,
+/* Length and distance ladders, interleaved exactly as the ROM keeps them: one
+ * eight-byte entry per code holding { dist_base, dist_extra, len_base,
+ * len_extra }, indexed by the distance code and by symbol - 0x100 alike. */
+static const uint16_t majesco_dist_len_table[30][4] = {
+    { 0x0001,  0,    0, 0 }, { 0x0002,  0,    3, 0 }, { 0x0003,  0,    4, 0 },
+    { 0x0004,  0,    5, 0 }, { 0x0005,  1,    6, 0 }, { 0x0007,  1,    7, 0 },
+    { 0x0009,  2,    8, 0 }, { 0x000d,  2,    9, 0 }, { 0x0011,  3,   10, 0 },
+    { 0x0019,  3,   11, 1 }, { 0x0021,  4,   13, 1 }, { 0x0031,  4,   15, 1 },
+    { 0x0041,  5,   17, 1 }, { 0x0061,  5,   19, 2 }, { 0x0081,  6,   23, 2 },
+    { 0x00c1,  6,   27, 2 }, { 0x0101,  7,   31, 2 }, { 0x0181,  7,   35, 3 },
+    { 0x0201,  8,   43, 3 }, { 0x0301,  8,   51, 3 }, { 0x0401,  9,   59, 3 },
+    { 0x0601,  9,   67, 4 }, { 0x0801, 10,   83, 4 }, { 0x0c01, 10,   99, 4 },
+    { 0x1001, 11,  115, 4 }, { 0x1801, 11,  131, 5 }, { 0x2001, 12,  163, 5 },
+    { 0x3001, 12,  195, 5 }, { 0x4001, 13,  227, 5 }, { 0x6001, 13,  258, 0 },
 };
 
-/* Order in which the code-length-alphabet symbol lengths are read;
- * unk_3002DA0 in the C# prototype (20 entries, despite v22 topping out
- * at 4 + 15 == 19 in practice - the trailing 0 is never reached). */
-static const uint8_t majesco_clen_order[20] = {
-    0x10, 0x11, 0x12, 0, 8, 7, 9, 6, 0xA, 5, 0xB, 4, 0xC, 3, 0xD, 2, 0xE, 1, 0xF, 0
+/* The order the code-length alphabet's lengths arrive in. */
+static const uint8_t majesco_clen_order[NB_CLEN] = {
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
 };
 
-typedef struct MajescoHuffNode {
-    uint16_t value;
-    uint8_t  length;
-} MajescoHuffNode;
-
-typedef struct MajescoHuffTable {
-    MajescoHuffNode *root; /* caller-provided storage, big enough for the
-                               primary table plus every secondary table */
-    unsigned smallest_length;
-    unsigned largest_length;
-} MajescoHuffTable;
-
-typedef struct MajescoBitReader {
-    const uint8_t *data;
+typedef struct BitReader {
+    const uint8_t *buf;
     int size;
-    int offset;
-    uint32_t bits;
-    int nr_bits_left;
-} MajescoBitReader;
+    int pos;                    /* byte offset of the next halfword */
+    uint32_t acc;               /* bits are left-justified */
+    int nbits;
+    int overrun;
+} BitReader;
 
-static void majesco_fill_bits(MajescoBitReader *br)
+/** Canonical decode tables, held as counts and symbols per length. */
+typedef struct HuffTable {
+    uint16_t count[MAX_BITS + 1];
+    uint16_t symbol[NB_LITERAL];
+    int maxbits;
+} HuffTable;
+
+static void br_init(BitReader *br, const uint8_t *buf, int size)
 {
-    uint16_t word = 0;
-    if (br->offset + 1 < br->size)
-        word = br->data[br->offset] | (br->data[br->offset + 1] << 8);
-    else if (br->offset < br->size)
-        word = br->data[br->offset];
-    br->bits |= (uint32_t)word << (16 - br->nr_bits_left);
-    br->offset += 2;
-    br->nr_bits_left += 16;
+    br->buf     = buf;
+    br->size    = size & ~1;
+    br->pos     = 0;
+    br->acc     = 0;
+    br->nbits   = 0;
+    br->overrun = 0;
 }
 
-static uint32_t majesco_read_bits(MajescoBitReader *br, int nr_bits)
+/* 0x1ffc388: top up to at least n bits, sixteen at a time. */
+static unsigned br_read(BitReader *br, int n)
 {
-    uint32_t result;
-    if (br->nr_bits_left < nr_bits)
-        majesco_fill_bits(br);
-    result = br->bits >> (32 - nr_bits);
-    br->nr_bits_left -= nr_bits;
-    br->bits <<= nr_bits;
-    return result;
+    unsigned v;
+
+    if (!n)
+        return 0;
+    while (br->nbits < n) {
+        unsigned hw = 0;
+
+        if (br->pos + 2 <= br->size) {
+            hw = AV_RL16(br->buf + br->pos);
+            br->pos += 2;
+        } else {
+            br->overrun = 1;
+        }
+        br->acc   |= hw << (16 - br->nbits);
+        br->nbits += 16;
+    }
+    v = br->acc >> (32 - n);
+    br->acc <<= n;
+    br->nbits -= n;
+    return v;
 }
 
-/* Faithful port of CreateDecodeTable(): builds a primary lookup table of
- * 1<<MAJESCO_PRIMARY_BITS entries, plus secondary tables appended after
- * it for any codes longer than MAJESCO_PRIMARY_BITS bits. Returns the
- * total number of MajescoHuffNode entries written into table->root, or 0
- * if the symbol set doesn't fit within MAJESCO_CODE_MAXBITS. */
-static unsigned majesco_create_decode_table(MajescoHuffTable *table,
-                                             unsigned symbols_count,
-                                             const uint8_t *symbol_lengths)
+/** Build a canonical table from a list of code lengths. */
+static int build_table(HuffTable *t, const uint8_t *lengths, int n)
 {
-    uint8_t length_occurrence[MAJESCO_CODE_MAXBITS + 1] = { 0 };
-    MajescoHuffNode symbol_list[MAJESCO_LITERALS];
-    MajescoHuffNode *symbol_length_pos[MAJESCO_CODE_MAXBITS + 1];
-    MajescoHuffNode *last_pos = symbol_list;
-    unsigned used_symbols_count;
-    MajescoHuffNode *cur_table_node, *cur_symbol;
-    const uint8_t *cur_len_occ;
-    int code_decal;
-    unsigned counter;
+    int left = 1;
 
-    for (counter = 0; counter < symbols_count; counter++)
-        length_occurrence[symbol_lengths[counter]]++;
+    memset(t->count, 0, sizeof(t->count));
+    t->maxbits = 0;
 
-    table->smallest_length = MAJESCO_CODE_MAXBITS + 1;
-    table->largest_length = 0;
-    for (counter = 1; counter <= MAJESCO_CODE_MAXBITS; counter++) {
-        symbol_length_pos[counter] = last_pos;
-        last_pos += length_occurrence[counter];
-        if (length_occurrence[counter]) {
-            if (counter < table->smallest_length)
-                table->smallest_length = counter;
-            if (counter > table->largest_length)
-                table->largest_length = counter;
-        }
+    for (int i = 0; i < n; i++) {
+        if (lengths[i] > MAX_BITS)
+            return AVERROR_INVALIDDATA;
+        t->count[lengths[i]]++;
+        if (lengths[i] > t->maxbits)
+            t->maxbits = lengths[i];
     }
+    if (!t->maxbits)                    /* an empty alphabet is legal */
+        return 0;
 
-    for (counter = 0; counter < symbols_count; counter++) {
-        uint8_t len = symbol_lengths[counter];
-        if (len) {
-            MajescoHuffNode *node = symbol_length_pos[len]++;
-            node->value = (uint16_t)counter;
-            node->length = len;
-        }
+    /* Reject anything that is not a complete or under-subscribed code. */
+    for (int b = 1; b <= MAX_BITS; b++) {
+        left <<= 1;
+        left -= t->count[b];
+        if (left < 0)
+            return AVERROR_INVALIDDATA;
     }
-
-    used_symbols_count =
-        (unsigned)(symbol_length_pos[MAJESCO_CODE_MAXBITS] - symbol_list);
-
-    code_decal = 1 << (MAJESCO_PRIMARY_BITS - table->smallest_length);
-    cur_table_node = table->root;
-    cur_symbol = symbol_list;
-    cur_len_occ = length_occurrence + table->smallest_length;
-    for (; code_decal != 0 &&
-           cur_len_occ <= length_occurrence + table->largest_length;
-         code_decal >>= 1) {
-        unsigned symbols_left = *cur_len_occ++;
-        for (; symbols_left > 0; symbols_left--, cur_symbol++) {
-            int n;
-            for (n = code_decal; n > 0; n--)
-                *cur_table_node++ = *cur_symbol;
-        }
-    }
-
-    if (table->largest_length <= MAJESCO_PRIMARY_BITS)
-        return 1 << MAJESCO_PRIMARY_BITS;
 
     {
-        MajescoHuffNode *next_table_node =
-            table->root + (1 << MAJESCO_PRIMARY_BITS);
-        unsigned remaining_bits = table->largest_length - MAJESCO_PRIMARY_BITS;
-        unsigned initial_remaining_bits = remaining_bits;
-        uint32_t current_symbol_code = (1u << table->largest_length) - 1;
+        uint16_t offs[MAX_BITS + 2];
 
-        cur_len_occ = length_occurrence + table->largest_length;
-        code_decal = 0;
-        cur_symbol = symbol_list + used_symbols_count - 1;
-        cur_table_node = next_table_node;
-
-        for (; remaining_bits != 0;
-             current_symbol_code >>= 1, remaining_bits--, code_decal++) {
-            unsigned symbols_left = *cur_len_occ--;
-            for (; symbols_left > 0; symbols_left--, cur_symbol--) {
-                int n;
-                uint32_t last_symbol_code;
-                for (n = 1 << code_decal; n > 0; n--)
-                    *next_table_node++ = *cur_symbol;
-                last_symbol_code = current_symbol_code >> remaining_bits;
-                current_symbol_code--;
-                if (((current_symbol_code >> remaining_bits) ^
-                     last_symbol_code) != 0) {
-                    cur_table_node = next_table_node - 1;
-                    cur_table_node->length =
-                        (uint8_t)(32 - initial_remaining_bits);
-                    cur_table_node->value =
-                        (uint16_t)(next_table_node - cur_table_node - 1);
-                    code_decal = symbols_left == 1 ? -1 : 0;
-                    initial_remaining_bits =
-                        symbols_left == 1 ? remaining_bits - 1 : remaining_bits;
-                }
-            }
-        }
-        return (unsigned)(next_table_node - table->root);
+        offs[1] = 0;
+        for (int b = 1; b <= MAX_BITS; b++)
+            offs[b + 1] = offs[b] + t->count[b];
+        for (int i = 0; i < n; i++)
+            if (lengths[i])
+                t->symbol[offs[lengths[i]]++] = i;
     }
+    return 0;
+}
+
+/** Walk the canonical code one bit at a time, most significant first. */
+static int decode_symbol(BitReader *br, const HuffTable *t)
+{
+    int code = 0, first = 0, index = 0;
+
+    for (int len = 1; len <= t->maxbits; len++) {
+        code |= br_read(br, 1);
+        if (code - first < t->count[len])
+            return t->symbol[index + code - first];
+        index += t->count[len];
+        first  = (first + t->count[len]) << 1;
+        code <<= 1;
+        if (br->overrun)
+            break;
+    }
+    return AVERROR_INVALIDDATA;
+}
+
+static void fixed_tables(HuffTable *lit, HuffTable *dist)
+{
+    uint8_t l[NB_LITERAL], d[NB_DIST];
+
+    for (int i = 0; i < NB_LITERAL; i++)
+        l[i] = i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8;
+    for (int i = 0; i < NB_DIST; i++)
+        d[i] = 5;
+
+    build_table(lit, l, NB_LITERAL);
+    build_table(dist, d, NB_DIST);
+}
+
+/** Read a dynamic block's two tables (state 1, 0x1ff9df4). */
+static int dynamic_tables(BitReader *br, HuffTable *lit, HuffTable *dist)
+{
+    uint8_t clen[NB_CLEN] = { 0 }, lengths[NB_LITERAL + NB_DIST] = { 0 };
+    HuffTable cl;
+    int hlit, hdist, hclen, n = 0, ret;
+
+    hlit  = br_read(br, 5) + 257;
+    hdist = br_read(br, 5) + 1;
+    hclen = br_read(br, 4) + 4;
+
+    if (hlit > NB_LITERAL || hdist > NB_DIST)
+        return AVERROR_INVALIDDATA;
+
+    for (int i = 0; i < hclen; i++)
+        clen[majesco_clen_order[i]] = br_read(br, 3);
+    if ((ret = build_table(&cl, clen, NB_CLEN)) < 0)
+        return ret;
+
+    while (n < hlit + hdist) {
+        int sym = decode_symbol(br, &cl), rep, val = 0;
+
+        if (sym < 0)
+            return sym;
+        if (sym < 16) {
+            lengths[n++] = sym;
+            continue;
+        }
+        if (sym == 16) {
+            if (!n)
+                return AVERROR_INVALIDDATA;
+            val = lengths[n - 1];
+            rep = 3 + br_read(br, 2);
+        } else if (sym == 17) {
+            rep = 3 + br_read(br, 3);
+        } else {
+            rep = 11 + br_read(br, 7);
+        }
+        if (n + rep > hlit + hdist)
+            return AVERROR_INVALIDDATA;
+        while (rep--)
+            lengths[n++] = val;
+    }
+
+    if ((ret = build_table(lit, lengths, hlit)) < 0)
+        return ret;
+    return build_table(dist, lengths + hlit, hdist);
 }
 
 uint32_t ff_majesco_get_output_size(const uint8_t *src, int src_size)
 {
     if (src_size < 4)
         return 0;
-    return src[0] | (src[1] << 8) | (src[2] << 16) | ((uint32_t)src[3] << 24);
+    return AV_RL32(src);
 }
 
-/* Runs the block-decode state machine as far as it has actually been
- * reverse engineered (state 0: read the 2-bit block-type selector;
- * state 1: read the code-length alphabet and build its Huffman table),
- * then returns 0. Nothing beyond that point (the literal/length/distance
- * decode loop that would actually produce output bytes) has a known
- * implementation anywhere - Gericom's own Inflate() returned NULL. */
 int ff_majesco_inflate(const uint8_t *src, int src_size,
-                        uint8_t *dst, uint32_t dst_size)
+                       uint8_t *dst, uint32_t dst_size)
 {
-    MajescoBitReader br = { 0 };
-    uint32_t declared_size;
-    int state;
-    MajescoHuffNode clen_table_storage[1 << MAJESCO_PRIMARY_BITS];
-    MajescoHuffTable clen_table;
+    BitReader br;
+    HuffTable lit, dist;
+    uint32_t pos = 0;
 
-    if (src_size < 4)
-        return 0;
-    declared_size = ff_majesco_get_output_size(src, src_size);
-    if (declared_size != dst_size)
-        return 0;
+    if (src_size < 6)
+        return AVERROR_INVALIDDATA;
 
-    br.data = src;
-    br.size = src_size;
-    br.offset = 4;
+    br_init(&br, src + 4, src_size - 4);
 
-    switch (majesco_read_bits(&br, 2)) {
-    case 0: state = 5; break;
-    case 1: state = 2; break;
-    case 2: state = 1; break;
-    case 3: state = 7; break;
-    default: state = -1; break;
+    while (pos < dst_size && !br.overrun) {
+        int type = br_read(&br, 2);
+
+        if (type == 0) {
+            /* Stored: the copy loop at 0x1ff9ad4. */
+            unsigned len = br_read(&br, 16);
+
+            if (len > dst_size - pos)
+                return AVERROR_INVALIDDATA;
+            for (unsigned i = 0; i < len; i++)
+                dst[pos++] = br_read(&br, 8);
+            continue;
+        } else if (type == 1) {
+            fixed_tables(&lit, &dist);
+        } else if (type == 2) {
+            int ret = dynamic_tables(&br, &lit, &dist);
+
+            if (ret < 0)
+                return ret;
+        } else {
+            /* The fourth block type; no known stream uses it. */
+            return AVERROR_PATCHWELCOME;
+        }
+
+        while (pos < dst_size) {
+            int sym = decode_symbol(&br, &lit);
+            unsigned len, off, dcode;
+
+            if (sym < 0)
+                return sym;
+            if (sym < 256) {
+                dst[pos++] = sym;
+                continue;
+            }
+            sym -= 256;
+            if (!sym)                   /* end of block */
+                break;
+            if (sym >= 30)
+                return AVERROR_INVALIDDATA;
+
+            len = majesco_dist_len_table[sym][2] +
+                  br_read(&br, majesco_dist_len_table[sym][3]);
+
+            dcode = decode_symbol(&br, &dist);
+            if ((int)dcode < 0 || dcode >= 30)
+                return AVERROR_INVALIDDATA;
+            off = majesco_dist_len_table[dcode][0] +
+                  br_read(&br, majesco_dist_len_table[dcode][1]);
+
+            if (off > pos)
+                return AVERROR_INVALIDDATA;
+            len = FFMIN(len, dst_size - pos);
+            for (unsigned i = 0; i < len; i++, pos++)
+                dst[pos] = dst[pos - off];
+
+            if (br.overrun)
+                return AVERROR_INVALIDDATA;
+        }
     }
 
-    if (state == 1) {
-        uint8_t symbol_lengths[19] = { 0 };
-        uint32_t v22;
-        int i;
-
-        majesco_read_bits(&br, 5); /* v20, unused past table selection */
-        majesco_read_bits(&br, 5); /* v21, unused past table selection */
-        v22 = majesco_read_bits(&br, 4) + 4;
-
-        for (i = 0; i < (int)v22 && i < 19; i++)
-            symbol_lengths[majesco_clen_order[i]] =
-                (uint8_t)majesco_read_bits(&br, 3);
-
-        clen_table.root = clen_table_storage;
-        majesco_create_decode_table(&clen_table, 19, symbol_lengths);
-    }
-
-    /* Every state beyond this (actually walking literal/length/distance
-     * codes to fill dst) is unreversed - do not fabricate it. */
-    (void)dst;
-    return 0;
+    return pos == dst_size ? (int)pos : AVERROR_INVALIDDATA;
 }
