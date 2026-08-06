@@ -38,6 +38,7 @@
  * to four bytes, then the blocks back to back. One block becomes one packet.
  */
 
+#include "libavutil/avstring.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
@@ -56,6 +57,8 @@ typedef struct GBAVideoDemuxContext {
 
     int frame_rate;
     int sample_rate;
+    const char *resource;       /* SFCD member to play, NULL = the largest */
+    int64_t best_size;
 
     int video_idx, audio_idx;
 
@@ -218,15 +221,17 @@ static int parse_audio_resource(AVFormatContext *avctx, int64_t off,
     return 0;
 }
 
-static int gbavideo_read_header(AVFormatContext *avctx)
+/** Walk the resource table of the .mmstr that starts at @p base. */
+static int read_mmstr(AVFormatContext *avctx, int64_t base)
 {
     GBAVideoDemuxContext *s = avctx->priv_data;
     AVIOContext *pb = avctx->pb;
-    int64_t pos = 8;
+    int64_t pos = base + 8;
     int count, ret;
 
     s->video_idx = s->audio_idx = -1;
 
+    avio_seek(pb, base, SEEK_SET);
     avio_rl32(pb);                      /* total size */
     count = avio_rl32(pb) & 0xFF;
 
@@ -269,6 +274,112 @@ static int gbavideo_read_header(AVFormatContext *avctx)
         if (s->samples_per_block <= 0)
             s->samples_per_block = 0;
     }
+
+    return 0;
+}
+
+static int gbavideo_read_header(AVFormatContext *avctx)
+{
+    return read_mmstr(avctx, 0);
+}
+
+/*
+ * An ADS-era cartridge keeps its .mmstr resources in an SFCD archive:
+ *
+ *     'SFCD' | uint16 data_off | .. | uint32 count
+ *     count * { uint32 size, uint32 offset, NUL-terminated name, pad to 4 }
+ *     file data at sfcd + data_off + 8 + offset
+ *
+ * so a ROM can be demuxed directly, without unpacking it first.
+ */
+#define SFCD_SEARCH_LEN (1 << 20)
+
+static int64_t find_sfcd(AVIOContext *pb)
+{
+    uint32_t window = 0;
+
+    avio_seek(pb, 0, SEEK_SET);
+    for (int64_t i = 0; i < SFCD_SEARCH_LEN && !avio_feof(pb); i++) {
+        window = (window << 8) | avio_r8(pb);
+        if (window == MKBETAG('S', 'F', 'C', 'D'))
+            return i - 3;
+    }
+    return -1;
+}
+
+static int gbavideo_rom_read_header(AVFormatContext *avctx)
+{
+    GBAVideoDemuxContext *s = avctx->priv_data;
+    AVIOContext *pb = avctx->pb;
+    int64_t sfcd, data_base, pos, want = -1;
+    uint32_t count;
+
+    sfcd = find_sfcd(pb);
+    if (sfcd < 0) {
+        av_log(avctx, AV_LOG_ERROR,
+               "no SFCD archive found; not an ADS-era GBA Video ROM\n");
+        return AVERROR_INVALIDDATA;
+    }
+    av_log(avctx, AV_LOG_VERBOSE, "SFCD archive at 0x%"PRIx64"\n", sfcd);
+
+    avio_seek(pb, sfcd + 4, SEEK_SET);
+    data_base = sfcd + avio_rl16(pb) + 8;
+    avio_seek(pb, sfcd + 8, SEEK_SET);
+    count = avio_rl32(pb);
+    if (!count || count > 4096)
+        return AVERROR_INVALIDDATA;
+
+    /* The archive holds menu art and text as well as the movies, so pick the
+     * requested member, else the largest - which is always a movie. */
+    pos = sfcd + 12;
+    for (uint32_t i = 0; i < count; i++) {
+        char name[256];
+        uint32_t size, off;
+        int len = 0, c;
+
+        avio_seek(pb, pos, SEEK_SET);
+        size = avio_rl32(pb);
+        off  = avio_rl32(pb);
+        while ((c = avio_r8(pb)) && !avio_feof(pb))
+            if (len < sizeof(name) - 1)
+                name[len++] = c;
+        name[len] = 0;
+        if (avio_feof(pb))
+            return AVERROR_INVALIDDATA;
+
+        av_log(avctx, AV_LOG_VERBOSE, "  [%u] %-24s %u bytes\n", i, name, size);
+
+        /* Match with or without the .mmstr suffix, so -resource "jingle"
+         * finds "jingle.mmstr". */
+        if (s->resource ? !av_strcasecmp(name, s->resource) ||
+                          (av_strstart(name, s->resource, NULL) &&
+                           !av_strcasecmp(name + strlen(s->resource), ".mmstr"))
+                        : size > (uint32_t)s->best_size) {
+            want         = data_base + off;
+            s->best_size = size;
+        }
+        pos += 8 + ((len + 4) & ~3);
+    }
+
+    if (want < 0) {
+        av_log(avctx, AV_LOG_ERROR, "no resource named '%s' in the archive\n",
+               s->resource);
+        return AVERROR(EINVAL);
+    }
+
+    return read_mmstr(avctx, want);
+}
+
+static int gbavideo_rom_probe(const AVProbeData *p)
+{
+    /* Every GBA cartridge header carries a fixed 0x96 at 0xb2; requiring the
+     * SFCD magic as well keeps this off non-ADS carts. */
+    if (p->buf_size < 0xc0 || p->buf[0xb2] != 0x96)
+        return 0;
+
+    for (int i = 0; i + 4 <= p->buf_size; i++)
+        if (AV_RB32(p->buf + i) == MKBETAG('S', 'F', 'C', 'D'))
+            return AVPROBE_SCORE_MAX;
 
     return 0;
 }
@@ -371,6 +482,9 @@ static const AVOption gbavideo_options[] = {
     { "sample_rate", "audio sample rate (the container does not record one)",
       OFFSET(sample_rate), AV_OPT_TYPE_INT, { .i64 = 16384 }, 1000, 48000,
       AV_OPT_FLAG_DECODING_PARAM },
+    { "resource", "name of the SFCD member to demux (ROM input only)",
+      OFFSET(resource), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0,
+      AV_OPT_FLAG_DECODING_PARAM },
     { NULL },
 };
 
@@ -390,6 +504,26 @@ const FFInputFormat ff_gbavideo_demuxer = {
     .priv_data_size = sizeof(GBAVideoDemuxContext),
     .read_probe     = gbavideo_probe,
     .read_header    = gbavideo_read_header,
+    .read_packet    = gbavideo_read_packet,
+    .read_close     = gbavideo_read_close,
+};
+
+static const AVClass gbavideo_rom_class = {
+    .class_name = "GBA Video (ADS) ROM demuxer",
+    .item_name  = av_default_item_name,
+    .option     = gbavideo_options,
+    .version    = LIBAVUTIL_VERSION_INT,
+};
+
+const FFInputFormat ff_gbavideo_rom_demuxer = {
+    .p.name         = "gbavideo_rom",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("ADS-era GBA Video ROM (Majesco)"),
+    .p.extensions   = "gba",
+    .p.priv_class   = &gbavideo_rom_class,
+    .p.flags        = AVFMT_GENERIC_INDEX,
+    .priv_data_size = sizeof(GBAVideoDemuxContext),
+    .read_probe     = gbavideo_rom_probe,
+    .read_header    = gbavideo_rom_read_header,
     .read_packet    = gbavideo_read_packet,
     .read_close     = gbavideo_read_close,
 };
