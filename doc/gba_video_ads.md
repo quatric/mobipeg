@@ -38,8 +38,14 @@ Retail carts split into two unrelated lineages:
 | **ADS** | 32 MB | Majesco in-house stack — this document |
 
 Scan for the ASCII string `VXDS` to classify. Dragon Ball GT has none; it has
-`SFCD` at offset 3720 (0xE88). `Shrek (USA) (Rev 6)` (64 MB) has *neither*
-magic and remains unclassified.
+`SFCD` at offset 3720 (0xE88).
+
+The 64 MB carts have **no `VXDS` magic either** — that magic belongs to the DS
+container, not to the codec. `Shrek + Shark Tale (USA) (Rev 5)` (game code
+`MSTE`, maker `5G`, the same maker as Dora) is VX all the same: the version tag
+**`VX++42`** sits in an ARM literal pool at ROM `0x135f8`. See the section on
+that cart at the end of this document for what its container does and does not
+give up.
 
 Much of the No-Intro "Video" folder is homebrew (Sonic Boom, Super Mario
 World episodes, Dinosaur Office, Eek! The Cat, Legend of Lofi, Night Trap) —
@@ -773,3 +779,48 @@ frames-per-chunk guard was too tight.
 `-resource <n>` picks one by index; the default is the largest. A movie with no
 chapters carries no title string either, so its chunks start straight after the
 three header words.
+
+
+## The VX lineage on GBA (Shrek + Shark Tale) — classified, not yet demuxed
+
+`Game Boy Advance Video - Shrek + Shark Tale (USA) (Rev 5)`, 64 MB, game code
+`MSTE`, maker `5G`. It is neither of the two stacks above:
+
+  * no `SFCD` archive and no `.mmstr` table, so the ADS/Hydrogen demuxers reject
+    it;
+  * no Hydrogen asserts — none of the `C:\Dev\...` `__FILE__` literals that
+    made Dora readable;
+  * but `VX++42` at ROM `0x135f8`, inside an ARM literal pool, which makes this
+    **ActImagine VX** — the same codec family as the DS `.vx` files that
+    `libavcodec/vx.c` already decodes, in a GBA-specific container.
+
+What the ROM gives up so far:
+
+  * `0x20000` holds `{uint32 count, uint32 ptr[]}` records: `{3: 0x3febc20,
+    0x3fec1b4, 0x3fecdd0}` (three VLC-shaped tables) and, at `0x20040`,
+    `{1: 0x3f928e8}`, which heads a nested tree of the same record type through
+    the last ~500 KB of the cart.
+  * `0x21000`..`0x3f00000` is uniform high-entropy payload — the movies.
+  * The player strings at `0xbc34` (`File Format Error`) and `0xbc48`
+    (`Unable to init YUV conversion code`) are **unreferenced**: no 32-bit
+    pointer to them exists anywhere in the ROM, under either an `0x08000000` or
+    an `0x02000000` base. They are debug leftovers, not a way in.
+
+What has been ruled out:
+
+  * there is **no seek table**: no run of 32 or more increasing in-range
+    `uint32` offsets exists anywhere in the 64 MB;
+  * frames are **not a plain size-prefixed chain** — no start offset and no
+    `uint16`/`uint32` size encoding walks the payload coherently;
+  * the code does not run from a multiboot copy the way Dragon Ball GT's
+    `main.bin` does: a live EWRAM dump matches the ROM in one 4 KB block only.
+
+**The blocker is input, not analysis.** mGBA's GDB stub works here and EWRAM and
+IWRAM dump cleanly — that is how Dora's decoder was read — but this cart boots to
+a menu and nothing can press a button: AppleScript keystrokes never reach the
+emulator (`KEYINPUT` at `0x04000130` stays `0x3ff` across a keypress sweep), so
+the movie cannot be started and the decoder cannot be caught reading. The next
+step is a route to controller input — a savestate captured by hand mid-movie
+would do it, and from there the same method as Dora applies: find the stream
+cursor by diffing ROM pointers in RAM across a few seconds, then walk back to
+the container header.
