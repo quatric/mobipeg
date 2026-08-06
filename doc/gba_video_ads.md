@@ -18,7 +18,8 @@ everything marked solved below and runs end to end on a retail ROM.
 | Video frame geometry | **solved**, verified visually |
 | Video output stage (clamp/brightness) | **solved** |
 | Video codebook (index → 8 pixels) | **partial** — entry unit known, transform not |
-| Type-2 audio | **unsolved** |
+| Type-2 audio codec (decode loop) | **solved** — algorithm recovered |
+| Type-2 audio framing + context table | **partial** — located, not confirmed |
 
 ## Which GBA Video is which
 
@@ -266,6 +267,56 @@ candidate methods at `0x02003422` (constructor, confirmed), `0x02003690`,
 `0x02003444`, `0x02004498`, `0x02005b6a`, `0x02005fa8`, `0x02001276` and
 `0x02001638`; several were not auto-detected as functions by Ghidra and need
 `create_function` before they will decompile. That is the next step.
+
+## Type-2 audio
+
+The audio codec's decode loop is an **uncatalogued ARM routine in IWRAM at
+`0x03002b7c`**, with a second entry point at `0x03002dd4` that presets the
+bit count to 32 and falls into the same loop. It sits in the gap after the
+LZMA core and was missed on the first pass because Ghidra did not
+auto-detect it; `create_function` at `0x03002b7c` recovers all 348 bytes.
+
+It is an **adaptive predictive 8-bit PCM codec**, not ADPCM in the IMA sense.
+Per output sample:
+
+    code   = VLC, 1-3 bits, via an 8-entry table indexed by the top 3 bits
+             of the bit accumulator: lengths {1,1,1,1,2,2,3,3}, selector
+             {0,0,0,0,1,1,2,3}
+    sym    = (ctx_table[ctx] >> (2 * selector)) & 3
+    ctx    = sym | (ctx & 0x0f) << 2          -- a 6-bit shift register of
+                                                 the last three symbols
+    step   = adapted from sym bit 0, clamped into [0x220, 0x1400] or
+             [.., 0x3c00] depending on branch
+    mag    = ((step & 0x7f | 0x80) << 7) >> (14 - (step >> 7 & 0xf))
+             negated when sym bit 1 is set
+    pred   = ((h2 * (f1 >> 2)) >> 11) + ((h1 * (f0 >> 2)) >> 11)
+             + ((prev * f2) >> 11), then >> 1
+    out    = clamp(round(mag + pred), -128, +127)      -- signed 8-bit
+
+Three filter coefficients (`f0,f1,f2` at struct offsets 0x10/0x14/0x18) leak
+toward zero every sample (`f -= f >> 8`, `f -= f >> 7`) and are nudged by the
+sign history, so the predictor adapts continuously. Two one-byte sign
+histories live at struct offsets 0x7c and 0x7d. Signed 8-bit output is
+exactly what GBA DirectSound wants.
+
+Decoder context struct (built by the not-yet-located init):
+
+    0x00 step        0x04 prev       0x08,0x0c predictor history
+    0x10,0x14,0x18 adaptive filter coefficients
+    0x1c bit accumulator             0x20 bits available
+    0x24,0x28 pending word           0x2c input pointer (word-stepped)
+    0x34 samples remaining           0x38 context index
+    0x3c ctx_table[64]               0x7c,0x7d sign histories
+
+`ctx_table` is **not** a constant in `main.bin` — a search for 64 consecutive
+bytes drawn from the 24 permutation-of-{0,1,2,3} values finds nothing. It
+appears to travel with the stream: a type-2 resource opens with a small
+parameter block (`00 00 00 c1 c1 cc cc cc`, then counts and several `u16`
+sizes), a 32-byte high-entropy field at 0x20, and then at **0x40 a 64-byte
+region whose bytes are exactly the 2-bit-packed shape this table needs**
+(`aa aa aa aa 02 00 08 aa 02 00 08 00 00 80 ...` — repeated single-symbol
+and single-field bytes). Confirming that mapping, and the framing that feeds
+the decoder its sample counts, is what remains before audio decodes.
 
 ## Memory map of `main.bin` (needed for any further RE)
 
