@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""List and unpack the 'VX++' movie streams in a 64 MB GBA Video cartridge.
+
+These carts (Shrek + Shark Tale and friends) are ActImagine, but neither the
+ADS nor the Hydrogen stack and not the DS '.vx' container either. Their video
+is one continuous bitstream with no per-frame sizes, which is why the header's
+seek table addresses it in *bits*.
+
+    ./gbavx_extract.py rom.gba                 # list the streams
+    ./gbavx_extract.py rom.gba -o outdir       # dump every stream
+
+Each dumped stream becomes three files: `.hdr.txt` (fields, chapters, seek
+table), `.video` (the raw bitstream, starting at bit 0 of frame 0) and
+`.audio` (3124 bytes of codebook extradata, then the audio data).
+
+The bitstream itself is *not* the DS VX bitstream: libavcodec/vx.c rejects
+frame 0 under every quantizer and byte order, so this is an earlier generation
+of the codec that still needs its own reverse engineering. See
+doc/gba_video_ads.md.
+"""
+
+import argparse
+import os
+import struct
+import sys
+
+MAGIC = b'VX++'
+HEADER_SIZE = 0x38
+
+# The audio region opens with the trained codebooks: 3*64*8 int16, then
+# 8 uint16 scale modifiers, 8 int32 lpc bases and one uint32 initial scale.
+# Same block, same size, as the DS files - see libavcodec/vx_audio.c.
+AUDIO_EXTRADATA_SIZE = 3 * 64 * 8 * 2 + 8 * 2 + 8 * 4 + 4
+
+
+class Stream:
+    def __init__(self, rom, off):
+        f = struct.unpack_from('<4s13I', rom, off)
+        self.off = off
+        (_, self.nb_frames, self.width, self.height, self.frame_rate,
+         self.quantizer, self.sample_rate, self.audio_off, self.chapter_off,
+         self.last_chapter, self.seek_off, self.nb_seek, self.unk30,
+         self.unk34) = f
+
+        n = struct.unpack_from('<I', rom, off + self.chapter_off)[0]
+        self.chapters = list(struct.unpack_from('<%dI' % n, rom,
+                                                off + self.chapter_off + 4))
+        self.seek = [struct.unpack_from('<4I', rom,
+                                        off + self.seek_off + 16 * i)
+                     for i in range(self.nb_seek)]
+
+        # The chapter table is the last thing in the stream, so it ends it.
+        self.size = self.chapter_off + 4 + 4 * n
+
+    @property
+    def fps(self):
+        """0x30c3 on every retail stream, i.e. 12.19 fps."""
+        return self.frame_rate / 1024.0
+
+    def ok(self, romlen):
+        return (self.width in range(16, 241) and self.height in range(16, 241)
+                and not (self.width % 16) and not (self.height % 16)
+                and 0 < self.nb_frames < (1 << 20)
+                and 0 < self.nb_seek < (1 << 16)
+                and 0 < self.audio_off < self.chapter_off
+                and self.off + self.size <= romlen)
+
+    def describe(self):
+        secs = self.nb_frames / self.fps
+        out = [
+            'offset          0x%08x' % self.off,
+            'size            0x%08x' % self.size,
+            'frames          %d' % self.nb_frames,
+            'geometry        %dx%d' % (self.width, self.height),
+            'frame rate      0x%04x  (%.2f fps)' % (self.frame_rate, self.fps),
+            'duration        %d:%02d' % (secs // 60, secs % 60),
+            'quantizer field %d' % self.quantizer,
+            'sample rate     %d' % self.sample_rate,
+            'video           0x%08x .. 0x%08x' % (HEADER_SIZE, self.audio_off),
+            'audio           0x%08x .. 0x%08x' % (self.audio_off,
+                                                  self.chapter_off),
+            'chapters        %d at 0x%08x' % (len(self.chapters),
+                                              self.chapter_off),
+            'seek entries    %d at 0x%08x' % (self.nb_seek, self.seek_off),
+            'unknown +30/+34 %d / %d' % (self.unk30, self.unk34),
+            '',
+            'chapter start frames:',
+            '  ' + ' '.join(str(c) for c in self.chapters),
+            '',
+            'seek table (frame, video bit, audio byte):',
+        ]
+        out += ['  %8d  %12d  %10d' % (e[0], e[1], e[2]) for e in self.seek]
+        return '\n'.join(out) + '\n'
+
+
+def find_streams(rom):
+    out, pos = [], 0
+    while True:
+        pos = rom.find(MAGIC, pos)
+        if pos < 0:
+            return out
+        if not (pos & 3):
+            try:
+                s = Stream(rom, pos)
+            except struct.error:
+                s = None
+            if s and s.ok(len(rom)):
+                out.append(s)
+                pos += s.size
+                continue
+        pos += 4
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('rom')
+    ap.add_argument('-o', '--outdir', help='dump the streams here')
+    args = ap.parse_args()
+
+    with open(args.rom, 'rb') as f:
+        rom = f.read()
+
+    streams = find_streams(rom)
+    if not streams:
+        print('no VX++ streams in %s' % args.rom, file=sys.stderr)
+        return 1
+
+    for i, s in enumerate(streams):
+        print('[%d] 0x%08x  %dx%d  %d frames  %.2f fps  %d Hz  %d chapters'
+              % (i, s.off, s.width, s.height, s.nb_frames, s.fps,
+                 s.sample_rate, len(s.chapters)))
+        if not args.outdir:
+            continue
+
+        os.makedirs(args.outdir, exist_ok=True)
+        base = os.path.join(args.outdir, 'stream%02d' % i)
+        with open(base + '.hdr.txt', 'w') as f:
+            f.write(s.describe())
+        with open(base + '.video', 'wb') as f:
+            f.write(rom[s.off + HEADER_SIZE:s.off + s.audio_off])
+        with open(base + '.audio', 'wb') as f:
+            f.write(rom[s.off + s.audio_off:s.off + s.chapter_off])
+        print('     -> %s.{hdr.txt,video,audio}' % base)
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
