@@ -36,6 +36,11 @@
  * An audio resource is [uint32][uint32][uint32][uint16 0x000c]
  * [uint16 block_count][uint16 block_size[]] with the sizes in words, padded
  * to four bytes, then the blocks back to back. One block becomes one packet.
+ *
+ * Hydrogen-era carts (Dora the Explorer) use the same container with two
+ * differences - resource sizes are in bytes rather than words, and only the
+ * low nibble of the count word is the count - and they have no SFCD archive,
+ * so their tables are found by scanning the ROM. See gbavideo_scan_rom().
  */
 
 #include "libavutil/avstring.h"
@@ -47,6 +52,9 @@
 #include "demux.h"
 #include "internal.h"
 #include "libavcodec/defs.h"
+
+/* Samples in one Hydrogen audio block; see derive_frame_rate(). */
+#define HYDROGEN_SAMPLES_PER_BLOCK 16458
 
 #define T_VIDEO 1
 #define T_AUDIO 2
@@ -61,6 +69,8 @@ typedef struct GBAVideoDemuxContext {
     const char *resource;       /* SFCD member to play, NULL = the largest */
     int64_t best_size;
     int inflate;                /* Hydrogen carts compress with Inflate */
+    int size_unit;              /* resource sizes: 4 for ADS, 1 for Hydrogen */
+    int count_mask;             /* resource count: 0xff for ADS, 0xf for Hydrogen */
 
     int video_idx, audio_idx;
 
@@ -157,12 +167,18 @@ static int parse_video_resource(AVFormatContext *avctx, int64_t off,
     avio_rl32(pb);                      /* magic */
     avio_rl32(pb);                      /* chunk count */
 
-    pos = skip_name(pb, off + 12);      /* title */
+    if (nb_chapters) {
+        pos = skip_name(pb, off + 12);  /* title */
 
-    for (int i = 0; i < nb_chapters; i++) {
-        pos = skip_name(pb, pos + 2);   /* uint16 first chunk, then a name */
-        if (pos > off + nbytes)
-            return AVERROR_INVALIDDATA;
+        for (int i = 0; i < nb_chapters; i++) {
+            pos = skip_name(pb, pos + 2); /* uint16 first chunk, then a name */
+            if (pos > off + nbytes)
+                return AVERROR_INVALIDDATA;
+        }
+    } else {
+        /* A movie with no chapters carries no title either: the chunks start
+         * straight after the three header words. */
+        pos = off + 12;
     }
 
     s->chunk_pos = (pos + 3) & ~3;
@@ -218,12 +234,57 @@ static int parse_audio_resource(AVFormatContext *avctx, int64_t off,
 
     st->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id    = AV_CODEC_ID_ADS_GBA_AUDIO;
+    if (ff_alloc_extradata(st->codecpar, 1) < 0)
+        return AVERROR(ENOMEM);
+    st->codecpar->extradata[0] = s->inflate;    /* context-table coding */
     st->codecpar->sample_rate = s->sample_rate;
     st->codecpar->ch_layout   = (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
     s->audio_idx              = st->index;
     avpriv_set_pts_info(st, 64, 1, s->sample_rate);
 
     return 0;
+}
+
+/**
+ * Time a Hydrogen movie from its soundtrack.
+ *
+ * Nothing in the container states a frame rate, but the audio decoder re-reads
+ * a header every 0x404a samples (SoundPlayer_ADPCM at 0x08005f54) and a block
+ * carries exactly that many, so the block count fixes the running time and the
+ * video's own frame count then fixes its rate.
+ */
+static int derive_frame_rate(AVFormatContext *avctx, int64_t base, int count)
+{
+    GBAVideoDemuxContext *s = avctx->priv_data;
+    AVIOContext *pb = avctx->pb;
+    int64_t pos = base + 8, frames = 0, blocks = 0;
+
+    for (int i = 0; i < count; i++) {
+        uint32_t w, nbytes, type;
+
+        avio_seek(pb, pos, SEEK_SET);
+        w = avio_rl32(pb);
+        if (avio_feof(pb))
+            return 0;
+
+        nbytes = (w & 0x0FFFFFFF) * s->size_unit;
+        type   = w >> 28;
+
+        if (type == T_VIDEO && !frames)
+            frames = (avio_rl32(pb) >> 8) & 0xFFFF;
+        else if (type == T_AUDIO && !blocks) {
+            avio_seek(pb, pos + 4 + 14, SEEK_SET);
+            blocks = avio_rl16(pb);
+        }
+        pos += 4 + nbytes;
+    }
+
+    if (frames <= 0 || blocks <= 0)
+        return 0;
+
+    return av_clip(av_rescale(frames, s->sample_rate,
+                              (int64_t)HYDROGEN_SAMPLES_PER_BLOCK * blocks),
+                   1, 240);
 }
 
 /** Walk the resource table of the .mmstr that starts at @p base. */
@@ -238,7 +299,14 @@ static int read_mmstr(AVFormatContext *avctx, int64_t base)
 
     avio_seek(pb, base, SEEK_SET);
     avio_rl32(pb);                      /* total size */
-    count = avio_rl32(pb) & 0xFF;
+    count = avio_rl32(pb) & s->count_mask;
+
+    if (!s->frame_rate) {
+        s->frame_rate = s->inflate ? derive_frame_rate(avctx, base, count) : 0;
+        if (!s->frame_rate)
+            s->frame_rate = 30;
+        av_log(avctx, AV_LOG_VERBOSE, "frame rate %d\n", s->frame_rate);
+    }
 
     for (int i = 0; i < count; i++) {
         uint32_t w, nbytes, type;
@@ -248,7 +316,7 @@ static int read_mmstr(AVFormatContext *avctx, int64_t base)
         if (avio_feof(pb))
             break;
 
-        nbytes = (w & 0x0FFFFFFF) * 4;
+        nbytes = (w & 0x0FFFFFFF) * s->size_unit;
         type   = w >> 28;
 
         if (type == T_VIDEO && s->video_idx < 0) {
@@ -272,7 +340,9 @@ static int read_mmstr(AVFormatContext *avctx, int64_t base)
      * block carries, so pace the audio off the movie's own length: the two
      * streams cover the same wall clock. Without video there is nothing to
      * pace against and blocks are timed by their coded size instead. */
-    if (s->audio_idx >= 0) {
+    if (s->audio_idx >= 0 && s->inflate) {
+        s->samples_per_block = HYDROGEN_SAMPLES_PER_BLOCK;
+    } else if (s->audio_idx >= 0) {
         if (s->nb_video_frames > 0)
             s->samples_per_block = av_rescale(s->nb_video_frames, s->sample_rate,
                                               (int64_t)s->frame_rate * s->nb_blocks);
@@ -287,6 +357,10 @@ static int gbavideo_scan_rom(AVFormatContext *avctx);
 
 static int gbavideo_read_header(AVFormatContext *avctx)
 {
+    GBAVideoDemuxContext *s = avctx->priv_data;
+
+    s->size_unit  = 4;
+    s->count_mask = 0xFF;
     return read_mmstr(avctx, 0);
 }
 
@@ -321,7 +395,9 @@ static int gbavideo_rom_read_header(AVFormatContext *avctx)
     int64_t sfcd, data_base, pos, want = -1;
     uint32_t count;
 
-    s->video_idx = s->audio_idx = -1;
+    s->video_idx  = s->audio_idx = -1;
+    s->size_unit  = 4;
+    s->count_mask = 0xFF;
 
     sfcd = find_sfcd(pb);
     if (sfcd < 0) {
@@ -380,112 +456,148 @@ static int gbavideo_rom_read_header(AVFormatContext *avctx)
 }
 
 /*
- * Hydrogen-era carts (Dora the Explorer) have no SFCD archive and no resource
- * directory that has been located, but their video streams sit in the ROM
- * uncompressed and every chunk header states how long it is. So the streams
- * can be found by walking: take the first header that validates, follow the
- * chain to its end, and that span is one stream. Because streams are laid out
- * back to back this stays linear over the ROM.
+ * Hydrogen-era carts (Dora the Explorer) have no SFCD archive, but they do
+ * carry ordinary .mmstr resource tables - the game's own lookup, at
+ * 0x08005c82, walks one - and those can be found by scanning. The catch is
+ * that a Hydrogen resource states its size in bytes where an ADS one states
+ * it in words, which is what @ref GBAVideoDemuxContext.size_unit selects.
+ *
+ * A candidate is accepted only if its audio resource's block table adds up to
+ * the resource size exactly. That is an arithmetic identity over several
+ * thousand bytes, so it does not fire on unrelated data.
  */
-static int chunk_header_ok(const uint8_t *h)
+static int mmstr_audio_ok(AVIOContext *pb, int64_t off, uint32_t nbytes)
 {
-    uint32_t w0 = AV_RL32(h), w1 = AV_RL32(h + 4);
-    unsigned desc = w0 & 0xFFFF, nb = w0 >> 16;
-    unsigned sa = (w1 & 0x1FFF) * 4, sb = (w1 >> 13) * 4;
+    int64_t total;
+    int nb_blocks;
 
-    return (desc & 0xFFF0) == 0x4030 && nb >= 1 && nb <= 300 &&
-           sa > 500 && sb > 500;
-}
+    if (nbytes < 20)
+        return 0;
 
-static int64_t walk_chain(AVIOContext *pb, int64_t pos, int64_t size,
-                          int *nb_chunks, int64_t *nb_frames)
-{
-    uint8_t h[8];
+    avio_seek(pb, off + 14, SEEK_SET);
+    nb_blocks = avio_rl16(pb);
+    if (nb_blocks < 1 || 16 + 2 * (int64_t)nb_blocks > nbytes)
+        return 0;
 
-    *nb_chunks = 0;
-    *nb_frames = 0;
-    while (pos + 8 <= size) {
-        avio_seek(pb, pos, SEEK_SET);
-        if (avio_read(pb, h, 8) != 8 || !chunk_header_ok(h))
-            break;
-        (*nb_chunks)++;
-        *nb_frames += AV_RL32(h) >> 16;
-        pos += 8 + (AV_RL32(h + 4) & 0x1FFF) * 4 + (AV_RL32(h + 4) >> 13) * 4;
+    total = 0;
+    for (int i = 0; i < nb_blocks; i++) {
+        unsigned words = avio_rl16(pb);
+
+        if (words < 0x40 || words > 0x2000)
+            return 0;
+        total += 4 * (int64_t)words;
     }
-    return pos;
+    if (avio_feof(pb))
+        return 0;
+
+    return total + ((16 + 2 * nb_blocks + 3) & ~3) == nbytes;
 }
 
-#define MIN_CHUNKS 8            /* enough to not fire on random data */
+/** Walk the resource table whose count word sits at @p pos. */
+static int64_t mmstr_at(AVFormatContext *avctx, int64_t pos, int64_t size,
+                        int64_t *payload)
+{
+    AVIOContext *pb = avctx->pb;
+    int64_t p = pos + 4;
+    int count, seen_video = 0, seen_audio = 0;
+
+    avio_seek(pb, pos, SEEK_SET);
+    count = avio_rl32(pb) & 0xF;
+    if (count < 2 || count > 8)
+        return -1;
+
+    *payload = 0;
+    for (int i = 0; i < count; i++) {
+        uint32_t w, nbytes, type;
+
+        avio_seek(pb, p, SEEK_SET);
+        w = avio_rl32(pb);
+        if (avio_feof(pb))
+            return -1;
+
+        nbytes = w & 0x0FFFFFFF;
+        type   = w >> 28;
+        if (nbytes < 0x400 || p + 4 + nbytes > size)
+            return -1;
+
+        switch (type) {
+        case T_VIDEO:
+            seen_video = 1;
+            break;
+        case T_AUDIO:
+            if (!mmstr_audio_ok(pb, p + 4, nbytes))
+                return -1;
+            seen_audio = 1;
+            break;
+        case T_IMAGE:
+        case T_TEXT:
+            break;
+        default:
+            return -1;
+        }
+        *payload += nbytes;
+        p += 4 + nbytes;
+    }
+
+    return seen_video && seen_audio ? p : -1;
+}
 
 static int gbavideo_scan_rom(AVFormatContext *avctx)
 {
     GBAVideoDemuxContext *s = avctx->priv_data;
     AVIOContext *pb = avctx->pb;
-    int64_t size = avio_size(pb), pos = 0, best = -1, best_frames = 0;
-    int want = s->resource ? atoi(s->resource) : -1, idx = 0, best_chunks = 0;
-    uint8_t h[8];
+    int64_t size = avio_size(pb), pos = 0, best = -1, best_payload = 0;
+    int want = s->resource ? atoi(s->resource) : -1, idx = 0;
 
     if (size <= 0)
         return AVERROR_INVALIDDATA;
 
-    while (pos + 8 <= size) {
-        int64_t end, frames;
-        int chunks;
+    s->inflate    = 1;
+    s->size_unit  = 1;
+    s->count_mask = 0xF;      /* the game's own walker, at 0x08005c82 */
 
+    while (pos + 12 <= size) {
+        int64_t payload, end;
+        uint32_t count, first;
+
+        /* Cheap gate first: the scan looks at every word in a 32 MB ROM. */
         avio_seek(pb, pos, SEEK_SET);
-        if (avio_read(pb, h, 8) != 8)
+        count = avio_rl32(pb) & 0xF;
+        first = avio_rl32(pb) >> 28;
+        if (avio_feof(pb))
             break;
-        if (!chunk_header_ok(h)) {
+        if (count < 2 || count > 8 ||
+            (first != T_VIDEO && first != T_AUDIO &&
+             first != T_IMAGE && first != T_TEXT)) {
             pos += 4;
             continue;
         }
 
-        end = walk_chain(pb, pos, size, &chunks, &frames);
-        if (chunks < MIN_CHUNKS) {
+        end = mmstr_at(avctx, pos, size, &payload);
+        if (end < 0) {
             pos += 4;
             continue;
         }
 
         av_log(avctx, AV_LOG_VERBOSE,
-               "  [%d] stream at 0x%"PRIx64", %d chunks, %"PRId64" frames\n",
-               idx, pos, chunks, frames);
+               "  [%d] .mmstr at 0x%"PRIx64", %"PRId64" bytes of payload\n",
+               idx, pos, payload);
 
-        if (want >= 0 ? idx == want : frames > best_frames) {
-            best        = pos;
-            best_frames = frames;
-            best_chunks = chunks;
+        if (want >= 0 ? idx == want : payload > best_payload) {
+            best         = pos;
+            best_payload = payload;
         }
         idx++;
         pos = end;
     }
 
     if (best < 0) {
-        av_log(avctx, AV_LOG_ERROR, "no video stream found in this ROM\n");
+        av_log(avctx, AV_LOG_ERROR, "no movie found in this ROM\n");
         return AVERROR_INVALIDDATA;
     }
 
-    s->inflate   = 1;
-    s->chunk_pos = best;
-    s->chunk_end = walk_chain(pb, best, size, &best_chunks, &best_frames);
-    s->nb_video_frames = best_frames;
-
-    {
-        AVStream *st = avformat_new_stream(avctx, NULL);
-
-        if (!st)
-            return AVERROR(ENOMEM);
-        st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-        st->codecpar->codec_id   = AV_CODEC_ID_ADS_GBA;
-        st->codecpar->width      = 240;
-        st->codecpar->height     = 160;
-        st->nb_frames            = best_frames;
-        if (ff_alloc_extradata(st->codecpar, 1) < 0)
-            return AVERROR(ENOMEM);
-        st->codecpar->extradata[0] = 1;
-        s->video_idx = st->index;
-        avpriv_set_pts_info(st, 64, 1, s->frame_rate);
-    }
-    return 0;
+    /* read_mmstr() expects the size word that precedes the count. */
+    return read_mmstr(avctx, best - 4);
 }
 
 static int gbavideo_rom_probe(const AVProbeData *p)
@@ -599,8 +711,8 @@ static int gbavideo_read_close(AVFormatContext *avctx)
 
 #define OFFSET(x) offsetof(GBAVideoDemuxContext, x)
 static const AVOption gbavideo_options[] = {
-    { "frame_rate", "video frame rate (the container does not record one)",
-      OFFSET(frame_rate), AV_OPT_TYPE_INT, { .i64 = 30 }, 1, 240,
+    { "frame_rate", "video frame rate (0 = derive it, else 30)",
+      OFFSET(frame_rate), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 240,
       AV_OPT_FLAG_DECODING_PARAM },
     { "sample_rate", "audio sample rate (the container does not record one)",
       OFFSET(sample_rate), AV_OPT_TYPE_INT, { .i64 = 16384 }, 1000, 48000,
