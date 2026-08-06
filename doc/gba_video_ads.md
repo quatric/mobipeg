@@ -16,7 +16,8 @@ everything marked solved below and runs end to end on a retail ROM.
 | Type-4 still images | **solved**, renders pixel-correct |
 | Video stream framing (header/chapters/chunks) | **solved**, tiles exactly |
 | Video frame geometry | **solved**, verified visually |
-| Video codebook (index → 8 pixels) | **unsolved** |
+| Video output stage (clamp/brightness) | **solved** |
+| Video codebook (index → 8 pixels) | **partial** — entry unit known, transform not |
 | Type-2 audio | **unsolved** |
 
 ## Which GBA Video is which
@@ -163,7 +164,40 @@ Confirmed visually: dumping `blobB` frames of `logo majesco.mmstr` as 60x80
 greyscale shows the Majesco logo, blank on frame 0 and fading in through
 frames 5–20, exactly as a logo intro should.
 
-### Codebook — unsolved
+### Confirmed against the code
+
+A second RE pass validated the container reading above directly against the
+decompiled player rather than by inference from file layout:
+
+- `FUN_02005110` is the generic resource decompressor and confirms the
+  `.mmstr` entry header: size is `(*p & 0x0fffffff) * 4`, and the name is
+  skipped with `strlen` rounded up to 4.
+- `FUN_020040c4` walks chunks with exactly the arithmetic used here:
+  `frames = w0 >> 16`, `next = cur + 8 + (w1 & 0x1fff)*4 + (w1 >> 13)*4`.
+- `FUN_0200414a` parses chapter records as `u16` + string with record size
+  `2 + align4(strlen+4)`, and resolves each `u16` by *walking chunks*,
+  confirming chapter values are chunk indices.
+- `FUN_0200434a` copies a 0x4c-byte header, reads the title with `strlen`,
+  and takes the chapter table at `align4(len+4) + 0xc`.
+- `FUN_02005484` fetches resource type **2** and type **1** for one movie,
+  confirming 1 = video and 2 = audio.
+
+Display is **BG Mode 3** — `FUN_020031fe` calls `FUN_02000350(3)` and stores
+`0x06000000` — so the target is a 240x160 RGB555 framebuffer.
+
+### Output stage — solved
+
+`FUN_020042fc` builds, at video-object offset `0x34c`, a 256-entry table
+`table[i] = min(255, ((base + brightness) * i) >> 8)`, with **0x200-byte
+guard bands on both sides**: the low guard is filled with a constant and the
+high guard with the table's last value. A table that is indexed from -512 to
++767 is a saturation table, so the final pixel stage is
+
+    pixel = clamp_table[prediction + residual]
+
+on 8-bit values, with the player's brightness setting folded into the curve.
+
+### Codebook — partially characterised, transform still unsolved
 
 `blobA` is a fixed 3072 bytes per chunk regardless of frame count, so it is
 a per-chunk table, and it is what maps an index to its 8 pixels. What it is
@@ -202,6 +236,26 @@ So `blobA` is a transform-domain / residual table, not a lookup table of
 pixels, and reconstruction must apply a transform (and probably a
 prediction) rather than a copy. Consecutive frames share 85.7% of their
 index bytes, so there is strong temporal structure as well.
+
+**The entry unit is six little-endian `u16`, not twelve bytes.** Across the
+whole 3072-byte blob the byte statistics have period 2 — even bytes average
+~115 with few zeros, odd bytes average ~86 with roughly three times as many
+zeros — and this holds at *every* stride tested, so it is a property of the
+stream itself and not of any assumed entry size. 3072 bytes is therefore
+1536 `u16` values, i.e. 256 entries x 6 values. Six values for an eight-pixel
+block rules out any one-value-per-pixel reading and is consistent with the
+residual/transform conclusion above; two of the eight samples would be
+predicted rather than coded. Read as signed, entries mix small values with
+large ones (index 55 is `221, 21, -10195, -10457, 209, 28`).
+
+**First real pixel output.** Rendering the logo with entries indexed at
+`index * 12` and the block laid out 4x2 produces a cleanly recognisable
+Majesco logo at correct aspect — the first time this format has produced
+actual pixels rather than an index map. The geometry (60x80 raster, 4x2
+blocks, 240x160 frame) is therefore confirmed from rendered output, not just
+from a greyscale dump of the index plane. The colours are wrong and a
+period-2 checkerboard remains, which is exactly what the `u16` finding
+predicts: consecutive bytes are halves of one value, not two pixels.
 
 Finishing this needs the block reconstruction routine itself, which has not
 been located yet. It is not among the 14 IWRAM functions (those are the LZMA
