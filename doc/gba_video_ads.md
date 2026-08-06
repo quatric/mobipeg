@@ -815,12 +815,27 @@ What has been ruled out:
   * the code does not run from a multiboot copy the way Dragon Ball GT's
     `main.bin` does: a live EWRAM dump matches the ROM in one 4 KB block only.
 
-**The blocker is input, not analysis.** mGBA's GDB stub works here and EWRAM and
-IWRAM dump cleanly — that is how Dora's decoder was read — but this cart boots to
-a menu and nothing can press a button: AppleScript keystrokes never reach the
-emulator (`KEYINPUT` at `0x04000130` stays `0x3ff` across a keypress sweep), so
-the movie cannot be started and the decoder cannot be caught reading. The next
-step is a route to controller input — a savestate captured by hand mid-movie
-would do it, and from there the same method as Dora applies: find the stream
-cursor by diffing ROM pointers in RAM across a few seconds, then walk back to
-the container header.
+**Input is solved — drive it from the GDB stub, not the keyboard.** Synthetic
+keystrokes never reach mGBA here (`KEYINPUT` stays `0x3ff`), and `KEYINPUT`
+itself is read-only to a `M` packet, so neither of the obvious routes works.
+What does work is intercepting the game's own read:
+
+  1. launch `mGBA -g`, **continue first** — the stub boots halted, and a scan
+     before the first `c` sees a dead machine at `pc = 0`;
+  2. after ~12 s, find the key poll by searching EWRAM for `b0 30 d3 e1`
+     (`ldrh r3, [r3]`, with `r3 = 0x04000130`) — it lands at `0x020003c0`;
+  3. breakpoint the *next* instruction and, on each hit, set `r3` to
+     `0x3ff ^ key` with a `P3=` packet. The following `eor r3, r1, r3` (r1 is
+     `0x3ff`) then yields exactly the wanted press. Four hits per press is
+     enough; drop the breakpoint and continue between presses.
+
+`Start, A, A, Start, A, A` reaches playback: VRAM churns ~21 KB every three
+seconds and the PC sits in IWRAM codec code around `0x03000400`-`0x03007300`.
+
+What playback has *not* given up yet: there is **no stream cursor visible in
+RAM** — no word anywhere in EWRAM or IWRAM advances monotonically at a
+plausible rate — **no DMA reads from ROM** while sampling once a second, and no
+ROM pointer sits in a register at an arbitrary stop. So the player buffers a
+large block at a time and touches the cartridge rarely. The next step is to
+catch that: a read watchpoint on the payload region, or single-stepping the
+IWRAM refill path, rather than sampling.
