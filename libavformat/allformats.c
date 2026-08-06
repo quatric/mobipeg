@@ -291,6 +291,7 @@ extern const FFInputFormat  ff_vx_demuxer;
 extern const FFOutputFormat ff_vx_muxer;
 extern const FFInputFormat  ff_moc3_demuxer;
 extern const FFInputFormat  ff_mods_demuxer;
+extern const FFInputFormat  ff_gbavideo_demuxer;
 extern const FFInputFormat  ff_rvid_demuxer;
 extern const FFInputFormat  ff_fv_demuxer;
 extern const FFOutputFormat ff_fv_muxer;
