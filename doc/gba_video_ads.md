@@ -3,10 +3,12 @@
 Reference sample: `Game Boy Advance Video - Dragon Ball GT - Volume 1 (USA).gba`
 (No-Intro), 32 MB, game code `MDBE`, internal title `DRAGONBALL01`.
 
-Tooling: `tools/gba_video/ads_extract.py` (+ `ads_lzma.py`) implements
-everything marked solved below and runs end to end on a retail ROM.
-`ads_render.py` renders video with the recovered pixel model; `ads_audio.py`
-is the ported audio decode loop.
+Playback is native: ffmpeg reads a retail cartridge directly via the
+`gbavideo_rom` demuxer (SFCD archive included), or an unpacked `.mmstr` via
+`gbavideo`. The Python under `tools/gba_video/` is reverse-engineering
+scaffolding, not part of the decode path: `ads_extract.py` (+ `ads_lzma.py`)
+unpacks a ROM for inspection, `ads_audio.py` is the ported audio decode loop,
+`ads_ctab.py` the context-table decoder and `gdbrsp.py` the mGBA GDB client.
 
 ## Status
 
@@ -15,15 +17,16 @@ is the ported audio decode loop.
 | SFCD archive | **solved**, validated |
 | `.mmstr` resource container | **solved**, byte-exact on every file |
 | Compression (LZMA) | **solved**, byte-exact consumption |
+| SFCD archive (ROM → resources) | **solved**, demuxed natively from the cartridge |
 | Type-4 still images | **solved**, renders pixel-correct |
 | Video stream framing (header/chapters/chunks) | **solved**, tiles exactly |
 | Video frame geometry | **solved**, verified visually |
 | Video output stage (clamp/brightness) | **solved** |
 | Video codebook layout + colour transform | **solved** — recovered from the ROM |
-| Video prediction (residual → pixels) | **partial** — accumulation renders, drifts |
+| Video prediction (residual → pixels) | **solved** — both logo and movie streams render clean |
 | Type-2 audio codec (decode loop) | **solved** — algorithm recovered, ported |
 | Type-2 audio framing | **solved**, byte-exact on every audio resource |
-| Type-2 audio context table | **open** — not in the stream (earlier guess refuted) |
+| Type-2 audio context table | **solved**, verified bit-exact against hardware |
 
 ## Which GBA Video is which
 
@@ -218,24 +221,72 @@ negative indices) and `five[]` is a second table at `obj+0x71c` reducing the
 clamped 8-bit value to 5 bits. This replaces the BT.601-with-128-offset guess
 that made earlier renders come out the wrong colour.
 
-### Prediction — still open
+### Prediction — solved
 
-Codebook entries are **signed residuals, not absolute pixels**: rendering them
-directly is noise, and entry 49 of the logo (`fd ff 04 fd c0 38 08 03 ff 00 01
-ff` = -3,-1,+4,-3,-64,+56,+8,+3, -1,0, +1,-1) is the entry a flat black frame 0
-is entirely made of.
+The predictor was recovered not from Dragon Ball GT but from **Dora the
+Explorer Volume 1** (`MDRE`, maker `5G`), a second ADS-era cart built on
+Majesco's "Hydrogen Library". That build ships with asserts intact, so its
+`__FUNCTION__` and `__FILE__` literals name the codec's routines outright:
 
-Accumulating residuals over time -- `recon += entry`, clamped, with the colour
-transform above -- renders the **Majesco logo correctly shaped and legible**,
-which is the furthest this format has been taken. It is not yet exact: flat
-areas drift into a period-2 checkerboard, because a static background's
-residuals do not sum to zero frame over frame. So the prediction is not simply
-"previous frame". Intra-block byte order is *not* the culprit -- row-major,
-column-major, 2x2-pair and half-swap layouts all leave the same artifact
-(`ads_render.py` reproduces this). The remaining work is the predictor itself.
-The reconstruction routine has not been located; it is not the IWRAM converter
-(that consumes an already-planar buffer) and not `0x03000B24` (that averages),
-so it is expected in EWRAM near the chunk driver at `0x0200457C`.
+    StreamBase::UnPredictLuminance(unsigned char*)     file 0x1ffb1ec
+    StreamBase::UnPredictChrominance(unsigned char*)   file 0x1ffb2f0
+    StreamBase::DecompressCodebook()
+    hyCompressionManager::Inflate::CoreExpand_Static()
+
+The codec overlay is uncompressed ARM at the tail of the ROM (up to file
+0x1ffc66c) and runs from IWRAM around `0x03002xxx`, the same arrangement as
+Dragon Ball GT. Its block-geometry table at ROM `0xea70` is byte-identical to
+the one recovered from Dragon Ball GT, which is what justifies carrying the
+result across to the other cart.
+
+Both routines are the same loop, unrolled four ways: a **running sum modulo
+256** over a byte range, with no clamping.
+
+    acc = 0
+    for each byte p:  p = (p + acc) & 0xff;  acc = p
+
+The decisive detail is the length. It is `count * blk_w * blk_h` where
+`count = (desc[0] >> 22) & 0x3ff`, and ten bits cannot hold a frame's 4800
+blocks -- but they hold 256 exactly. **The prediction is over the codebook,
+not over the frame.** `UnPredictChrominance` confirms the layout: it starts at
+`base + count * blk_w * blk_h`, so a codebook is planar *across* entries:
+
+    [256 * blk_w*blk_h luma][256 * crows Cb][256 * crows Cr]
+
+not planar within each entry as previously documented. Cb and Cr are summed as
+one contiguous run, Cb flowing into Cr. `crows` comes from the mode's low bit:
+odd modes carry one Cb/Cr per block row, even modes a single pair per block --
+a distinction the earlier write-up missed because both Dragon Ball GT streams
+are odd modes.
+
+**Frames are intra.** Once the codebook has been un-delta'd its entries are
+absolute pixels, so a frame is a plain lookup with no temporal prediction at
+all. There is no accumulator, and no keyframe/interframe distinction.
+
+Three of the old assumptions were wrong at once: prediction was applied to the
+frame rather than the codebook, the codebook was read with the wrong layout,
+and there was a temporal accumulator that does not exist. The accumulator went
+unnoticed for so long because the Majesco logo *opens on a run of uniform white
+frames* -- frame 0 is 4800 copies of one entry whose luma is -1 everywhere, and
+frames 0 and 1 have identical index planes -- so summing deltas happened to
+approximate the right answer there while destroying every movie frame. Movie
+streams are the case that settles it: their indices change completely between
+frames and their common entries are large positive values (+10, +20), which
+saturate within a few frames if accumulated.
+
+The mode nibble is not something to infer: it sits in the low bits of every
+chunk header's first word (`0x4037` for `logo majesco`, mode 7 = 4x2;
+`0x4033` for `movie_1`, mode 3 = 4x3).
+
+With all of this the **Majesco logo stream renders cleanly end to end** -- the
+fade-in, the correct blue, the "TM", and the "DIGITAL" tagline strip -- and
+reading the cartridge directly and reading an unpacked `.mmstr` give
+byte-identical frames.
+
+Both streams now decode clean end to end: the logo fades in correctly and the
+movie renders sharp footage (title cards are legible) for its whole length. A
+small residual remains -- colour speckle at the left and right edges of the
+logo's "DIGITAL VIDEO" tagline strip -- which is the only known artifact left.
 
 ### Chunk driver
 
@@ -245,6 +296,22 @@ the code: `sizeA = (w1 & 0x1FFF) * 4` via `lsl #0x13; lsr #0x11`, and
 machine: state 1 LZMA-decodes blobA into `codebook_base + idx*6144`, state 2
 pushes 6144 bytes from IWRAM `0x03002FCC` with **DMA3** (`DMA3SAD 0x040000D4`,
 control `0x84000600` = enable, 32-bit, 1536 words).
+
+### SFCD archive
+
+Resources live in an SFCD archive, so a cartridge can be demuxed without
+unpacking it first:
+
+    'SFCD' | uint16 data_off | .. | uint32 count
+    count * { uint32 size, uint32 offset, NUL-terminated name, pad to 4 }
+    file data at sfcd + data_off + 8 + offset
+
+Names here are plain, unlike the substitution-alphabet names inside a `.mmstr`.
+The `gbavideo_rom` demuxer scans the first megabyte for the magic (it sits at
+0xE88 in Dragon Ball GT), lists the members at `-v verbose`, and plays the
+largest one unless `-resource <name>` picks another; the suffix is optional, so
+`-resource jingle` finds `jingle.mmstr`. Reading the cartridge this way gives
+byte-identical frames to reading an extracted `.mmstr`.
 
 ## Type-2 audio
 
