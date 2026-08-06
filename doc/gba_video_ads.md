@@ -781,61 +781,105 @@ chapters carries no title string either, so its chunks start straight after the
 three header words.
 
 
-## The VX lineage on GBA (Shrek + Shark Tale) — classified, not yet demuxed
+## The VX lineage on GBA (Shrek + Shark Tale) — container solved
 
 `Game Boy Advance Video - Shrek + Shark Tale (USA) (Rev 5)`, 64 MB, game code
-`MSTE`, maker `5G`. It is neither of the two stacks above:
+`MSTE`, maker `5G`. A third stack: no `SFCD`, no `.mmstr`, no Hydrogen asserts.
+Its container magic is **`VX++`** — ActImagine, but neither the DS `.vx`
+(`VXDS`) container nor either Majesco stack.
 
-  * no `SFCD` archive and no `.mmstr` table, so the ADS/Hydrogen demuxers reject
-    it;
-  * no Hydrogen asserts — none of the `C:\Dev\...` `__FILE__` literals that
-    made Dora readable;
-  * but `VX++42` at ROM `0x135f8`, inside an ARM literal pool, which makes this
-    **ActImagine VX** — the same codec family as the DS `.vx` files that
-    `libavcodec/vx.c` already decodes, in a GBA-specific container.
+(An earlier note here called the tag `VX++42`. That was a misread: `42` is the
+first two bytes of the pointer `0x02003234` that follows it in the literal
+pool, and that pointer is what makes the tag certain — it addresses the string
+`File Format Error`, so `VX++` is what the player compares a stream against.)
 
-What the ROM gives up so far:
+### Where the code lives
 
-  * `0x20000` holds `{uint32 count, uint32 ptr[]}` records: `{3: 0x3febc20,
-    0x3fec1b4, 0x3fecdd0}` (three VLC-shaped tables) and, at `0x20040`,
-    `{1: 0x3f928e8}`, which heads a nested tree of the same record type through
-    the last ~500 KB of the cart.
-  * `0x21000`..`0x3f00000` is uniform high-entropy payload — the movies.
-  * The player strings at `0xbc34` (`File Format Error`) and `0xbc48`
-    (`Unable to init YUV conversion code`) are **unreferenced**: no 32-bit
-    pointer to them exists anywhere in the ROM, under either an `0x08000000` or
-    an `0x02000000` base. They are debug leftovers, not a way in.
+Both RAM images are straight copies out of the ROM, which is what makes static
+work possible: **EWRAM `0x02000000` ← ROM `0x8a00`** (`0x32c8` bytes) and
+**IWRAM `0x03000000` ← ROM `0xbcc8`**. Under those bases the player's strings
+resolve — `File Format Error` is EWRAM `0x02003234`, `Unable to init YUV
+conversion code` is `0x02003248` — and both are referenced from literal pools
+in the IWRAM image, so the codec and its error handling are IWRAM code.
 
-What has been ruled out:
+### Header
 
-  * there is **no seek table**: no run of 32 or more increasing in-range
-    `uint32` offsets exists anywhere in the 64 MB;
-  * frames are **not a plain size-prefixed chain** — no start offset and no
-    `uint16`/`uint32` size encoding walks the payload coherently;
-  * the code does not run from a multiboot copy the way Dragon Ball GT's
-    `main.bin` does: a live EWRAM dump matches the ROM in one 4 KB block only.
+Four streams, all at `0x200`-aligned offsets. The header is `0x38` bytes:
 
-**Input is solved — drive it from the GDB stub, not the keyboard.** Synthetic
-keystrokes never reach mGBA here (`KEYINPUT` stays `0x3ff`), and `KEYINPUT`
-itself is read-only to a `M` packet, so neither of the obvious routes works.
-What does work is intercepting the game's own read:
+| off | field |
+|---|---|
+| `+00` | `'VX++'` |
+| `+04` | frame count |
+| `+08` | width |
+| `+0c` | height |
+| `+10` | frame rate, `0x30c3` on every stream = **12.19 fps** (value / 1024) |
+| `+14` | quantizer — **0**, so it is not the DS quantizer field |
+| `+18` | sample rate, 16384 |
+| `+1c` | audio offset |
+| `+20` | chapter table offset |
+| `+24` | first frame of the last chapter |
+| `+28` | seek table offset |
+| `+2c` | seek table entries |
+| `+30` | same as `+24` |
+| `+34` | unknown (33259 / 32540; zero on the short streams) |
 
-  1. launch `mGBA -g`, **continue first** — the stub boots halted, and a scan
+All offsets are relative to the stream. The chapter table is
+`{uint32 count, uint32 first_frame[count]}` and ends the stream. The seek table
+is four words per entry: **`{frame, video bit offset, audio byte offset, 0}`**.
+
+That middle column is the important one. Its last entry reaches
+180,659,843 against a video region of 180,665,920 bits, and the audio column
+reaches 9,713,678 against an audio region of 9,719,808 bytes — both land within
+a rounding of the end, which is what identifies them. So **the video is one
+continuous bitstream with no per-frame sizes**, bit-addressed; there is nothing
+to walk, which is why every framing hypothesis tried against this cart failed.
+The audio region opens with **3124 bytes** of extradata — exactly the DS
+`AudioExtraData` block (3·64·8 int16 codebooks, 8 uint16 scale modifiers,
+8 int32 LPC bases, 1 uint32 initial scale), byte-identical between streams —
+and the first seek entry's audio column is `3124`, i.e. the audio data proper.
+
+    [0] 0x00020200  240x112  34874 frames  47:40  20 chapters
+    [1] 0x01eef800  240x112  34261 frames  46:50  20 chapters
+    [2] 0x03dd3600  240x160    595 frames   0:48   1 chapter
+    [3] 0x03e76a00  240x160    707 frames   0:57   1 chapter
+
+`tools/gba_video/gbavx_extract.py` lists and unpacks all of this.
+
+### The bitstream is not the DS bitstream
+
+`libavcodec/vx.c` cannot decode frame 0. It was tried at both plausible data
+starts, under all four byte orders (raw, swapped 16, swapped 32, swapped 32
+then 16 — the decoder itself applies a `bswap16`, so those cover every
+combination), and across every legal quantizer 12..161: 600 attempts, no
+frame. That is consistent with what the header already says — the DS decoder
+takes its quantizer from the container and starts straight into macroblocks,
+whereas here `+14` is zero and every frame opens with a near-constant halfword
+(`0x84dd` on the 240x112 streams, `0x84dc` on the 240x160 ones) that the DS
+format has no place for. This is an earlier generation of the codec and needs
+its own reverse engineering, from the IWRAM code at ROM `0xbcc8`.
+
+The audio may be cheaper: the extradata block is bit-for-bit the DS layout, so
+`decode_aframe()` in `libavcodec/vx_audio.c` is likely to work as-is. What
+stops it being a drop-in is the multiplexing — on DS the audio bits sit *after*
+the video bits inside a shared frame payload, and the decoder replays the video
+bit consumption to find them, whereas here audio is its own region with its own
+byte offsets. It would need an entry point that just starts at the packet.
+
+### Driving the cart under mGBA
+
+Worth recording, because the obvious routes do not work: synthetic keystrokes
+never reach the emulator (`KEYINPUT` stays `0x3ff`), and `KEYINPUT` will not
+take a `M` packet write. What works is intercepting the game's own read:
+
+  1. launch `mGBA -g` and **continue first** — the stub boots halted, so a scan
      before the first `c` sees a dead machine at `pc = 0`;
-  2. after ~12 s, find the key poll by searching EWRAM for `b0 30 d3 e1`
-     (`ldrh r3, [r3]`, with `r3 = 0x04000130`) — it lands at `0x020003c0`;
-  3. breakpoint the *next* instruction and, on each hit, set `r3` to
-     `0x3ff ^ key` with a `P3=` packet. The following `eor r3, r1, r3` (r1 is
-     `0x3ff`) then yields exactly the wanted press. Four hits per press is
-     enough; drop the breakpoint and continue between presses.
+  2. find the key poll by searching EWRAM for `b0 30 d3 e1` (`ldrh r3, [r3]`,
+     `r3 = 0x04000130`); it lands at `0x020003c0`, though not until the cart is
+     a few seconds past boot;
+  3. breakpoint the *next* instruction and set `r3` to `0x3ff ^ key` with a
+     `P3=` packet — the following `eor r3, r1, r3` (r1 is `0x3ff`) yields the
+     press. Four hits per press, then drop the breakpoint.
 
-`Start, A, A, Start, A, A` reaches playback: VRAM churns ~21 KB every three
-seconds and the PC sits in IWRAM codec code around `0x03000400`-`0x03007300`.
-
-What playback has *not* given up yet: there is **no stream cursor visible in
-RAM** — no word anywhere in EWRAM or IWRAM advances monotonically at a
-plausible rate — **no DMA reads from ROM** while sampling once a second, and no
-ROM pointer sits in a register at an arbitrary stop. So the player buffers a
-large block at a time and touches the cartridge rarely. The next step is to
-catch that: a read watchpoint on the payload region, or single-stepping the
-IWRAM refill path, rather than sampling.
+`Start, A, A, Start, A, A` reaches playback. Note the stub wedges if a script
+exits while the target is halted, so restart mGBA per attempt and do everything
+in one script.
