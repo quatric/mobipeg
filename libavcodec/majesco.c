@@ -19,12 +19,14 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/* See majesco.h for background. This is a direct port of the reverse
- * engineered pieces from Gericom's C# prototype - it does not invent
- * anything past what that prototype had working, so ff_majesco_inflate()
- * still bails out once the block-decode state machine runs off the end
- * of the known states (only "read block-type selector" and "read code
- * length alphabet + build its Huffman table" were ever reversed). */
+/* See majesco.h for background, including why this is NOT the codec that
+ * retail ADS-era GBA Video actually uses (that one is LZMA - see
+ * doc/gba_video_ads.md). This is a direct port of the reverse engineered
+ * pieces from Gericom's C# prototype - it does not invent anything past
+ * what that prototype had working, so ff_majesco_inflate() still bails
+ * out once the block-decode state machine runs off the end of the known
+ * states (only "read block-type selector" and "read code length alphabet
+ * + build its Huffman table" were ever reversed). */
 
 #include <string.h>
 #include "majesco.h"
