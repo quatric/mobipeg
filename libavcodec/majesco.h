@@ -20,14 +20,22 @@
  */
 
 /*
- * Generic Huffman byte-stream decompressor used underneath the "ADS-era"
- * GBA Video engine (e.g. Majesco's Dragon Ball GT cart, SFCD/mmstr
- * containers). It is NOT the ActImagine/Mobiclip VX codec (see vx.c) - it
- * is a separate, in-house, general-purpose LZ+Huffman scheme described in
- * US Patent 7353233 ("Apparatus and method for real-time decompression of
- * data streams on limited-resource embedded devices"), assigned to
- * Majesco Entertainment Co. The actual ADS video-frame layer sits on top
- * of whatever this decompresses, and has not been reverse engineered yet.
+ * Generic LZ+Huffman byte-stream decompressor described in US Patent
+ * 7353233 ("Apparatus and method for real-time decompression of data
+ * streams on limited-resource embedded devices"), inventor Alexandre
+ * Ganca, assigned to Majesco Entertainment Co. DEFLATE-shaped: 288
+ * literals, 32 distance codes, primary/secondary Huffman lookup tables.
+ * It is NOT the ActImagine/Mobiclip VX codec (see vx.c).
+ *
+ * IMPORTANT - this is NOT what retail ADS-era GBA Video actually runs.
+ * A Ghidra pass over Dragon Ball GT (the reference ADS cart) found its
+ * decompressor to be stock LZMA, matching the canonical probability-model
+ * layout byte for byte; no DEFLATE-style Huffman decoder is present in
+ * that ROM at all. See doc/gba_video_ads.md for the full analysis and the
+ * EWRAM/IWRAM split needed to even see that code. This file is therefore
+ * an unverified port kept for reference: the patent scheme may belong to
+ * another title, another asset class, or a later revision, but it has not
+ * been located in any sample yet, so nothing here is on a decode path.
  *
  * Ported from Gericom's unfinished C# prototype (MobiclipDecoder repo,
  * commit c88b67d "Improved the encoder a lot!", LibMobiclip/Codec/Majesco).
