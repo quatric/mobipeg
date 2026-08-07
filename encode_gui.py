@@ -349,38 +349,17 @@ class EncodeGUI(tk.Tk):
         ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
         ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=2, column=2, padx=5, pady=5)
 
-        # Stereoscopic eye selection (3DS moflex). "Both" means one file per eye
-        # when decoding and a single side-by-side window when playing, so the
-        # label says both things rather than naming only the decode behaviour.
-        ttk.Label(self.decode_frame, text="3D eyes:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-        # A stereoscopic input is always split into separate left/right files
-        # automatically -- no eye picker. The only thing left to say is how
-        # the eyes are packed, since a 3D file with no layout descriptor is
-        # indistinguishable from a 2D one and detection needs a hint.
-        ttk.Label(self.decode_frame, text="3D layout:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-        self.dec_stereo_var = tk.StringVar(value="Auto (from file)")
-        self.dec_stereo_map = {
-            "Auto (from file)": "auto",
-            "Force 2D": "none",
-            "Frame alternate": "frameseq",
-            "Frame alternate, right first": "frameseq-r",
-            "Top/bottom": "tb",
-            "Top/bottom, right first": "tb-r",
-            "Side by side": "sbs",
-            "Side by side, right first": "sbs-r",
-        }
-        ttk.Combobox(self.decode_frame, textvariable=self.dec_stereo_var,
-                     values=list(self.dec_stereo_map.keys()), state="readonly",
-                     width=26).grid(row=3, column=1, sticky="w", padx=5, pady=5)
-
+        # A stereoscopic input is always detected and split into separate
+        # left/right files automatically -- no eye picker, no layout override.
+        # This note just says whether that happened.
         self.dec_eyes_note = ttk.Label(self.decode_frame, text="", foreground="grey")
-        self.dec_eyes_note.grid(row=4, column=1, sticky="w", padx=5)
+        self.dec_eyes_note.grid(row=3, column=1, sticky="w", padx=5)
 
         # Buttons. Play is the no-output-file path: it decodes straight to a
         # window, so it's the quick way to check a file before committing to a
         # full decode.
         btns = ttk.Frame(self.decode_frame)
-        btns.grid(row=5, column=1, pady=15, sticky="w")
+        btns.grid(row=4, column=1, pady=15, sticky="w")
         self.dec_play_btn = ttk.Button(btns, text="▶ Play", command=self.run_play)
         self.dec_play_btn.grid(row=0, column=0, padx=(0, 10))
         self.dec_run_btn = ttk.Button(btns, text="▶ Run Decoding", command=self.run_decoding)
@@ -610,10 +589,6 @@ class EncodeGUI(tk.Tk):
         cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
         cmd.extend(["play", inp])
 
-        stereo = self.dec_stereo_map.get(self.dec_stereo_var.get(), "auto")
-        if stereo != "auto":
-            cmd.extend(["--stereo", stereo])
-
         self.execute_cmd(cmd, self.dec_play_btn)
 
     def run_decoding(self):
@@ -633,9 +608,6 @@ class EncodeGUI(tk.Tk):
         outfile = self.dec_output_var.get().strip()
         if outfile:
             cmd.extend(["-o", outfile])
-        stereo = self.dec_stereo_map.get(self.dec_stereo_var.get(), "auto")
-        if stereo != "auto":
-            cmd.extend(["--stereo", stereo])
 
         self.execute_cmd(cmd, self.dec_run_btn)
 
