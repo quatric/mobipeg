@@ -754,3 +754,87 @@ escape-variant-1 codepath, the second-level table lookup, and the value-offset-t
   proven for later frames/slices.
 - Once the group-1 drift is fixed, extend the live-validated prefix into a full first-frame walk and
   compare MB-by-MB against a longer live trace before touching `vx.c` itself.
+
+## 8. Bitstream grammar solved (2026-08-07, second mGBA session)
+
+The "drift after group 1's `Y2`" recorded in §7 was **not a drift at all** — it was a structural error in
+the MB model, and the fix invalidates that entire open item.
+
+### 8.1 There is exactly ONE coded-block-pattern per macroblock
+
+The model inherited from session 1 read **four** CBP "groups" per MB. Hardware reads one. The CBP is a
+plain 6-bit mask over four 8×8 luma quadrants plus Cb and Cr — the ordinary H.263/MPEG-4 arrangement.
+Blocks are therefore 8×8 (64 coefficients), not 16, which also retires the long-standing
+"coefficient buffer overflows past 16 slots" symptom: it was never an overflow, the buffer was just
+four times too small.
+
+Proof, from the frame-0 live capture already on disk (`/tmp/gbavx/live_trace.json`):
+
+| field | bit pos | value |
+|---|---|---|
+| QP delta | 0 | 34 |
+| MB0 mode | 11 | 1 |
+| MB1 mode | 14 | 2 |
+| MB2 mode | 17 | 18 |
+| MB2 intra luma / chroma | 26 / 29 | 2 / 0 |
+| MB2 CBP | 30 | 1 → mask `001111` = Y0..Y3 |
+| MB2 Y0..Y3 | 33..117 | 84 bits, one DC coefficient each (`-16, run=0, last=1`) |
+
+The four luma blocks consume exactly 84 bits and land at bit 117 — precisely where hardware's next read
+begins. With this model **all 40/40** `ue(v)` reads in that capture match hardware in *both bit position
+and value* (previously only the first 8 did).
+
+### 8.2 Frame geometry: 105 MBs = 15×7 = 240×112, letterboxed
+
+A fresh 4000-call trace (breakpoint on `FUN_0300076c`, logging `lr`/`r1`/`r2` per call) shows a 1-bit gap
+recurring at a period of exactly 105 macroblocks. The movie is letterboxed inside the GBA's 240×160
+screen: 15×7 MBs of 16×16. Frames are separated by a single marker bit.
+
+### 8.3 The QP delta is read ONCE for the whole video
+
+`FUN_03000520`'s QP-delta read (`lr=0x03000734`) hits **exactly once in 4000 calls**. The §7 open question
+about its "re-read trigger condition" is therefore moot: there is no re-read, and the earlier
+per-frame-QP assumption was wrong.
+
+### 8.4 Per-mode grammar, read directly off call sites
+
+Modes are a 12-entry predictor family plus a `+12 = same predictor, with residual` variant. Side data
+keys off the base mode:
+
+| base mode | extra reads after the mode code | call site |
+|---|---|---|
+| 0,1,2,3,4,5 | none | — |
+| 6 | 2 × `ue(v)` (intra luma + chroma submode) | `0x0300088c`, `0x03000894` |
+| 7 | 1 × `ue(v)` | `0x030009a4` |
+| ≥12 | additionally CBP + coded blocks | `0x0300566c` |
+
+Mode 6/18 and 7/19 confirm the `+12` pairing directly in the trace.
+
+### 8.5 Where it stands
+
+With the above, **938 of 964** modelled hardware calls match exactly in bit position, across 963
+macroblocks and 9 frames — up from a model that desynced at frame 5, MB 114. Frames 1–7 are entirely
+skip macroblocks (a static title card); frame 8 is where real motion begins.
+
+### Still open
+
+- **Modes 4 and 5 consume extra bits that are not read through `FUN_0300076c`.** The gaps are always odd
+  (mode 4: 3,5,7,9,17,19,31; mode 5: 7,11,15,23,25), i.e. exp-Golomb-shaped, but no traced call accounts
+  for them — so there is a *second*, untraced exp-Golomb/`se(v)` reader, almost certainly the
+  motion-vector path. Finding and breakpointing that function is the single highest-value next step.
+- **Coded inter modes (12, 13, 14, 23) over-consume**, by −64 to −171 bits. Since intra-coded residual
+  (mode 18) decodes perfectly, the likely cause is a separate inter coefficient VLC table rather than an
+  error in the loop itself. Worth checking whether the codebook pointer `fp` differs between intra and
+  inter MBs — it is read from `*(r0+0x20)` and could simply be reloaded.
+- The frame-marker bit's phase is 4 MBs later than a naive "after every 105th MB" placement (first marker
+  falls after MB 108). Modelled empirically; the reason is not yet understood.
+
+### Workflow notes that worked
+
+- Capture is far more productive than single-stepping: breakpoint `FUN_0300076c`, `cont()` + `regs()` per
+  hit, ~18 calls/sec, 4000 calls in ~4 minutes. `(r1*8 - r2)` gives an exact bit position per call, and
+  the `lr` identifies the call site — together that is enough to recover the grammar without reading any
+  more disassembly.
+- Compare against the simulator with a **resync-tolerant** differ: at each expected read, record
+  `live_pos - sim_pos` as a gap, then force `sim_pos = live_pos` and continue. Attributing each nonzero
+  gap to the *preceding* MB's mode turns one desync into a full per-mode table of what is unmodelled.

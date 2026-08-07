@@ -31,6 +31,11 @@ CBP_PERMTAB = [
 MODE_SKIP_MAX = 12
 # modes whose handler reads 2 extra ue(v) sub-mode codes (FUN_03000884: intra luma+chroma)
 INTRA_MODES = {6, 18}
+# Frame geometry, established live: 15x7 macroblocks = 240x112, i.e. the movie is
+# letterboxed inside the GBA's 240x160 screen. Frames are separated by a single
+# marker bit. The QP delta is read ONCE for the whole video, not per frame
+# (FUN_03000520, lr=0x03000734 -- exactly one hit in a 4000-call hardware trace).
+MB_PER_FRAME = 105
 
 
 def load(p):
@@ -152,13 +157,14 @@ def decode_one(br, tab, vofs, rofs, pos):
 
 def decode_block(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
     """Returns (coeffs, new_pos, overflow)."""
-    co = [0] * 16
+    # 8x8 blocks (the 6-bit CBP covers 4 luma quadrants + Cb + Cr), so 64 coeffs.
+    co = [0] * 64
     cpos = 0
     over = False
-    for _ in range(64):
+    for _ in range(80):
         val, run, last, npos, tag = decode_one(br, tab, vofs, rofs, pos)
         cpos += run
-        if cpos < 16:
+        if cpos < 64:
             co[cpos] = val
         else:
             over = True
@@ -177,38 +183,51 @@ def decode_mb(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
     if mode is None or mode >= 24:
         return None, pos, f"bad mode {mode}"
     r = {"mode": mode, "groups": [], "blocks": 0, "over": False}
-    if mode in INTRA_MODES:
+    # Modes split into a 12-entry predictor family plus a "+12 = same predictor,
+    # with residual" variant, so the per-predictor side data keys off base.
+    base = mode - MODE_SKIP_MAX if mode >= MODE_SKIP_MAX else mode
+    if base == 6:                       # FUN_03000884: intra luma + chroma submode
         lm, pos = read_ue(br, pos)
         cm, pos = read_ue(br, pos)
         if lm is None or cm is None or lm >= 4 or cm >= 4:
             return None, pos, f"bad intra submode {lm}/{cm}"
         r["intra"] = (lm, cm)
+    elif base == 7:                     # one extra ue, read at lr=0x030009a4
+        v, pos = read_ue(br, pos)
+        if v is None:
+            return None, pos, "bad mode-7 side value"
+        r["side"] = v
     if mode < MODE_SKIP_MAX:
         return r, pos, None
-    for g in range(4):
-        cbp, pos = read_ue(br, pos)
-        if cbp is None or cbp >= 64:
-            return None, pos, f"bad cbp {cbp} in group {g}"
-        mask = CBP_PERMTAB[cbp]
-        r["groups"].append((cbp, mask))
-        if verbose:
-            print(f"    group{g} cbp={cbp} mask={mask:06b}")
-        for b in range(6):
-            if mask & (1 << b):
-                co, pos, ov = decode_block(br, tab, vofs, rofs, pos,
-                                           stop_when_set, verbose)
-                r["blocks"] += 1
-                r["over"] |= ov
-                if verbose:
-                    print(f"      -> {['Y0','Y1','Y2','Y3','Cb','Cr'][b]}: {co}")
+    # Exactly ONE coded-block-pattern per MB -- a 6-bit mask over the four 8x8
+    # luma quadrants plus Cb/Cr, in the classic H.263/MPEG-4 arrangement. (An
+    # earlier model read four CBP "groups" per MB; that was wrong and was the
+    # sole cause of the apparent bit-drift chased across several sessions.
+    # Verified live: 40/40 ue reads match hardware in both position and value.)
+    cbp, pos = read_ue(br, pos)
+    if cbp is None or cbp >= 64:
+        return None, pos, f"bad cbp {cbp}"
+    mask = CBP_PERMTAB[cbp]
+    r["groups"].append((cbp, mask))
+    if verbose:
+        print(f"    cbp={cbp} mask={mask:06b}")
+    for b in range(6):
+        if mask & (1 << b):
+            co, pos, ov = decode_block(br, tab, vofs, rofs, pos,
+                                       stop_when_set, verbose)
+            r["blocks"] += 1
+            r["over"] |= ov
+            if verbose:
+                print(f"      -> {['Y0','Y1','Y2','Y3','Cb','Cr'][b]}: {co}")
     return r, pos, None
 
 
-def run(stop_when_set, n_mb=105, quiet=True):
+def run(stop_when_set, n_mb=MB_PER_FRAME, quiet=True):
     tab = load16(VLC)
     vofs, rofs = load(VOFS), load(ROFS)
     br = Bits(load(STREAM))
-    pos = 0
+    # One QP delta at the head of the frame (FUN_03000520, lr=0x03000734).
+    qp, pos = read_ue(br, 0)
     ok = over = 0
     for m in range(n_mb):
         r, npos, err = decode_mb(br, tab, vofs, rofs, pos, stop_when_set)
