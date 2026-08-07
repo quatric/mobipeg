@@ -660,6 +660,7 @@ jobs:
               pip install --quiet pyinstaller Pillow
               pyinstaller --name mobipeg-gui --windowed \
                 --add-binary artifact/ffmpeg:. \
+                --add-binary artifact/ffprobe:. \
                 --add-data logo.png:. \
                 --distpath pyinst_dist encode_gui.py
               tar -czf mobipeg-gui-${{ matrix.target }}.tar.gz -C pyinst_dist mobipeg-gui
@@ -674,27 +675,31 @@ jobs:
           python -m pip install pyinstaller Pillow
           if [[ "${{ matrix.target }}" == windows* ]]; then
             FFMPEG_BIN="artifact/ffmpeg.exe"
+            FFPROBE_BIN="artifact/ffprobe.exe"
+            FFPLAY_BIN="artifact/ffplay.exe"
             SDL2_BIN="artifact/SDL2.dll"
-            # SDL2.dll may be absent for some targets (e.g. arm64) — include it only if present
-            if [ -f "$SDL2_BIN" ]; then
-              pyinstaller --name "mobipeg-gui" --windowed \
-                --add-binary "$FFMPEG_BIN;." --add-binary "$SDL2_BIN;." \
-                --add-data "logo.png;." --icon=logo.png \
-                --distpath pyinst_dist encode_gui.py
-            else
-              pyinstaller --name "mobipeg-gui" --windowed \
-                --add-binary "$FFMPEG_BIN;." \
-                --add-data "logo.png;." --icon=logo.png \
-                --distpath pyinst_dist encode_gui.py
+            BINARY_ARGS=(--add-binary "$FFMPEG_BIN;." --add-binary "$FFPROBE_BIN;.")
+            # ffplay.exe/SDL2.dll may be absent for some targets (e.g. arm64) — include only if present
+            if [ -f "$FFPLAY_BIN" ] && [ -f "$SDL2_BIN" ]; then
+              BINARY_ARGS+=(--add-binary "$FFPLAY_BIN;." --add-binary "$SDL2_BIN;.")
             fi
+            pyinstaller --name "mobipeg-gui" --windowed \
+              "${BINARY_ARGS[@]}" \
+              --add-data "logo.png;." --icon=logo.png \
+              --distpath pyinst_dist encode_gui.py
             cd pyinst_dist
             # 7z may not exist on arm64 Windows runners — fall back to PowerShell
             7z a ../mobipeg-gui-${{ matrix.target }}.zip mobipeg-gui 2>/dev/null \
               || powershell -Command "Compress-Archive -Path mobipeg-gui -DestinationPath ../mobipeg-gui-${{ matrix.target }}.zip"
           elif [[ "${{ matrix.target }}" == "macos-universal" ]]; then
             FFMPEG_BIN="artifact/ffmpeg"
+            FFPROBE_BIN="artifact/ffprobe"
+            FFPLAY_BIN="artifact/ffplay"
+            BINARY_ARGS=(--add-binary "$FFMPEG_BIN:." --add-binary "$FFPROBE_BIN:.")
+            # ffplay is only present if SDL2 was found during the FFmpeg build
+            [ -f "$FFPLAY_BIN" ] && BINARY_ARGS+=(--add-binary "$FFPLAY_BIN:.")
             pyinstaller --name "mobipeg-gui" --windowed \
-              --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." \
+              "${BINARY_ARGS[@]}" --add-data "logo.png:." \
               --icon=logo.png --distpath pyinst_dist \
               --target-architecture universal2 encode_gui.py
             cd pyinst_dist
@@ -703,8 +708,10 @@ jobs:
             # Native Linux (x86_64, arm64)
             sudo apt-get install python3-tk -y || true
             FFMPEG_BIN="artifact/ffmpeg"
+            FFPROBE_BIN="artifact/ffprobe"
             pyinstaller --name "mobipeg-gui" --windowed \
-              --add-binary "$FFMPEG_BIN:." --add-data "logo.png:." \
+              --add-binary "$FFMPEG_BIN:." --add-binary "$FFPROBE_BIN:." \
+              --add-data "logo.png:." \
               --icon=logo.png --distpath pyinst_dist encode_gui.py
             cd pyinst_dist
             tar -czf ../mobipeg-gui-${{ matrix.target }}.tar.gz mobipeg-gui
