@@ -1034,3 +1034,71 @@ Two practical notes that made this possible:
   exercised for a subset of modes in the current trace.
 - Nothing here touches reconstruction — prediction, dequantisation and the inverse transform are still
   entirely unexamined. This is a *bitstream* parser; a decoder needs all three.
+
+## 12. The container header is a better oracle than the emulator
+
+`gbavx_extract.py` was already parsing the `VX++` stream header, and it answers — offline, with no
+emulator — two questions this document spent sessions inferring.
+
+### Frame geometry, confirmed
+
+```
+[0] 0x00020200  240x112  34874 frames  12.19 fps  16384 Hz  20 chapters
+```
+
+**240×112** — exactly 15×7 macroblocks. The `MB_PER_FRAME = 105` inferred in §8 from the period of a
+1-bit gap in a hardware trace is independently correct. (Streams 2 and 3 are 240×160, so the letterboxing
+is per-stream, not a property of the codec.)
+
+### The seek table is a bit-exact frame index
+
+The header carries a 181-entry seek table whose second field is a **bit offset**:
+
+```
+(frame, bit, audio_off, 0)
+(    0,      0,   3124, 0)
+(  154, 388377,  41464, 0)
+(  325, 523291,  89162, 0)
+```
+
+Parsing forward from bit 0, **my frame boundary 153 lands on bit 388377 — exactly the table's frame 154**
+(the table is 1-based). That is 154 consecutive frames, ~16,000 macroblocks, validated against an oracle
+that has nothing to do with the emulator or with how the grammar was derived.
+
+This is now the primary regression check: it is free, offline, and covers far more of the stream than any
+GDB trace. Only three entries fall inside the extracted 256 KB, but that is still two full seek intervals.
+
+### Uniformity as a bug-finder
+
+Tabulating each mode's `se(v)` count across all sixteen dispatcher tables showed mode 4 disagreeing in
+four of them. Reading those handlers confirmed the majority: mode 4 reads **three** `se(v)` everywhere —
+one directly, one in each of two paired sub-helpers, with a third callee that is pure pixel averaging and
+reads nothing. Fixing it took the parse from 26 frames to **324**.
+
+The whole grammar is now internally consistent, which is itself evidence:
+
+- Every mode has one `se(v)` count across all tables: `0,0,0,2,3,5,0,0,0,2,0,2` for modes 0-11.
+- Modes 12-23 are exactly modes 0-11 plus a residual — the `+12` symmetry holds without exception.
+- The partition tree is coherent: 16×16 (4 CBP groups, 16 intra sub-blocks) → 16×8 and 8×16 (2 groups,
+  8 sub-blocks) → 8×8 (1 group, 4 sub-blocks) → 4×4 and below, which carry no residual at all. Only the
+  12-entry tables lack coded modes, exactly as they must.
+
+### Still open: a drift between frames 154 and 325
+
+The parse is exact to frame 154 and then desyncs 59 macroblocks into frame 324, at bit 523291 — which is
+precisely the seek table's offset for frame 325. So the error accumulates somewhere in that 171-frame
+window.
+
+Ruled out so far:
+
+- **All three coefficient escape paths**, checked instruction by instruction against `0x030059b4`
+  onward: escape detection (top 7 bits == 3), the bit-24/bit-23 variant selection, the 8/9/9-bit
+  prefixes, the value-offset table at `fp+0x2000` indexed by `cell>>9`, the run-offset table at
+  `fp+0x2080` indexed by `last*64 + value` (computed *before* the value is negated), and the raw literal's
+  9+1+6+12 layout with an arithmetic shift for the signed 12-bit value. All correct as implemented.
+- **Any single wrong grammar constant**: an exhaustive search perturbing every table entry's `se(v)`
+  count by ±1 and every `resid` group count over {1,2,4} finds nothing that improves on the baseline.
+
+So the defect is conditional or contextual rather than a constant — which is why a per-*frame* breakpoint
+(`FUN_03000520`, called once per frame from `0x03006dc8`) is the right next probe: ~400 hits instead of
+the ~80,000 needed to reach frame 325 by tracing every `ue(v)` call.
