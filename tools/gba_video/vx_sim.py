@@ -36,6 +36,10 @@ INTRA_MODES = {6, 18}
 # marker bit. The QP delta is read ONCE for the whole video, not per frame
 # (FUN_03000520, lr=0x03000734 -- exactly one hit in a 4000-call hardware trace).
 MB_PER_FRAME = 105
+# Number of se(v) side values each predictor family reads, from its handler in the
+# 24-entry jump table at 0x03001d4c: mode 4 -> FUN_03001ac0, mode 5 -> FUN_03001854.
+# Both verified against hardware: every mode-4/5 bit gap disappears with these.
+SE_COUNT = {4: 3, 5: 5}
 
 
 def load(p):
@@ -106,6 +110,21 @@ def read_ue(br, pos):
         return 0, p
     suffix = br.peek32(p) >> (32 - n)
     return suffix + (1 << n) - 1, p + n
+
+
+def read_se(br, pos):
+    """FUN_0300081c: signed exp-golomb. Same bit length as ue(v) (2n+1), then the
+    standard H.264 zig-zag mapping 0, 1, -1, 2, -2, ... The ARM computes
+    k = ue+1; if k is odd, k = 1-k; result = k >> 1 (arithmetic).
+    This reader is why modes 4/5 appeared to consume untraced bits: it is a
+    separate function from the ue(v) reader at FUN_0300076c, so it never showed
+    up in a breakpoint trace of the latter.
+    """
+    u, p = read_ue(br, pos)
+    if u is None:
+        return None, p
+    k = u + 1
+    return ((1 - k) >> 1) if (k & 1) else (k >> 1), p
 
 
 def decode_one(br, tab, vofs, rofs, pos):
@@ -197,6 +216,14 @@ def decode_mb(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
         if v is None:
             return None, pos, "bad mode-7 side value"
         r["side"] = v
+    if base in SE_COUNT:                # motion/offset vectors, via FUN_0300081c
+        sv = []
+        for _ in range(SE_COUNT[base]):
+            v, pos = read_se(br, pos)
+            if v is None:
+                return None, pos, "bad se(v) side value"
+            sv.append(v)
+        r["se"] = sv
     if mode < MODE_SKIP_MAX:
         return r, pos, None
     # Exactly ONE coded-block-pattern per MB -- a 6-bit mask over the four 8x8
