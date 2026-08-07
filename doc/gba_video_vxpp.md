@@ -970,3 +970,67 @@ Rebuild the parser around call-site identity rather than an assumed grammar: seg
 trace — `FUN_03002184`, `FUN_030030f4`, `FUN_03003584`. They read *conditionally* (mode 1 is followed by
 `h2184 h2184` sometimes and by nothing at other times), so their predicates are the remaining unknown.
 That is the whole of what stands between here and a correct full-stream parse.
+
+## 11. Solved: the codec is a recursive block partition (4000/4000 hardware calls)
+
+The grammar is now fully recovered and validated end to end. §10's "next step" is done.
+
+### The structure
+
+VX++ is **not** a flat macroblock loop. It is a **recursive block partition** driven by **16 jump-table
+dispatchers**, each of which reads a mode with `ue(v)` and expands to further reads — including recursing
+into smaller dispatchers. Found by pattern-scanning the IWRAM image for the dispatch idiom:
+
+```
+bl   #0x300076c          ; read mode with ue(v)
+sub  r7, pc, #<imm>      ; r7 = jump table base
+ldr  r6, [r7, r6, lsl #2]
+bx   r6
+```
+
+The 16 dispatchers account for 16 of the `ue(v)` reader's 21 call sites; the other five are the one-time
+QP delta, the two intra submodes, the intra-4×4 helper, and the CBP read. Top-level and second-level
+tables have 24 entries; the deeper ones have 12 (verified — the words preceding each table are not code
+pointers, so they are not larger tables).
+
+Modes 1 and 2 are the partition operators: each calls a sub-dispatcher **twice**, adjusting the
+destination pointers by ±0x800/±0x400 (vertical split) or ±8 (horizontal split) in between. Modes
+`n` and `n+12` share a predictor; the `+12` form additionally decodes a residual.
+
+### The last missing reader: intra 4×4 modes
+
+`FUN_030008fc` reads, for each 4×4 sub-block of an `r4`×`r5` region, a flag bit: **1 bit if the predicted
+mode is reused, otherwise 4 bits** (the flag plus a 3-bit remainder, incremented if it is ≥ the
+prediction) — H.264's `prev_intra4x4_pred_mode_flag` / `rem_intra4x4_pred_mode`, exactly. Only *after*
+that loop does it call `ue(v)`. Those raw bits are invisible to a breakpoint trace of the `ue(v)` reader,
+which is why they were the final unexplained gap.
+
+### Validation
+
+A generated grammar (`tools/gba_video/vx_grammar.py`, 240 table entries) plus a recursive parser
+reproduces **4000/4000 `ue(v)` calls** from the mGBA trace — every call, exact in **both** bit position
+and originating call site. This is a much stronger check than position alone: matching the call site
+proves the parser is in the right *function* at the right time, which is precisely what §10 showed
+position-matching alone cannot establish.
+
+Two practical notes that made this possible:
+
+- The decoder reads the bitstream through a **2 KB circular window** at `0x08001000-0x080017ff`. The
+  pointer wraps once per 2 KB; unwrapping it (add 2048 bytes per wrap) recovers a linear bit position and
+  extends validation from 2430 calls to the full 4000.
+- Static call-graph walking gives *upper bounds* on `se(v)` counts and needs a call-depth limit of 2 to
+  match reality. Three entries were still wrong and were corrected by hardware calibration: search for the
+  `se(v)` count that makes the next traced call land in the right place. Static analysis proposes,
+  the trace disposes — all three corrections converged on "mode 4 reads 3 `se(v)`", consistent with every
+  other table.
+
+### Still open
+
+- The parse runs cleanly for **26 frames** and then desyncs at bit 41590 (byte 5198), reading a mode of 16
+  from a 12-entry table. That is well past the 4000-call trace (which covers to byte 3267), so it is
+  undiagnosed rather than contradicted. A longer capture is the way in — the capture loop runs at
+  ~18 calls/sec, so ~20k calls is a 20-minute run.
+- The `resid` group counts come from the `fp`/`ip` immediates at each `b #0x3005650` site and are only
+  exercised for a subset of modes in the current trace.
+- Nothing here touches reconstruction — prediction, dequantisation and the inverse transform are still
+  entirely unexamined. This is a *bitstream* parser; a decoder needs all three.
