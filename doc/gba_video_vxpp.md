@@ -1142,3 +1142,32 @@ mistaken for a mode; "QP once per video" came from a trace one segment long. In 
 was real and the inference overreached it. The seek table is a better class of evidence precisely because
 it is independent of the decoder disassembly, the emulator, and the reasoning that produced the grammar —
 and it covers the entire stream rather than its first few seconds.
+
+### Generalisation: all four streams on the cart
+
+The grammar was derived entirely from stream 0 at 240×112. Running it against every stream on the
+cartridge, with macroblocks-per-frame taken from each header:
+
+| stream | geometry | MBs/frame | frames | segments exact |
+|---|---|---|---|---|
+| 0 | 240×112 | 105 | 34,874 | 180/180 |
+| 1 | 240×112 | 105 | 34,261 | 171/171 |
+| 2 | 240×160 | 150 | 595 | 1/1 |
+| 3 | 240×160 | 150 | 707 | 1/1 |
+
+**353/353 segments, 70,437 frames, bit-exact.** Streams 2 and 3 are the meaningful test: 240×160 is a
+geometry the grammar never saw, and 150 macroblocks per frame instead of 105 falls out of the header with
+no other change. The bitstream layer is done.
+
+### What a decoder still needs
+
+This parses the bitstream and nothing else. Reconstruction is untouched:
+
+- **Prediction.** The mode tree is recovered structurally, but what each of the ~10 predictor families
+  actually computes is unexamined, beyond noting that modes 1 and 2 split the block and that the handlers
+  are full of pixel-averaging (`ldrb`/`add`/`asr #1`) and half-pel interpolation loops.
+- **Dequantisation.** The per-segment quantiser delta is read and discarded; its scaling is unknown.
+- **Inverse transform.** Untouched. Blocks are 8×8 with 64 coefficients, and §10 of the ffmpeg9 notes
+  suggests the DS-era relatives use a plain H.264-style integer transform, but that is an assumption here.
+- **Coefficient scan order.** `decode_block` writes coefficients at `run`-derived positions in raster
+  order; the real zig-zag or field scan has not been identified.
