@@ -1,0 +1,626 @@
+# VX++ GBA Video Codec — Reverse Engineering Handoff
+
+Goal: reverse the ActImagine VX++ video codec used in the GBA "Game Boy Advance Video" carts
+(Shrek + Shark Tale USA Rev 5) and implement a decoder in FFmpeg (`libavcodec/vx.c`).
+The current `vx.c` implements the DS VX codec (H.264 CAVLC) — that is NOT this target.
+Model the decoder on `libavcodec/mobiclip.c` / `tools/mobiclip/decode_ref.c`, swapping in the
+ROM-derived VLC table.
+
+---
+
+## 1. Files / resources
+
+- Cart ROM: `<roms>/Game Boy Advance Video - Shrek + Shark Tale (USA) (Rev 5).gba` (67,108,864 bytes = 64 MB multi-ROM)
+- Ghidra project loaded with `/tmp/shrek_play_i1.bin` — a live IWRAM RAM dump (address base `0x03000000`, ARM `:LE:32:v4t`). This is IWRAM only; **the VLC table is not in it**.
+- Extracted streams: `/tmp/gbavx/stream0{0..3}.video`, `stream0{0..3}.audio`, `stream0{0..3}.hdr.txt`. stream00 = 240×112, header bytes `69 04 | dd 84`.
+- Helper: `/tmp/iwtool.py` (capstone wrappers: `dis`, `blrefs`, `litrefs`, `wordrefs`).
+- New artifacts this session:
+  - `/tmp/gbavx/vlc_rom_0xa000.bin` — raw 7168-byte dump of ROM `0xa000..0xbc00` (LE uint16 cells).
+  - `/tmp/gbavx/vlc_blocks.txt` — uniform-block analysis of that dump.
+- mGBA GDB stub (`tools/gba_video/gdbrsp.py`, port 2345) was not running this session; not needed for the table anymore.
+
+---
+
+## 2. The VLC codebook — LOCATED (the big win this session)
+
+The residual-coefficient VLC codebook lives in the **ROM at file offset `0x0a000`** (GBA address `0x0800a000`),
+NOT in EWRAM/IWRAM. It was extracted statically; no live dump needed.
+
+- Table = `0xE00` halfwords = **3584 cells** at `0x0a000..0x0bc00`, little-endian.
+- Cell immediately after the table region is UI string data (`"Brightness -"`, `"Brightness +"`, `"1\0"`, `"2\0"` …) — confirms the table end at ~`0x0bbe4..0x0bc00`.
+- Format of each 16-bit entry (confirmed by decoder disasm AND by ROM entries):
+  - bits `0..3` = `len` (number of bits to shift the accumulator; **len = code_length + 1**, i.e. includes the sign bit)
+  - bits `4..8` = `value` (level; 5 bits, range 0..31; sign applied separately)
+  - bits `9..14` = `run` (zero-run before this coefficient; 6 bits)
+  - bit `15` = `more` (1 = another coefficient follows in this block)
+  - Sign of value: the `len`-th consumed bit (carry out of `lsls r3,r3,len`) → if set, `value = -value`.
+- Example entries: `0x0013` → {len=3, value=1, run=0, more=0}; `0x0024` → {len=4, value=2}; `0x8015` → {len=5, value=1, run=0, more=1}; `0x0416` → {len=6, value=1, run=2}.
+
+### Block structure (uniform runs) — cells are indexed by the top 12 bits of the bit accumulator
+
+Index range 0x000–0xd71 are the real VLC blocks (sizes are power-of-2, `size = 2^(12 - code_len)` with `code_len = len-1`):
+
+| idx start | idx end | count | entry | len | code_len | value | run | more | decoded symbol |
+|-----------|---------|-------|-------|-----|----------|-------|-----|------|----------------|
+| 0x000 | 0x011 | 18 | 0x0e18 | 8 | 7 | 1 | 7 | 0 | run7, val1, eob-ish? |
+| 0x012 | 0x031 | 32 | 0x0428 | 8 | 7 | 2 | 2 | 0 | |
+| 0x032 | 0x051 | 32 | 0x0238 | 8 | 7 | 3 | 1 | 0 | |
+| 0x052 | 0x071 | 32 | 0x0098 | 8 | 7 | 9 | 0 | 0 | |
+| 0x072 | 0x0b1 | 64 | 0x8027 | 7 | 6 | 2 | 0 | 1 | |
+| 0x0b2 | 0x0f1 | 64 | 0x0a17 | 7 | 6 | 1 | 5 | 0 | |
+| 0x0f2 | 0x131 | 64 | 0x8417 | 7 | 6 | 1 | 2 | 1 | |
+| 0x132 | 0x171 | 64 | 0x8217 | 7 | 6 | 1 | 1 | 1 | |
+| 0x172 | 0x1b1 | 64 | 0x0817 | 7 | 6 | 1 | 4 | 0 | |
+| 0x1b2 | 0x1f1 | 64 | 0x0617 | 7 | 6 | 1 | 3 | 0 | |
+| 0x1f2 | 0x231 | 64 | 0x0087 | 7 | 6 | 8 | 0 | 0 | |
+| 0x232 | 0x271 | 64 | 0x0077 | 7 | 6 | 7 | 0 | 0 | |
+| 0x272 | 0x2b1 | 64 | 0x0227 | 7 | 6 | 2 | 1 | 0 | |
+| 0x2b2 | 0x2f1 | 64 | 0x0067 | 7 | 6 | 6 | 0 | 0 | |
+| 0x2f2 | 0x371 | 128 | 0x0416 | 6 | 5 | 1 | 2 | 0 | |
+| 0x372 | 0x3f1 | 128 | 0x0056 | 6 | 5 | 5 | 0 | 0 | |
+| 0x3f2 | 0x471 | 128 | 0x0046 | 6 | 5 | 4 | 0 | 0 | |
+| 0x472 | 0x571 | 256 | 0x8015 | 5 | 4 | 1 | 0 | 1 | |
+| 0x572 | 0x971 | 1024 | 0x0013 | 3 | 2 | 1 | 0 | 0 | largest block |
+| 0x972 | 0xb71 | 512 | 0x0024 | 4 | 3 | 2 | 0 | 0 | |
+| 0xb72 | 0xc71 | 256 | 0x0215 | 5 | 4 | 1 | 1 | 0 | |
+| 0xc72 | 0xd71 | 256 | 0x0035 | 5 | 4 | 3 | 0 | 0 | |
+
+Then an odd "tail" 0xd72–0xdf1 (~128 cells) with tiny/weird entries
+(`0x0a1b` len11 val1 run5; `0x0405`; `0x0303`×2; `0x0202`; `0x0101`×2; `0x0001`; `0x0000`×24; `0x0308`; …).
+This tail may be the long-code/escape fill region — **unresolved, needs verification**.
+
+### KEY OPEN QUESTION — block ordering & indexing
+
+- Decoder indexes the table with the **top 12 bits of the accumulator** (`r4 = r3 >> 20`, `ldrh [fp + r4*2]`).
+- Block sizes fit `2^(12 - (len-1))`, i.e. each block corresponds to a code of `code_len = len-1` bits with
+  the `len`-th bit being the sign. Good.
+- BUT the blocks are NOT in canonical Huffman order (shortest first). The order goes:
+  7,7,7,7 (len-8 blocks), then six 6-bit blocks, then 5-bit, 4-bit, **then the 2-bit code (0x0013, 1024 cells) comes AFTER the 4/5/6/7-bit blocks**, then 3-bit, 4-bit, 4-bit. That is a non-ascending length order.
+  - Possible explanations to check:
+    1. The table order is by code *value* in a particular code-length assignment (e.g., canonical order computed over a *bit-reversed* or non-minimal Huffman tree), OR
+    2. The index is not literally `r3>>20` — maybe the accumulator is pre-rotated/offset so the effective code starts a few bits down, changing which blocks overlap the escape region, OR
+    3. The 18-cell `0x0e18` block and the tail are artifacts of a *two-level* table (long codes > ~9 bits go through an escape path), and the "weird tail" cells 0xd72–0xdf1 are markers/secondary-index fill.
+  - Resolution path: recompute the exact bit positions by emulating the decoder against real stream00 data,
+    or read the escape sub-tables at `fp+0x2000` (value-offset bytes) and `fp+0x2080` (run-offset bytes).
+
+### Escape path — FULLY RESOLVED via decompile of `0x030059b4..0x03005a90`
+
+Trigger: top 7 bits of accumulator `acc>>25 == 3` (bit pattern `0000011...`). This is checked
+**before** the primary table is indexed, which explains why codebook indices `0x060–0x07F`
+(where `idx>>5==3`, i.e. `acc>>25==3`) are **dead/unreachable** in the block table in §2 — the
+escape check intercepts those codes first. That resolves the "non-canonical block order" question:
+the order isn't actually wrong, those specific cells are simply never reached.
+
+There are **three** escape variants, selected by up to 2 more bits after the 7-bit `0000011` prefix:
+
+- **Variant 1** — next bit (orig bit 24) `== 0` → 8-bit prefix `00000110`. Do a *second* primary-table
+  lookup at the new top-12 bits (`len2/value2/run2/more2`). Then:
+  `idx_vt = cell>>9` (7 bits, 0..127 — includes the `more` bit as the index's MSB)
+  `value = value2 + value_offset_table[idx_vt]`
+  Sign/consume as normal, using `len2`. Total bits consumed = 8 + len2.
+
+- **Variant 2** — bits `10` after prefix → 9-bit prefix `000001101`... (bit24=1, bit23=0). Second
+  primary-table lookup (`len3/value3/run3/more3`). Then:
+  `ridx = more3*0x40 + value3`
+  `run = run3 + run_offset_table[ridx]`
+  Sign/consume as normal, using `len3`. Total bits consumed = 9 + len3.
+
+- **Variant 3** — bits `11` after prefix (bit24=1, bit23=1) → 9-bit prefix, then **raw literal fields**,
+  no further table lookup: `more` = next 1 bit, `run` = next 6 bits (unsigned), `value` = next 12 bits
+  (sign-extended, arithmetic shift). Total bits consumed = 9 + 1 + 6 + 12 = 28.
+
+Bit refill helper at `0x030007a8` (models an infinite bitstream; irrelevant for offline simulation
+since we can just re-peek 32 bits fresh at any bit position).
+
+**Escape tables extracted from ROM** (fp = codebook base = ROM `0x0800a000`, confirmed — this is a
+flat ROM pointer, not an EWRAM copy):
+- `value_offset_table` @ `fp+0x2000` = file offset `0xc000`. Real table is only **48 bytes** (indices
+  0–47), **all `0x1f` (31)** — genuine ARM code (`push {r4-r10,lr}; ldr r1,[r0,#4]; ...`, a clean
+  function prologue) starts immediately after at `0xc030`, confirming the table's true length. Saved
+  to `/tmp/gbavx/value_offset_table.bin` (first 0x30 bytes are the real table).
+- `run_offset_table` @ `fp+0x2080` = file offset `0xc080`, 128 bytes dumped to
+  `/tmp/gbavx/run_offset_table.bin`. Bytes here do *not* form a clean instruction prologue (unlike
+  the value-offset table's tail), consistent with this being real table data across its full needed
+  range (index = `more*0x40 + value`, max 95).
+
+**Simulator**: `tools/gba_video/vx_sim.py` (formerly decode_vlc2.py)
+implements this exactly (all 3 variants + normal path) and was validated against `stream00.video`
+starting at bit 0 — coefficients for the first several blocks decode to small, plausible residuals.
+**Caveat**: naive back-to-back block decoding breaks down after ~14 blocks (hits table indices that
+don't correspond to a real coefficient) — see new blocker #6 below; this is expected, not a bug in
+the VLC logic itself.
+
+---
+
+## 3. Decoder core — FUN_03005794 (residual 4×4 block, disassembled + decompiled)
+
+Signature: `FUN_03005794(ctx, ?, bitcount, accumulator)`. Fully reconstructed:
+
+1. Zero 16 coeff words at `0x030056f0` (16×u32 buffer).
+2. `fp = *(ctx + 0x20)` → the codebook base (ROM 0x0800a000 or its EWRAM copy).
+3. Loop (per coefficient):
+   - `idx = acc >> 20`; `entry = fp[idx*2]` (16-bit)
+   - `len = entry & 0xF`; `value = (entry>>4)&0x1F`; `run = (entry>>9)&0x3F`; `more = (entry>>15)&1`
+   - `acc <<= len`; if carry set → `value = -value` (sign = last consumed bit)
+   - `coeffbuf += run`; `*coeffbuf = value`
+   - loop while `more == 1`
+4. After loop: if exactly one coefficient was written, jump through `PTR_LAB_03005788[?]`; else run the
+   **4×4 inverse transform** inline (`0x0300582c..0x0300598c`), then jump through `PTR_LAB_0300577c[?]`.
+   The jump index comes from an un-decoded register (`unaff_r10` / `lr`), likely a block-type/plane selector
+   (Y vs Cb vs Cr, or luma/chroma dequant choice) — **needs the caller to resolve**.
+
+Dequant: constants `0x200/0x280/0x320` live at `0x03005770/74/78`; the transform is the standard
+Butterfly-8 1D + transpose 4×4, with `>>1` on some products (scaled IDCT). Output written to `DAT_03005730..`.
+
+---
+
+## 3b. MB/8×8-region block-loop — `0x03005650` (decompiled/disassembled this session, resolves blocker #3)
+
+This is the caller that sits between MB dispatch and `FUN_03005794`. Full disassembly-verified logic:
+
+```
+sub r4, r0, #0x8
+ldmia r4, {r5,r6,r7,r8}     ; r5=luma_ptr0, r6=chroma_ptr0, r7=luma_stride?, r8=chroma_stride?
+add r5, r5, r7              ; r5 = luma dest pointer
+add r6, r6, r8              ; r6 = chroma dest pointer
+outer_loop (r12 = height counter, steps of 8):
+  inner_loop (r11 = width counter, steps of 8):
+    bl 0x0300076c           ; ue(v) exp-golomb decode -> r6 = code value
+    r12b = permtab[r6]      ; adr r11,0x3005610; ldrb r12,[r11,r6]  (6-bit CBP-style mask)
+    r11 = r5 (luma dest); r10 = 0 (PLANE = LUMA)
+    if r12b & 0x01: bl FUN_03005794   ; top-left 4x4 luma block
+    r11 += 4
+    if r12b & 0x02: bl FUN_03005794   ; top-right 4x4 luma block
+    r11 += 0x3fc                     ; drop to next row (stride - 4)
+    if r12b & 0x04: bl FUN_03005794   ; bottom-left 4x4 luma block
+    r11 += 4
+    if r12b & 0x08: bl FUN_03005794   ; bottom-right 4x4 luma block
+    r11 = chroma_ptr0; r10 = 1 (PLANE = Cb)
+    if r12b & 0x10: bl FUN_03005794   ; 4x4 Cb block
+    r10 = 2 (PLANE = Cr)
+    if r12b & 0x20: bl FUN_03005794   ; 4x4 Cr block
+    r5 += 8; r6 += 8                 ; advance to next 8x8 luma / 4x4-chroma-pair region
+    r11 -= 8 (width counter); loop inner while != 0
+  r5 += 0x800; r6 += 0x400            ; next row of 8x8 regions (luma stride "0x100" px/row-group,
+                                       ; chroma half that — consistent with 4:2:0 subsampling)
+  r12 -= 8 (height counter); loop outer while != 0
+```
+
+So each "8×8 luma + 4×4 Cb + 4×4 Cr" region (standard 4:2:0 macroblock-ish unit) is gated by ONE
+`ue(v)`-coded CBP index, remapped through the 64-byte permutation table into a 6-bit
+per-subblock coded flag. **This directly answers blocker #3**: `unaff_r10` in `FUN_03005794` is the
+plane selector (0/1/2 = Y/Cb/Cr), set by this caller immediately before each `bl 0x03005794`.
+`PTR_LAB_03005788`/`PTR_LAB_0300577c` (the post-decode jump tables) almost certainly index on
+block-position-within-plane (which of the 4 luma slots, or the single chroma slot) combined with
+`r10` — still needs decompiling to confirm exactly, but the raster-offset math above (`+4`, `+0x3fc`,
+`+8`, `+0x800`/`+0x400`) already gives the effective per-plane geometry regardless.
+
+**CBP permutation table** at `0x3005610` (64 bytes, dumped from the live IWRAM image — this address is
+executable-region-resident code/data, present in `/tmp/shrek_play_i1.bin`): a genuine permutation of
+`0x00..0x3f` (confirmed, not a compressing lookup):
+```
+00 0f 1f 08 02 01 04 3f 0a 05 0e 0b 03 0c 10 0d
+07 2f 06 09 20 1b 1e 17 1a 1d 15 11 13 12 18 14
+1c 37 3b 3e 19 2b 21 27 16 2a 2e 25 22 3d 2d 28
+24 35 23 3a 33 2c 29 30 26 31 3c 32 39 36 34 38
+```
+
+**`FUN_0300076c` confirmed as the `ue(v)` unsigned Exp-Golomb decoder** (disassembled, not just
+decompiled — the earlier Ghidra decompile of this function was misleading/mangled):
+```
+count N = leading zero bits before the first '1' bit (consumes N zero-bits + the 1 stop-bit)
+suffix = next N bits (unsigned)
+value  = suffix + (1<<N) - 1        ; standard ue(v) formula, result in r6
+consumes 2N+1 bits total; falls through to the shared refill routine at 0x030007a8 if the
+local bit counter (r2) goes negative.
+```
+Notably, **`0x030007a8` is the same refill address used inside `FUN_03005794`'s coefficient loop** —
+one shared low-level bit-buffer-refill routine feeds both the `ue(v)` reader and the VLC/escape
+decoder, not two separate mechanisms.
+
+---
+
+## 4. Larger pipeline map (from previous sessions, still accurate)
+
+- Main player entry: `FUN_03006df8` (r5=ctx, sl=r1 buffer arg, lit `0x06015f40` → `[ctx,#0x8c]`).
+  Writes `sl + 0x08000000` into `[ctx,#0x20]` and `[ctx,#0xbc]` at `0x3006f04/08` (this is the buffer/codebook base the residual decoder reads from `[ctx,#0x20]`).
+- EWRAM frame slots: `0x020032c8` / `0x020122c8` / `0x020212c8` / `0x020302c8` (spacing 0xf000),
+  loop `0x3006e40..0x3006e9c`, literal at `0x3007924`. Slot struct: Y plane 0xa000 (codebook first 0x2000 + pixels); secondary ptrs `[ctx,#0xf4]=0x0203f314`, `[ctx,#0x10c]=0x0203f5e0`; extra literal `0x020010e4`.
+- `FUN_03006d30` = slot rotation (NOT codebook init; disproved `0x3006da0` as init).
+- Residual chain: MB dispatch `FUN_03001dac` / table `0x3001d4c` (24 entries) → per-MB handler
+  (~31 inter handlers tail-branch to 0x3005650) → mask ue → 64-byte permutation table at `0x3005610`
+  → per-4×4 block `FUN_03005794`.
+- Output: `clamp(ref + IDCT(coeff·dequant) >> 6, 0, 255)`.
+- Bitreader (ue/se): `FUN_0300076c` / `0x300081c` (state `DAT_03000814`, mask `0x3000810`, spin on `[0x3000818]&0x1000`).
+- MV: median-of-3 prediction + se MVD; subpixel filter `0x300156c`; 8×8 mirror `FUN_03002910`.
+- Intra: intra16 `0x30009b8/0a04/0a54/0ba4/0c08`; intra8×8 `0x3000ecc/0eec/0f90/0fe0` — pure spatial.
+- QP: `FUN_03000520` (tables `0x03000680/6c8/6f8`).
+- `FUN_03002b9c` = 8×8 inter, 5 se fields.
+- Stream00.video header `69 04 | dd 84`, 240×112.
+
+### Ghidra TRAPs (read before trusting tool output)
+- Capstone prints pointer-table words as `movweq` junk — `movweq` at an address is often data, not code.
+- `litrefs`/`wordrefs` miss register-relative / `ldm`-style references (this hid the quantizer and the codebook write initially).
+- To find code refs to a RAM function, you may need to scan for the function's literal address bytes manually.
+
+---
+
+## 5. What is still unresolved (blockers)
+
+1. ~~**Exact VLC code→bitstring mapping.**~~ RESOLVED for the primary table + all 3 escape variants —
+   see §3 above. `decode_vlc2.py` implements the full, disassembly-verified logic.
+2. ~~**The 0xd72–0xdf1 "tail" cells**~~ PARTIALLY RESOLVED: these are ordinary primary-table cells (not
+   escape markers) — `idx=3544` (`0x101`: len=1,value=16,run=0,more=0) is a perfectly valid cell, value
+   16 is well within the 5-bit 0–31 range. Nothing wrong with the cell itself. The real open question is
+   #6 below: whether the simulator reaches it at a *legitimate* bit position.
+3. ~~**Caller/register context of FUN_03005794**~~ RESOLVED — see new §3b below. `r10` = plane selector
+   (0=luma, 1=Cb, 2=Cr), set explicitly by the caller at `0x03005650` before each call.
+   `PTR_LAB_03005788`/`PTR_LAB_0300577c` jump indices still open (probably block-position/raster-offset
+   within the plane — not yet decompiled).
+4. **IDCT variants** `0x3005a94..0x3006044` (the jump-targets of the dispatch) — confirm they are the 4×4 transform
+   / chroma / DC variants.
+5. Then: full frame syntax (MB header, mode ue values, chroma block layout), and `FUN_03002b9c` 8×8 inter DC offsets.
+6. ~~**naive back-to-back block decoding is invalid**~~ RESOLVED + VALIDATED BIT-EXACTLY. Simulator
+   `decode_vlc3.py` implements the real structure: per 8×8 region, read one `ue(v)` CBP code, permute
+   through the 64-byte table at `0x3005610`, decode exactly the masked 4×4 blocks (up to 4 luma + Cb +
+   Cr). Against real `stream00.video` bytes, **region 0 decodes perfectly**: `ue=2` (bits `011`, 3 bits)
+   → mask `0x1f` (`011111`, Cr not coded) → Y0=[-1,3,...], Y1=[-16,...], Y2=[0,-1,...], Y3=[-1,...],
+   Cb=[2,0,2,...], ending exactly at bit 40 — matching the earlier naive block-by-block trace bit for
+   bit once the 3-bit CBP-code offset is accounted for. This is strong confirmation the VLC/escape
+   table, the `ue(v)` reader, and the CBP permutation table are all correctly understood.
+   **NEW BLOCKER**: region 1 desyncs — reading a `ue(v)` CBP code at bit 40 gives `98`, which is
+   impossible (permutation table only has 64 entries; verified by hand against the raw bytes, not a
+   simulator bug). So `0x03005650`'s simple "read CBP, decode masked blocks, repeat" loop does NOT
+   apply uniformly to every 8×8 region back-to-back — something else must sit between regions (most
+   likely a per-region mode/type dispatch, matching §4's note that `FUN_03001dac` / the 24-31-entry
+   handler table at `0x3001d4c` picks which handler runs, and only *some* modes tail-branch into
+   `0x03005650`; others are presumably intra/skip/MV-coded with different bit layouts). **Next step**:
+   decompile `FUN_03001dac`'s dispatch table entries at `0x3001d4c` to find the per-region mode code
+   that precedes the CBP read, and what the non-`0x03005650` handlers consume.
+
+   **Progress on this (same session):** pulled the 24-entry jump table at `0x3001d4c` directly from the
+   IWRAM dump (`/tmp/shrek_play_i1.bin`, offset `addr-0x03000000`; the Ghidra bridge was timing out —
+   raw file read is more reliable, see workaround notes) — handler addresses:
+   ```
+    0: 0x03001b10   1: 0x03001c84   2: 0x03001cb0   3: 0x03001b40   4: 0x03001b70   5: 0x03001b7c
+    6: 0x03001b88   7: 0x03001b98   8: 0x03001b1c   9: 0x03001b4c  10: 0x03001b28  11: 0x03001b58
+   12: 0x03001ba8  13: 0x03001cdc  14: 0x03001d14  15: 0x03001be4  16: 0x03001c20  17: 0x03001c34
+   18: 0x03001c4c  19: 0x03001c68  20: 0x03001bb4  21: 0x03001bf0  22: 0x03001bc0  23: 0x03001bfc
+   ```
+   Disassembled handler 0 (`0x03001b10`, shared tail with handlers 8/10 at `0x03001b34`): it loads
+   **pairs** of values from `[r0-0x20]/[r0-0x1c]`, `[r0-0x18]/[r0-0x14]`, or `[r0-0x10]/[r0-0xc]`
+   depending on which of the three entries dispatched here (top-left/top/top-right neighbor slots —
+   classic median-of-3 MV-predictor shape, matching §4's existing MV note), sets `r4=0x10`, then calls
+   a **different** function (`0x03001578`). Handler 4 (`0x03001b70`) just calls `0x03001ac0`. Handler 5
+   (`0x03001b7c`) sets `r4=0x10` and calls `0x03001854`. **None of these tail-branch directly into
+   `0x03005650`** — this is a genuine prediction-mode layer (MV selection / intra mode), structurally
+   separate from the CBP+coefficient loop, not a thin pass-through. Bigger sub-investigation than
+   expected; needs `0x03001578` / `0x030015a4` / `0x03001ac0` / `0x03001854` decompiled next, plus
+   the remaining ~20 handler entries, to find where/how control eventually reaches `0x03005650` for a
+   given region (possibly indirectly, e.g. a shared continuation after all handlers return).
+
+   **RESOLVED (next checkpoint, same investigation continued):** `xrefs` to `0x03001dac` shows exactly
+   ONE caller: `0x0300061c`, inside `FUN_03000520` — the function the doc already knew about as "QP:
+   FUN_03000520 (tables 0x03000680/6c8/6f8)". Decompiling it reveals it is actually **the true
+   per-frame/per-MB master loop**, not just a QP helper:
+   1. Reads bitstream state; if a flag bit (`uVar7 & 0x80000000`) is clear, reads a **QP-delta via
+      `FUN_0300076c`** (the same `ue(v)` reader) and rebuilds the dequant constants
+      `DAT_03005770/74/78` from tables `0x03000680/6c8/6f8` indexed by the delta. If the flag is set,
+      a different (skip/run-length?) path executes instead.
+   2. **Double-nested loop over 16×16 MB units** (`piVar5[6]`/`piVar5[7]`, stepped by `-0x10` = 16) —
+      this is the whole-frame MB raster scan. **Each inner iteration calls `FUN_03001dac()` exactly
+      once per 16×16 MB** (not per 8×8 region as originally assumed).
+   3. `FUN_03001dac`'s `ue(v)`-coded mode index (0-23) then either:
+      - dispatches to a **motion-compensated-copy-only handler** (handlers 0/3/8/9/10/11, sharing
+        the neighbor-pair-load tail at `0x03001b34` → call `FUN_03001578`, a byte-alignment-aware
+        block-copy/motion-compensation routine — no filtering/averaging, just realigning a
+        possibly-unaligned reference-frame read; matches the doc's median-of-3 MV-predictor note).
+        These handlers **return without touching `0x03005650`** — i.e. **INTER-SKIP MBs** (motion
+        copy, no residual, no CBP).
+      - dispatches to an **intra-style handler** (e.g. handler 5 → `FUN_03001ac0`: averages 2
+        neighbor bytes with rounding, reads one more code via `FUN_0300081c`, calls
+        `FUN_03001a68`/`FUN_03001a3c` — needs further decompiling).
+      - or dispatches to one of the ~31 branch targets (confirmed via `xrefs direction=to` on
+        `0x03005650`: call sites `0x03001be0` through `0x03003520`) that tail-jump into `0x03005650`,
+        which then runs its own internal loop over the 4 luma 8×8-sub-blocks + Cb + Cr **within that
+        one 16×16 MB** (not a whole-frame raster loop as earlier assumed) — each still gated by its
+        own `ue(v)` CBP code as already validated in §3b/blocker-6.
+
+   This resolves the region-1 desync's root cause at the architecture level: `decode_vlc3.py`'s loop
+   treated **every** 8×8 group as "always followed immediately by another CBP-gated group," but the
+   real structure is **MB-scoped** — after a 16×16 MB's coded sub-blocks are exhausted (which for a
+   CBP-driving handler means exactly 4 groups of up to 6 sub-blocks, or fewer if the MB is
+   smaller/partial), control returns to `FUN_03000520`'s outer loop, which advances to the *next*
+   16×16 MB and calls `FUN_03001dac` again — consuming a **fresh mode-select `ue(v)` code**, not
+   another CBP code. `decode_vlc3.py` never modeled this MB boundary or the mode-select step, hence
+   the desync exactly at the point where region 0 (the first MB, evidently a single-8×8-group MB or
+   simply the first of up to 4 CBP groups) ended.
+   **Still open:** how many `0x03005650`-groups make up one MB (is it always exactly the 4 luma
+   quadrants worth, i.e. one `0x03005650` call per MB covering a fixed 16×16 span, or can it vary?);
+   full decode of handler 5's intra chain (`FUN_03001ac0`→`FUN_0300081c`/`FUN_03001a68`/`FUN_03001a3c`)
+   and the remaining ~18 undecoded handler entries; and whether `FUN_03000520`'s own QP-delta code
+   consumes bits *before* frame position 0 in `stream00.video` (possible off-by-one-codes explanation
+   for why region 0 lined up despite skipping this step — worth checking by prepending a QP-delta
+   `ue(v)` read before the MB loop in the next simulator revision).
+
+   **FULL 24-ENTRY DISPATCH TABLE MAPPED (this checkpoint)** — disassembled the entire
+   `0x03001b10..0x03001d4c` handler region in one pass. The table splits **exactly in half** by a
+   beautifully clean rule: **mode index `< 12` → SKIP (prediction only, no residual, immediate
+   return); mode index `>= 12` → CODED (same prediction, then falls through to `r11=r12=0x10;
+   b 0x03005650` — i.e. `0x03005650` is *always* invoked with a full 16×16 span, confirming 4
+   CBP-groups per coded MB: 2×2 grid of 8×8 luma quadrants + their Cb/Cr).** Concretely,
+   `coded_index = skip_index + 12` for the same underlying predictor. Underlying predictor types
+   (10 distinct, some sharing a copy function with 3 selectable neighbor slots):
+   ```
+   idx  0/ 8/10 (skip) , 12/20/22 (coded): FUN_03001578, neighbor A/B/C  (top-left/top/top-right MV predictor)
+   idx  3/ 9/11 (skip) , 15/21/23 (coded): FUN_030015a4, neighbor A/B/C  (different copy fn — diff block size/ref?)
+   idx  4       (skip) , 16       (coded): FUN_03001ac0  (intra-style: averages 2 neighbor bytes, reads 1 more
+                                             code via FUN_0300081c, calls FUN_03001a68 + FUN_03001a3c x2)
+   idx  5       (skip) , 17       (coded): FUN_03001854  (not yet decompiled)
+   idx  6       (skip) , 18       (coded): FUN_03000884, r4=r5=0x10  (not yet decompiled)
+   idx  7       (skip) , 19       (coded): FUN_030008fc, r4=r5=0x10  (not yet decompiled)
+   idx  1       (skip) , 13       (coded): FUN_03002184 called twice w/ +0x800/+0x400 then -0x800/-0x400
+                                             pointer adjust around it (not yet decompiled — direct/temporal mode?)
+   idx  2       (skip) , 14       (coded): FUN_030030f4 called twice w/ +0x8/+0x8 then -0x8/-0x8 adjust
+                                             (not yet decompiled — much smaller offsets than idx1/13, maybe
+                                             chroma-specific or a different geometry)
+   ```
+   **Notably: none of the copy/predict functions read any bitstream bits themselves** (no `se(v)` MVD
+   reads observed anywhere in this dispatch region) — the single mode-select `ue(v)` code appears to
+   fully determine the predictor with zero extra signaling (except handler 4/16's one extra
+   `FUN_0300081c` read). If confirmed, this codec has **no explicit motion-vector-difference coding**
+   at the MB level — just a choice among a handful of fixed spatial predictors. Unusual but plausible
+   for a GBA-era, low-bitrate embedded codec.
+
+   **Simulator test of the full per-MB model** (`decode_vlc4.py`, no QP-delta modeled yet): walks
+   `stream00.video` as `mode=ue(v); if mode>=12: 4x(cbp=ue(v); decode masked blocks)`. Result against
+   real bytes: **MB 0-2 decode cleanly as skip MBs** (`mode=2,1,1`, 3 bits each — plausible, short
+   exp-golomb codes for small mode values). **MB 3** is `mode=18` (coded): **group 0 (all 5 sub-blocks)
+   and group 1 (1 sub-block) both decode to small, plausible coefficients** — group 2's CBP code then
+   comes back `89` (invalid, must be `<64`) at bit 69. This is real progress over the previous
+   checkpoint (was failing at the very first CBP read; now 3 clean MBs + half of a 4th group-set
+   decode correctly) but still not fully resolved. Hand-brute-forced nearby bit offsets (64-84) same as
+   before — no unambiguous resync point jumps out without more ground truth. **Likely culprits for the
+   remaining gap, in rough priority order:**
+   1. The "4 groups always, r11=r12=0x10" reading of `0x03005650`'s entry parameters may be wrong in
+      detail — e.g. the 2×2 quadrant traversal might not be 4 flat sequential CBP reads; re-examine the
+      inner/outer loop structure in §3b for a possibly-skipped step between quadrants.
+   2. QP-delta `ue(v)` (from `FUN_03000520`, still not modeled) may fire partway through the frame
+      (a per-slice/per-row event, not strictly per-MB or frame-start-only) and land exactly here.
+   3. Handler `mode=18` maps to `FUN_03000884`/`FUN_030008fc`'s "coded" pairing (idx 18 = `FUN_03000884`
+      +residual per the table above) — neither `FUN_03000884` nor its skip counterpart (idx 6) has been
+      decompiled; it may consume bits itself (unlike the plain motion-copy handlers, which read none).
+   **This is a reasonable checkpoint to pause at** — further progress needs either decompiling
+   `FUN_03000884` (most direct next step, since MB 3 specifically uses it) or `FUN_03000520`'s QP-delta
+   trigger condition in full.
+
+   **`FUN_03000884` decompiled (next checkpoint) — confirms it's an INTRA MB handler.** Disassembly:
+   reads **two** `ue(v)` codes via `FUN_0300076c` (`r11`, `r12`), then dispatches through **two
+   separate 4-entry jump tables** (`0x3000864`, `0x3000874`, verified exactly 4 entries each — code for
+   `FUN_03000884` itself resumes immediately at `0x3000884`, right after the 2nd table, confirming the
+   sizes). Table 1 = `{0x30009b8, 0x03000a04, 0x03000a54, 0x03000ba4}` — these are exactly the
+   **luma intra16 prediction addresses already known from §4** (doc's old note "Intra: intra16
+   `0x30009b8/0a04/0a54/0ba4/0c08`"). Table 2 = `{0x03000c08, 0x03000d90, 0x03000dd4, 0x03000e44}` —
+   `0x03000c08` also matches that same old note, strongly suggesting Table 2 is the analogous
+   **4-mode chroma intra prediction** dispatch. So mode 18 (and its skip twin, mode 6) = "intra MB:
+   pick 1-of-4 luma16 mode + 1-of-4 chroma mode" (classic H.264-style intra4-mode set), each its own
+   small `ue(v)` code — bits my MB-3 test above never consumed.
+
+   **Retested MB 3 with this fix** (mode `ue`, then luma-mode `ue`, then chroma-mode `ue`, *then* the
+   4 CBP groups): decoded `luma_mode=2, chroma_mode=0`, then **group 0 now decodes completely** (all 5
+   masked sub-blocks, small plausible coefficients) — a full group further than before. **Group 1**
+   gets 4 of its 5 blocks right, then the 5th (`Cb`) crashes with a genuine **VLC table-index overflow**
+   (computed index `>=3584`, past the real table's end — a different, deeper failure mode than the
+   earlier "invalid CBP/mode code" failures, meaning the fix is real progress but a smaller residual
+   drift is still accumulating somewhere, likely within group 0's coefficient decode or the CBP/mask
+   handling itself rather than the MB-level dispatch).
+
+   **Status**: 3 clean skip-MBs, then a coded MB now getting through mode+intra-submode+CBP-group-0
+   entirely and 4/5 of CBP-group-1 before drifting. Each checkpoint has meaningfully narrowed the
+   remaining gap. Not yet at a full clean MB-to-MB walk. Next moves, roughly in order of likely payoff:
+   (a) re-verify group 0's block-by-block bit accounting by hand against the raw bytes (small
+   off-by-a-few-bits errors are the most likely remaining culprit, given how close this now is);
+   (b) decompile `FUN_030008fc` (modes 7/19) and the `FUN_03001854`/`FUN_03002184`/`FUN_030030f4`
+   families the same way, since a full clean walk needs every mode understood, not just 18/6;
+   (c) the still-unmodeled QP-delta condition in `FUN_03000520`.
+
+   **Hand-verification (next checkpoint):** printed the exact bit substrings consumed by every step of
+   group 0 and group 1 side-by-side with the decode trace (`bits[a:b]=...`) — group 0 is clean start to
+   finish (5/5 blocks). Group 1's crash turned out to be a **simulator artifact, not proof of desync**:
+   `idx=3584` is exactly one past my Python table array's length (0-3583), which just threw
+   `IndexError` — but the doc's own earlier note says the real ROM keeps going past the table into UI
+   string bytes (`"Brightness +1"` etc. at file offset `~0xbbe4`), which real hardware would still
+   blindly read as a cell rather than crash. Extended the loaded table to the full 4096-entry range
+   (all possible 12-bit indices, dumped fresh from ROM as `vlc_rom_full4096.bin`) and reran: **group 1
+   now finishes cleanly too** (its `Cb` block resolves via the byte at file offset `0xbc00` = `0x0032`,
+   decoding as len=2/value=3 — a plausible-looking but not clearly "official" cell; doesn't fit the
+   otherwise-clean len=n+2/value=n escape-ladder pattern seen elsewhere in the table, so this specific
+   cell is flagged as unverified rather than trusted). **Group 2 then decodes `cbp=0` → mask `000000`
+   → correctly zero blocks needed (no bits to consume) — a fully legitimate "nothing coded here"
+   group.** MB 3 now gets through **3 of its 4 groups** cleanly; **group 4 (last one) still fails**
+   (`cbp=2572`, wildly invalid). Net: the remaining gap is now a handful of bits at the very end of one
+   MB, not a structural misunderstanding — strong sign the overall model (mode → intra-submodes →
+   4×CBP-groups) is correct and what's left is precision, not architecture.
+   **Immediate next step**: re-verify group 1's `Cb` block specifically (the one landing on the
+   suspect boundary cell) bit-by-bit by hand, since that's the most likely source of the last few bits
+   of drift before group 3.
+
+   **CONFIRMED (next pass): the boundary cell is real string data, not a legitimate table entry.**
+   Dumped ROM bytes at file offset `0xbc00` (= `idx 3584 * 2 + 0xa000`) directly: `32 00 00 00 42 72
+   69 67 68 74 6e 65 73 73 20 2d` = literally the ASCII bytes of `"Brightness +2\0\0\0Brightness -"`.
+   So `idx=3584` is unambiguously outside the real table — this is a genuine (if small) desync, not a
+   harmless extended-table read as hoped. **But**: cross-checked all four of group 1's preceding
+   `Y0-Y3` decodes against the canonical block-range table already on file in §2, and every single one
+   lands exactly inside its documented block (idx 11→`0x000-0x011`, idx 2905→`0x972-0xb71`, idx
+   1438→`0x572-0x971`, idx 3312→`0xc72-0xd71` — all correct, matching the exact `{len,value,run,more}`
+   already catalogued there). So the drift is not accumulated error from group 1's luma blocks; it's
+   localized to right around the `Y3`→`Cb` transition specifically (a handful of bits, since idx 3584
+   is only just past the documented tail-end `0xdf1`=3569, not wildly off). Group 0's `Cb` block, by
+   contrast, decoded perfectly (idx 792, inside the documented `0x2f2-0x371` block) — so this isn't
+   "Cb blocks are handled differently," since group 0 proves Cb decodes fine there. The most likely
+   explanation is a small state-dependent effect specific to *this* `Cb` occurrence — possibly tied to
+   the still-undecoded `PTR_LAB_03005788`/`PTR_LAB_0300577c` post-decode dispatch jump tables (§3b's
+   last open item — what they select was never actually resolved, only guessed at as "probably
+   block-position/plane"), which could plausibly involve a per-call state increment (e.g. an alternating
+   dequant-table index, or a small skip/align step) that only manifests on some calls. **Next concrete
+   step**: decompile the jump targets of `PTR_LAB_03005788`/`PTR_LAB_0300577c` (referenced at the end
+   of `FUN_03005794`, addresses not yet pulled) to check for exactly this kind of call-count-dependent
+   side effect.
+
+   **RULED OUT (next pass):** the jump index for both `PTR_LAB` tables was actually already known —
+   it's the same `r10` plane selector from earlier in §3b (the *original* `r10` gets saved to the
+   stack at function entry via `stmdb sp!,{r10,r11,r12,lr}` and reloaded later as `lr` right before the
+   dispatch — a quirk of this codebase's register-passing convention, not a new register). So these
+   are 3-entry Y/Cb/Cr **pixel-reconstruction** tables:
+   ```
+   PTR_LAB_03005788 (single-coefficient DC shortcut): [0]=0x03005c9c [1]=0x03005e30 [2]=0x03006044
+   PTR_LAB_0300577c (multi-coefficient / full IDCT):   [0]=0x03005a94 [1]=0x03005b2c [2]=0x03005be4
+   ```
+   Disassembled `0x03005c9c` (index 0, the path `Y3` actually took — it decoded as a single
+   coefficient): it's pure pixel arithmetic — unpack 4 packed bytes, add `DC>>6`, clamp to `[0,255]`,
+   repack, store, repeat for the next 3 rows. **No bitstream reads anywhere in it.** This rules out
+   the "post-processing consumes extra bits" hypothesis entirely — these routines only touch already-
+   decoded coefficients and pixel buffers, they can't be the source of a bitstream-position bug.
+
+   **Where this leaves things**: 9 of the MB's first 10 sub-blocks (all of group 0, and `Y0-Y3` of
+   group 1) decode to indices that land exactly inside their correct, previously-documented canonical
+   table ranges — about as strong a validation as is possible without hardware/emulator ground truth.
+   The one remaining failure (group 1's `Cb`) has no found explanation in the architecture, dispatch
+   tables, or post-processing — it now looks like either a genuinely subtle, localized bug in this
+   Python port of `FUN_03005794`'s loop (worth a fresh, skeptical line-by-line reread of
+   `decode_vlc2.py`'s `decode_one`/`decode_block` against the disassembly one more time), or something
+   that can only be resolved with real ground truth — e.g. running the ROM in mGBA with a debugger/
+   tracer (the doc already notes an unused `tools/gba_video/gdbrsp.py` GDB stub setup from an earlier session) to catch
+   the actual register state at this exact point in a real playthrough, rather than continuing to
+   guess blind from static analysis alone.
+
+   **MAJOR FINDING (next pass) — the `more`/stop-bit polarity may be inverted, and it's a genuine
+   unresolved contradiction, not a settled fix.** Re-disassembled `0x03005810-0x03005818` fresh
+   (`str r6,[r12],#0x4; tst r4,#0x1; beq 0x030057cc`) — `0x030057cc` is unambiguously the loop's
+   per-coefficient entry point (re-checks the escape condition, decodes another coefficient). `beq`
+   branches when `(r4&1)==0`. So **bit15==0 means "decode another coefficient", bit15==1 means
+   "stop"** — the *opposite* of the field name "more" that's been used since the very first session
+   (an early, never-re-verified guess baked into §1/§3 above and every simulator since). This is
+   independently corroborated by Ghidra's own decompiler output for this same function, captured
+   earlier this session in §3: it rendered the loop as a literal `do { ... } while (uVar4 == 0);` —
+   same polarity, from a completely different (semantic, not manual-syntax) analysis path.
+
+   **However**, patching `decode_vlc2.py`'s stop condition to match (`if more: break` instead of
+   `if not more: break`) and rerunning MB 3's group 0 produces a **14-coefficient chain** for what was
+   previously the clean, validated `Y1` block — `run` values accumulate to a cumulative position past
+   15 (the last valid slot in the 16-word coefficient buffer `DAT_030056f0..DAT_0300572c`), which would
+   silently corrupt adjacent memory (`DAT_03005730` onward — the IDCT/dequant constants) on real
+   hardware. That's implausible for a shipped, working decoder, and contradicts the very strong prior
+   evidence (9 consecutive blocks, all independently landing in correct canonical index ranges) that
+   the *original*, uninverted polarity was producing structurally sound, plausible 1-2-coefficient
+   blocks. **Both readings are backed by real evidence and both have a real problem**: the original
+   polarity has no support in the disassembly/decompiler; the corrected polarity produces
+   buffer-overflowing coefficient runs. This needs to be resolved by one of:
+   1. Very careful pcode-level re-examination of whether something clobbers `r4` between the escape
+      check and the `tst` in ways not yet accounted for (checked `FUN_030007a8`'s register clobbers
+      already — it doesn't touch r4 — but the *escape*-path variants' own joins into `0x0300580c`
+      haven't been individually re-verified against this specific concern).
+   2. Checking whether the 16-word buffer is really meant to be strictly 4×4/16 slots per call, or
+      whether `FUN_03005794` can legitimately be walking a *longer* logical scan (the doc's very first,
+      early-session characterization of this function as "residual 4×4 block" was itself a guess made
+      before any disassembly existed — worth treating as unconfirmed rather than settled, same caution
+      that applied to the `more` field name).
+   3. Real ground truth: running the ROM in mGBA with the unused `tools/gba_video/gdbrsp.py` GDB stub from earlier
+      sessions and single-stepping this exact loop on real data would settle this immediately, rather
+      than continuing to infer from static analysis where two legitimate methods now disagree.
+   **Left as-is for now**: reverted `decode_vlc2.py` back to the original (pre-"fix") polarity, since
+   it's the one with actual empirical support (9 validated blocks) even though it lacks disassembly
+   backing — flagged clearly as unresolved rather than silently kept.
+
+   ### RESOLUTION + TWO CORRECTIONS TO EARLIER CLAIMS (2026-08-07 pass)
+
+   **(A) A real bug in the Python port, found and fixed: the missing post-increment.** The ARM is
+   ```
+   0300580c: add r12, r12, r5, lsl #0x2   ; cpos += run
+   03005810: str r6, [r12], #0x4          ; coeffs[cpos] = value ; cpos += 1   <-- POST-INCREMENT
+   ```
+   Every simulator revision did `cpos += run; coeffs[cpos] = value` and **never advanced past the
+   written slot**, so each subsequent coefficient's run was interpreted relative to the wrong origin.
+   Note this does *not* change bit consumption at all — only which slots values land in and whether
+   the 16-word buffer overflows. Fixed in the rebuilt `vx.py`.
+
+   **(B) The stop-bit polarity: the disassembly was right; my counter-argument was wrong.** Bit 15 is
+   a **`last` flag** (stop when SET) — textbook MPEG-4/H.263 run/level/last RLC, which is exactly what
+   this codec's structure otherwise looks like. The "but that overflows the buffer" objection recorded
+   above was **not** valid evidence against it — it was reasoning from a simulator that had bug (A).
+   Renamed `more` → `last` throughout `vx.py`. **The inherited field name `more` in §1/§3 above is
+   wrong and should be read as `last` everywhere in this document.**
+
+   **(C) CORRECTION — most of the "validation" claimed in the checkpoints above is statistically
+   near-vacuous, and this document previously overstated it.** Quantified this pass:
+   - *"9 consecutive blocks landed in their correct canonical index ranges"* (used above as "about as
+     strong a validation as is possible without ground truth"): the documented blocks tile
+     `0x000..0xdf1` = **87.2% of the whole 12-bit index space**, so 9 random indices all landing in
+     *some* documented block happens **29% of the time by pure chance**. This was weak corroboration,
+     not strong validation. **Do not build on it.**
+   - *"N MBs decoded successfully"* as a metric is **degenerate**. The stream is high-entropy
+     (47.8% one-bits ≈ random), and `ue(v)` makes the cheapest codes 1 bit (`mode 0`) and 3 bits
+     (`modes 1-2`) — all of which are *skip* modes that consume no further bits. So random noise
+     "decodes" as a long run of skip MBs. Measured against 200 trials of **pure random data**: median
+     run = 11 MBs, mean 15.7, and **≥44 MBs occurs in 5% of random trials**. The real stream reaching
+     44 MBs is therefore only ~p=0.05 — suggestive, not proof.
+   - Consequence: the polarity conclusion in (B) rests on **the disassembly and Ghidra's decompiler
+     agreeing independently**, which is solid. It does *not* rest on the 44-vs-3 MB comparison, which
+     is weak. Both facts are worth keeping straight.
+
+   **(D) The real remaining blocker is the frame entry point, not the coefficient layer.** Decoding
+   `stream00.video` from bit 0 yields **43 of the first 44 MBs as near-empty skip MBs (1-3 bits each)
+   and only ONE coded MB.** For the **first frame of a video**, which must be essentially all-intra,
+   that is implausible — it is the signature of parsing noise, not structure. Additional evidence:
+   sweeping the start offset over bits 0..71, **every** offset converges to the same failure wall at
+   **bit 222** and yields exactly 1 coded MB, i.e. the decoder self-syncs into the same degenerate
+   skip-run regardless of where it starts. Conclusion: **we are not starting at real MB data.** The
+   4 bytes `69 04 dd 84` at the head of the video region (called "the header" in §4) are being fed
+   straight into the MB loop. Next session should establish the actual frame/MB entry point before any
+   further coefficient-level work — everything downstream is unverifiable until then. Candidates:
+   a per-frame header of unknown length; frame 0 not actually starting at video-region offset 0
+   despite the seek table's `frame 0 -> video bit 0`; or `FUN_03000520`'s pre-MB-loop reads
+   (the QP-delta path, still unmodeled) consuming a frame header first.
+
+## 6. Immediate next steps (pick up here)
+
+> **READ FIRST (2026-08-07):** see §5 blocker #6 parts (A)-(D). Two corrections land there: bit 15 is
+> `last` (stop-when-set), **not** `more`; and much of the "validation" recorded in earlier checkpoints
+> is statistically near-vacuous (quantified against random-data null tests). The current top blocker is
+> the **frame entry point** (D), not the coefficient layer.
+>
+> **Rebuilding artifacts after a reboot:** `/tmp/gbavx/*`, the scratchpad, and `/tmp/shrek_play_i1.bin`
+> are all ephemeral and were lost once already. The ROM is the durable source; everything except the
+> IWRAM dump rebuilds from it:
+> ```bash
+> ROM="<roms>/Game Boy Advance Video - Shrek + Shark Tale (USA) (Rev 5).gba"
+> mkdir -p /tmp/gbavx
+> dd if="$ROM" bs=1 skip=$((0xa000)) count=8192 of=/tmp/gbavx/vlc_rom_full4096.bin    # VLC table (4096 cells)
+> dd if="$ROM" bs=1 skip=$((0xc000)) count=128  of=/tmp/gbavx/value_offset_table.bin  # escape: value offsets
+> dd if="$ROM" bs=1 skip=$((0xc080)) count=128  of=/tmp/gbavx/run_offset_table.bin    # escape: run offsets
+> dd if="$ROM" bs=1 skip=$((0x20200+0x38)) count=262144 of=/tmp/gbavx/stream00.video  # verified: starts 6904 dd84
+> ```
+> The **IWRAM dump is NOT rebuildable from the ROM** (it was a live RAM capture) — re-dump from mGBA if
+> further disassembly of the `0x03xxxxxx` functions is needed. Note the Ghidra MCP bridge dropped out
+> mid-session; see the `ghidra-mcp-bridge-workaround` notes for the direct-HTTP fallback.
+
+Steps 1-3 below are DONE this session — see §3, §3b, and blocker #6 in §5. Simulators:
+`tools/gba_video/vx_sim.py` (formerly decode_vlc2.py)
+(single 4×4 block, full VLC+escape logic) and `decode_vlc3.py` (full 8×8-region loop: `ue(v)` CBP +
+permute + masked blocks) — `decode_vlc3.py` bit-exactly validates region 0 of `stream00.video` before
+desyncing at region 1. Copy these out of the scratchpad (session-ephemeral) if picking this up later —
+`/tmp/gbavx/*` may also not survive a reboot; the ROM file itself is the durable source, everything else
+is re-derivable from it via the file offsets recorded in §2/§3b.
+
+1. ~~Validate the codebook interpretation~~ DONE.
+2. ~~Resolve block order~~ DONE — indices `0x060-0x07F` are dead due to the escape check, not misordering.
+3. ~~Decompile caller chain 0x3005650~~ DONE — see §3b.
+4. **NEW — decompile `FUN_03001dac` and its jump table at `0x3001d4c`** (24-31 entries) to find the
+   per-region mode/type code that must precede `0x03005650`'s CBP read, and figure out why region 1 of
+   `stream00.video` desyncs at bit 40 (`ue(v)` giving an out-of-range CBP code of 98). This is the
+   critical blocker for full-frame validation — likely intra-mode or motion-vector data for non-"plain
+   inter CBP" regions that `0x03005650` alone doesn't parse.
+5. Once per-region mode dispatch is understood, extend `decode_vlc3.py` to walk a full frame/row and
+   confirm no further desyncs.
+6. Reassemble the full symbol table `{code, len, run, value, more}` for `vx.c`.
+7. Implement `libavcodec/vx.c` modeled on `mobiclip.c`; validate against all 4 streams.
