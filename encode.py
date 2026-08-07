@@ -165,6 +165,17 @@ def input_fmt(path):
     if ext == ".h4m":
         # Hudson Soft HVQM4 (.h4m) GameCube/Wii FMV.
         return ["-f", "hvqm4"]
+    if ext == ".odh":
+        return ["-f", "odh_pipe"]
+    # ODH (AJPG) stills ship as bare `.bin` on disc - Super Mario Galaxy's
+    # allcompleteimage*.bin are the known ones - so go by the magic, since the
+    # extension says nothing.
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(4) == b"AJPG":
+                return ["-f", "odh_pipe"]
+    except OSError:
+        pass
     return []
 
 
@@ -257,7 +268,7 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid) — use 'decode' to decode any supported file including .rvid/.h4m/.ty, or 'play' to play one back without writing a file")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid) — use 'decode' to decode any supported file including .rvid/.h4m/.ty and ODH/AJPG stills, or 'play' to play one back without writing a file")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
     parser.add_argument("input2", nargs="?", default="", help="Second input file (for moflex3d/cia right eye)")
