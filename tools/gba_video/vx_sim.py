@@ -24,7 +24,7 @@ ROM = os.environ.get("VXPP_ROM", "")  # path to the GBA Video cart dump
 VLC = "/tmp/gbavx/vlc_rom_full4096.bin"
 VOFS = "/tmp/gbavx/value_offset_table.bin"
 ROFS = "/tmp/gbavx/run_offset_table.bin"
-STREAM = "/tmp/gbavx/stream00.video"
+STREAM = os.environ.get("VXPP_STREAM", "/tmp/gbavx/stream00.video")
 
 CBP_PERMTAB = [
     0x00,0x0f,0x1f,0x08,0x02,0x01,0x04,0x3f,0x0a,0x05,0x0e,0x0b,0x03,0x0c,0x10,0x0d,
@@ -238,6 +238,47 @@ def decode_unit(br, tab, vofs, rofs, pos, disp=TOP, depth=0, stats=None):
                     if mask & (1 << b):
                         _, pos, _ = decode_block(br, tab, vofs, rofs, pos, True)
     return pos
+
+
+def decode_segment(br, tab, vofs, rofs, start_bit, n_frames, stats=None):
+    """Decode one seek segment: a ue(v) header, then n_frames frames.
+
+    Each seek point begins a self-contained segment whose first field is a
+    quantiser delta -- the same read that opens the stream at bit 0. (An earlier
+    pass called this a once-per-video field; it only looked like that because the
+    hardware trace behind it covered ~30 frames, all inside segment 0.)
+    """
+    pos = start_bit
+    _, pos = read_ue(br, pos)                # per-segment quantiser delta
+    for _ in range(n_frames):
+        for _ in range(MB_PER_FRAME):
+            pos = decode_unit(br, tab, vofs, rofs, pos, TOP, 0, stats)
+        pos += 1                             # inter-frame marker bit
+    return pos - 1                           # last frame's marker is the segment end
+
+
+def decode_stream(seek, nb_frames, quiet=True):
+    """Walk every seek segment, checking each lands on the next seek offset.
+
+    `seek` is the container's seek table: (frame, bit, audio_off, 0) entries, the
+    last of which is a sentinel with bit 0. Returns (segments_ok, mismatches).
+    """
+    tab = load16(VLC)
+    vofs, rofs = load(VOFS), load(ROFS)
+    br = Bits(load(STREAM))
+    real = [e for e in seek if e[1] or e[0] == 0]
+    ok, bad = 0, []
+    for i, (f0, b0, _, _) in enumerate(real):
+        n = (real[i + 1][0] if i + 1 < len(real) else nb_frames) - f0
+        end = decode_segment(br, tab, vofs, rofs, b0, n)
+        want = real[i + 1][1] if i + 1 < len(real) else None
+        if want is None or end == want:
+            ok += 1
+        else:
+            bad.append((f0, want, end))
+        if not quiet:
+            print(f"segment {i:3d}: frames {f0:6d}+{n:4d}  bit {b0:10d} -> {end:10d}")
+    return ok, bad
 
 
 def decode_frames(n_frames=None, quiet=True):

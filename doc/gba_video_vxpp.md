@@ -1102,3 +1102,43 @@ Ruled out so far:
 So the defect is conditional or contextual rather than a constant — which is why a per-*frame* breakpoint
 (`FUN_03000520`, called once per frame from `0x03006dc8`) is the right next probe: ~400 hits instead of
 the ~80,000 needed to reach frame 325 by tracing every `ue(v)` call.
+
+## 13. Solved: the whole movie parses bit-exactly
+
+The §12 drift is fixed, and the cause was a wrong claim in §8, not a wrong grammar.
+
+### The quantiser delta is per-segment, not per-video
+
+§8.3 stated the QP delta is "read ONCE for the whole video", on the evidence that
+`lr=0x03000734` hit exactly once in a 4000-call hardware trace. That trace covered about 30 frames — all
+of them inside the first seek segment. The field is actually read **once per seek segment**.
+
+Each of the seek table's 181 entries begins a self-contained segment: a `ue(v)` quantiser delta, then that
+segment's frames. Bit 0 is simply segment 0, which is why the opening read looked like a stream header.
+
+### Result
+
+With a `ue(v)` consumed at each seek point, **all 180 segments of stream 0 parse bit-exactly** — every
+segment lands precisely on the next segment's recorded bit offset, and the final segment ends 370 bytes
+from end-of-file (trailing padding). That is the complete **34,874-frame, ~48-minute** movie.
+
+### What made this findable
+
+Two things, neither of which needed the emulator:
+
+- **The working stream file was a truncated 256 KB prefix** of a 22.5 MB stream. Re-running the extractor
+  produced the real file and made all 181 checkpoints reachable. (The truncation was not the bug — the
+  failure was at byte 65411, well inside the prefix — but it had capped the oracle at three checkpoints.)
+- **Parsing each seek interval independently**, rather than as one long chain, converted a single opaque
+  desync into 180 isolated experiments. Every interval then failed *immediately at its own start* with the
+  same error, which points straight at "something is consumed at a seek point" — a much sharper signal
+  than one failure 324 frames deep.
+
+### Method note
+
+Both §10's retraction and this one share a root cause: generalising from a sample that could not
+distinguish the hypotheses. "One CBP per macroblock" came from a trace where a helper's value was
+mistaken for a mode; "QP once per video" came from a trace one segment long. In both cases the evidence
+was real and the inference overreached it. The seek table is a better class of evidence precisely because
+it is independent of the decoder disassembly, the emulator, and the reasoning that produced the grammar —
+and it covers the entire stream rather than its first few seconds.
