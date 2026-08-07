@@ -40,6 +40,12 @@ MB_PER_FRAME = 105
 # 24-entry jump table at 0x03001d4c: mode 4 -> FUN_03001ac0, mode 5 -> FUN_03001854.
 # Both verified against hardware: every mode-4/5 bit gap disappears with these.
 SE_COUNT = {4: 3, 5: 5}
+# Residual CBP groups per coded macroblock (see decode_mb).
+CBP_GROUPS = 4
+# The ONLY true macroblock-mode reader. The other 20 ue(v) call sites are predictor
+# helpers; treating any of them as a mode read is what produced the mislabelling
+# described in doc/gba_video_vxpp.md section 10.
+MODE_READ_SITE = 0x03001db4
 
 
 def load(p):
@@ -226,26 +232,29 @@ def decode_mb(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
         r["se"] = sv
     if mode < MODE_SKIP_MAX:
         return r, pos, None
-    # Exactly ONE coded-block-pattern per MB -- a 6-bit mask over the four 8x8
-    # luma quadrants plus Cb/Cr, in the classic H.263/MPEG-4 arrangement. (An
-    # earlier model read four CBP "groups" per MB; that was wrong and was the
-    # sole cause of the apparent bit-drift chased across several sessions.
-    # Verified live: 40/40 ue reads match hardware in both position and value.)
-    cbp, pos = read_ue(br, pos)
-    if cbp is None or cbp >= 64:
-        return None, pos, f"bad cbp {cbp}"
-    mask = CBP_PERMTAB[cbp]
-    r["groups"].append((cbp, mask))
-    if verbose:
-        print(f"    cbp={cbp} mask={mask:06b}")
-    for b in range(6):
-        if mask & (1 << b):
-            co, pos, ov = decode_block(br, tab, vofs, rofs, pos,
-                                       stop_when_set, verbose)
-            r["blocks"] += 1
-            r["over"] |= ov
-            if verbose:
-                print(f"      -> {['Y0','Y1','Y2','Y3','Cb','Cr'][b]}: {co}")
+    # FOUR coded-block-pattern groups per coded MB. Every coded-mode handler
+    # enters the residual loop at 0x03005650 with fp = ip = 16, and that loop is
+    # nested -- inner runs fp/8 = 2, outer ip/8 = 2 -- so four CBP reads. Confirmed
+    # independently against hardware: segmenting a 4000-call trace strictly at the
+    # real mode reader (lr=0x03001db4) shows modes 15/16/17 followed by exactly
+    # `CBP CBP CBP CBP`, mode 18 by `intraL intraC CBP*4`, mode 19 by `ue7 CBP*4`.
+    # Each CBP is a 6-bit mask over four 8x8 luma quadrants plus Cb/Cr.
+    for _g in range(CBP_GROUPS):
+        cbp, pos = read_ue(br, pos)
+        if cbp is None or cbp >= 64:
+            return None, pos, f"bad cbp {cbp}"
+        mask = CBP_PERMTAB[cbp]
+        r["groups"].append((cbp, mask))
+        if verbose:
+            print(f"    group{_g} cbp={cbp} mask={mask:06b}")
+        for b in range(6):
+            if mask & (1 << b):
+                co, pos, ov = decode_block(br, tab, vofs, rofs, pos,
+                                           stop_when_set, verbose)
+                r["blocks"] += 1
+                r["over"] |= ov
+                if verbose:
+                    print(f"      -> {['Y0','Y1','Y2','Y3','Cb','Cr'][b]}: {co}")
     return r, pos, None
 
 
