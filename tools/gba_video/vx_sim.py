@@ -178,14 +178,18 @@ def decode_one(br, tab, vofs, rofs, pos):
 
 def decode_block(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
     """Returns (coeffs, new_pos, overflow)."""
-    # 8x8 blocks (the 6-bit CBP covers 4 luma quadrants + Cb + Cr), so 64 coeffs.
-    co = [0] * 64
+    # 4x4 blocks, 16 coefficients. The inverse transform at 0x03005828 is the
+    # H.264 integer butterfly (e2 = (d1>>1) - d3, e3 = d1 + (d3>>1)) applied to
+    # four columns, so each CBP bit covers one 4x4 block -- and the four CBP
+    # groups per macroblock give 4*4 = 16 luma plus 4*2 = 8 chroma 4x4 blocks,
+    # i.e. a 16x16 luma / 8x8 chroma macroblock. Exactly the H.264 layout.
+    co = [0] * 16
     cpos = 0
     over = False
-    for _ in range(80):
+    for _ in range(24):
         val, run, last, npos, tag = decode_one(br, tab, vofs, rofs, pos)
         cpos += run
-        if cpos < 64:
+        if cpos < 16:
             co[cpos] = val
         else:
             over = True
