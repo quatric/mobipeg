@@ -838,3 +838,58 @@ skip macroblocks (a static title card); frame 8 is where real motion begins.
 - Compare against the simulator with a **resync-tolerant** differ: at each expected read, record
   `live_pos - sim_pos` as a gap, then force `sim_pos = live_pos` and continue. Attributing each nonzero
   gap to the *preceding* MB's mode turns one desync into a full per-mode table of what is unmodelled.
+
+## 9. The second bit reader: `se(v)` at `FUN_0300081c`
+
+§8 left "modes 4 and 5 consume bits that no traced call accounts for" as the top open item. Resolved, and
+the reason it was invisible is worth recording.
+
+A static scan of the IWRAM image (dump it once with the GDB stub — `r.mem(0x03000000, 0x8000)` — and all
+further analysis is offline, no emulator needed) shows the `ue(v)` reader `FUN_0300076c` has exactly
+**21 call sites**, which is exactly the 21 distinct `lr` values in the 4000-call hardware trace. So the
+trace was complete: nothing else calls it, and the missing bits were never `ue(v)` reads at all.
+
+They come from a **second, separate reader at `FUN_0300081c`** — signed exp-Golomb:
+
+```
+mov  sl, #0                 ; count leading zeros, as usual
+...
+add  r6, r6, sb, lsl sl     ; r6 = ue + 1  =: k
+tst  r6, #1
+rsbne r6, r6, #1            ; k odd  ->  k = 1 - k
+asr  r6, r6, #1             ; >>1 (arithmetic)
+sub  r2, r2, sl, lsl #1     ; consumes 2n+1 bits, same length as ue(v)
+subs r2, r2, #1
+```
+
+That is the standard H.264 `se(v)` mapping (0, 1, −1, 2, −2, …). Because it consumes 2n+1 bits, every
+gap it produced was **odd** — which is exactly the signature observed in §8 and is what identified it.
+
+### Mode jump table
+
+`FUN_03001dac` dispatches through a 24-entry table at **`0x03001d4c`** (`sub r7, pc, #0x70`):
+
+| mode | handler | side data |
+|---|---|---|
+| 4 | `FUN_03001ac0` | 3 × `se(v)` |
+| 5 | `FUN_03001854` | 5 × `se(v)` |
+| 6 | `FUN_03000884` | 2 × `ue(v)` (intra luma/chroma submode) |
+| 7 | `FUN_030008fc` | 1 × `ue(v)` |
+| 16, 17 | = 4, 5 `+12` | same, plus residual |
+
+Note the static call-count walk gives *upper bounds* only — it flattens conditional paths, and claims
+2 × `se(v)` for modes 0/3/8/9/10/11 which hardware shows consume nothing. Hardware wins; use the walk to
+generate candidates, not conclusions.
+
+With `se(v)` modelled for modes 4 and 5, **956 of 964** hardware calls match exactly in bit position.
+
+### Still open
+
+- **Coded inter modes (12, 13, 14, 23) over-consume**, by −64 to −171 bits — my model reads *more* than
+  hardware. Intra-coded residual (mode 18) is perfect, so the coefficient loop itself is right; the
+  likely cause is a separate inter coefficient VLC table. The codebook pointer is loaded from
+  `*(r0+0x20)`; check whether inter MBs reload it from a different offset. This is now the only
+  structural unknown blocking a full-stream parse.
+- The two remaining single-occurrence gaps (mode 4: −4, mode 5: −10) are almost certainly collateral from
+  the coded-inter desync immediately upstream, not separate defects — 14 of 15 mode-4 and 4 of 5 mode-5
+  MBs are now exact.
