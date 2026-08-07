@@ -893,3 +893,80 @@ With `se(v)` modelled for modes 4 and 5, **956 of 964** hardware calls match exa
 - The two remaining single-occurrence gaps (mode 4: −4, mode 5: −10) are almost certainly collateral from
   the coded-inter desync immediately upstream, not separate defects — 14 of 15 mode-4 and 4 of 5 mode-5
   MBs are now exact.
+
+## 10. Correction to §8: there are FOUR CBP groups, and the mode labelling was wrong
+
+**§8's headline claim — "exactly ONE coded-block-pattern per macroblock" — is wrong.** It is retracted
+here. The original session-1 model's *four* CBP groups was right about the group count all along; §8
+"corrected" a correct thing. Recording the mistake and how it happened, because the failure mode is
+subtle and will recur otherwise.
+
+### What is actually true
+
+Every coded-mode handler in the jump table ends with:
+
+```
+push {fp, ip}
+mov  fp, #0x10
+mov  ip, #0x10
+b    #0x3005650          ; the residual loop
+```
+
+and that loop is nested: the inner loop decrements `fp` by 8 (2 iterations), the outer decrements `ip`
+by 8 (2 iterations). **Four CBP reads per coded MB**, each a 6-bit mask over four 8×8 luma quadrants plus
+Cb/Cr.
+
+Confirmed independently against hardware. Segmenting the 4000-call trace strictly at the *real* mode
+reader and listing the call sites that follow each mode:
+
+| mode | calls following the mode code | n |
+|---|---|---|
+| 6 | `intraL intraC` | 155 |
+| 7 | `ue7` | 6 |
+| 15, 16, 17 | `CBP CBP CBP CBP` | 4, 1, 9 |
+| 18 | `intraL intraC CBP CBP CBP CBP` | 2 |
+| 19 | `ue7 CBP CBP CBP CBP` | 3 |
+
+### How §8 went wrong
+
+`FUN_0300076c` has 21 call sites. **Only one of them — `lr=0x03001db4`, in `FUN_03001dac` — reads a
+macroblock mode.** The other 20 are predictor helpers that read side data. §8 treated four sites
+(`0x03001db4`, `0x0300218c`, `0x0300358c`, `0x030030fc`) as mode reads because the values they returned
+happened to fall in the valid mode range.
+
+Concretely: frame 0's "MB2 with mode 18" was never a macroblock. The value 18 was read at
+`0x0300358c` — a helper inside `FUN_03003584`. With that read mislabelled as a mode, the single CBP that
+followed looked like "one CBP per MB", and the 84-bit four-block decode that landed exactly on the next
+read looked like decisive confirmation. It was a coincidence of code lengths.
+
+**The lesson:** matching bit *positions* validates only the model's sequence of code *lengths*. It does
+not validate what those codes mean. A grammar can be positionally perfect and semantically wrong, and
+§8's "40/40 match" was exactly that. Derive semantics from call-site identity (which the trace gives for
+free in `lr`), never from "the value looks plausible for this field".
+
+### What survives from §8, and what does not
+
+Survives — these were established from the all-skip frames, where every macroblock is a single mode read
+at `0x03001db4` and segmentation is therefore unambiguous:
+
+- 105 macroblocks per frame, with a 1-bit inter-frame marker.
+- The QP delta is read once for the whole video (exactly one hit in 4000 calls).
+- Blocks are 8×8 with 64 coefficients.
+- `se(v)` at `FUN_0300081c` and the §9 side-data counts (those came from the jump table plus per-mode
+  gap analysis, not from the mislabelled segmentation).
+
+Does not survive:
+
+- "One CBP per MB" — it is four.
+- The "956/964 exact positions" figure. That score belongs to a parser with known-wrong mode labelling;
+  it is not evidence the grammar is right. Switching to four groups scores *worse* (929/950) precisely
+  because the labelling is still wrong — both numbers describe broken models and neither should be
+  quoted as progress.
+
+### Next step
+
+Rebuild the parser around call-site identity rather than an assumed grammar: segment strictly at
+`0x03001db4`, then work out the read conditions inside the three helper families that appear in the
+trace — `FUN_03002184`, `FUN_030030f4`, `FUN_03003584`. They read *conditionally* (mode 1 is followed by
+`h2184 h2184` sometimes and by nothing at other times), so their predicates are the remaining unknown.
+That is the whole of what stands between here and a correct full-stream parse.
