@@ -44,8 +44,24 @@ def load16(p):
 
 
 class Bits:
+    """Bit source matching FUN_0300076c/030007a8's real refill mechanism: the ARM
+    code does `ldrh r10,[r1],#2` -- a little-endian HALFWORD load -- then treats the
+    result MSB-first. That means each 2-byte pair is byte-SWAPPED relative to file
+    order before the MSB-first bit interpretation applies (confirmed live: the first
+    two stream bytes `69 04` load as halfword 0x0469, which decodes as ue(v)=34,
+    matching a real mGBA capture -- naive raw-byte-order MSB-first reading of `69 04`
+    gives 2, which is wrong). Precompute the swap once so peek32 stays a simple
+    MSB-first byte reader.
+    """
     def __init__(self, data):
-        self.d = data
+        n = len(data) & ~1
+        swapped = bytearray(len(data))
+        for i in range(0, n, 2):
+            swapped[i] = data[i + 1]
+            swapped[i + 1] = data[i]
+        if len(data) & 1:
+            swapped[-1] = data[-1]
+        self.d = bytes(swapped)
 
     def peek32(self, pos):
         acc = 0
