@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""
-VX++ GBA codec decoder simulation, rebuilt from ROM + the disassembly recorded in
-VXpp_GBA_Codec_Handoff.md (scratchpad + /tmp/gbavx were lost to a reboot).
+"""VX++ (GBA Video) bitstream parser.
 
-Faithful port of FUN_03005794's coefficient loop, incl. all 3 escape variants.
+The codec is a recursive block partition driven by 16 jump-table dispatchers, not
+a flat macroblock loop; the per-mode grammar lives in vx_grammar.py, extracted
+from the decoder's IWRAM image.
 
-Key ARM detail (0x0300580c-0x03005818), the bug fixed this pass:
+Validated against hardware: reproduces 4000/4000 ue(v) calls from an mGBA GDB-stub
+trace, exact in both bit position and originating call site. See
+doc/gba_video_vxpp.md section 11.
+
+Coefficient loop detail (0x0300580c-0x03005818):
     add r12, r12, r5, lsl #2   ; cpos += run
     str r6, [r12], #4          ; coeffs[cpos] = value ; cpos += 1   <-- POST-INCREMENT
     tst r4, #1
@@ -13,6 +17,8 @@ Key ARM detail (0x0300580c-0x03005818), the bug fixed this pass:
 """
 import os
 import sys
+
+from vx_grammar import GRAMMAR, TOP, MB_PER_FRAME
 
 ROM = os.environ.get("VXPP_ROM", "")  # path to the GBA Video cart dump
 VLC = "/tmp/gbavx/vlc_rom_full4096.bin"
@@ -27,21 +33,10 @@ CBP_PERMTAB = [
     0x24,0x35,0x23,0x3a,0x33,0x2c,0x29,0x30,0x26,0x31,0x3c,0x32,0x39,0x36,0x34,0x38,
 ]
 
-# mode index < 12 -> prediction only (skip); >= 12 -> same predictor + residual
-MODE_SKIP_MAX = 12
-# modes whose handler reads 2 extra ue(v) sub-mode codes (FUN_03000884: intra luma+chroma)
-INTRA_MODES = {6, 18}
 # Frame geometry, established live: 15x7 macroblocks = 240x112, i.e. the movie is
 # letterboxed inside the GBA's 240x160 screen. Frames are separated by a single
 # marker bit. The QP delta is read ONCE for the whole video, not per frame
 # (FUN_03000520, lr=0x03000734 -- exactly one hit in a 4000-call hardware trace).
-MB_PER_FRAME = 105
-# Number of se(v) side values each predictor family reads, from its handler in the
-# 24-entry jump table at 0x03001d4c: mode 4 -> FUN_03001ac0, mode 5 -> FUN_03001854.
-# Both verified against hardware: every mode-4/5 bit gap disappears with these.
-SE_COUNT = {4: 3, 5: 5}
-# Residual CBP groups per coded macroblock (see decode_mb).
-CBP_GROUPS = 4
 # The ONLY true macroblock-mode reader. The other 20 ue(v) call sites are predictor
 # helpers; treating any of them as a mode read is what produced the mislabelling
 # described in doc/gba_video_vxpp.md section 10.
@@ -202,91 +197,78 @@ def decode_block(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
     return co, pos, True
 
 
-def decode_mb(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
-    """One 16x16 MB. Returns (dict, new_pos) or (None, pos) on desync."""
+def decode_unit(br, tab, vofs, rofs, pos, disp=TOP, depth=0, stats=None):
+    """Decode one node of the recursive block partition, starting at `disp`.
+
+    The codec is not a flat macroblock loop: each of the 16 dispatchers reads a
+    mode with ue(v) and may recurse into smaller dispatchers, so a top-level
+    macroblock expands into a tree. Returns the new bit position.
+    """
+    if depth > 14:
+        raise ValueError("partition nested too deep")
     mode, pos = read_ue(br, pos)
-    if mode is None or mode >= 24:
-        return None, pos, f"bad mode {mode}"
-    r = {"mode": mode, "groups": [], "blocks": 0, "over": False}
-    # Modes split into a 12-entry predictor family plus a "+12 = same predictor,
-    # with residual" variant, so the per-predictor side data keys off base.
-    base = mode - MODE_SKIP_MAX if mode >= MODE_SKIP_MAX else mode
-    if base == 6:                       # FUN_03000884: intra luma + chroma submode
-        lm, pos = read_ue(br, pos)
-        cm, pos = read_ue(br, pos)
-        if lm is None or cm is None or lm >= 4 or cm >= 4:
-            return None, pos, f"bad intra submode {lm}/{cm}"
-        r["intra"] = (lm, cm)
-    elif base == 7:                     # one extra ue, read at lr=0x030009a4
-        v, pos = read_ue(br, pos)
-        if v is None:
-            return None, pos, "bad mode-7 side value"
-        r["side"] = v
-    if base in SE_COUNT:                # motion/offset vectors, via FUN_0300081c
-        sv = []
-        for _ in range(SE_COUNT[base]):
-            v, pos = read_se(br, pos)
-            if v is None:
-                return None, pos, "bad se(v) side value"
-            sv.append(v)
-        r["se"] = sv
-    if mode < MODE_SKIP_MAX:
-        return r, pos, None
-    # FOUR coded-block-pattern groups per coded MB. Every coded-mode handler
-    # enters the residual loop at 0x03005650 with fp = ip = 16, and that loop is
-    # nested -- inner runs fp/8 = 2, outer ip/8 = 2 -- so four CBP reads. Confirmed
-    # independently against hardware: segmenting a 4000-call trace strictly at the
-    # real mode reader (lr=0x03001db4) shows modes 15/16/17 followed by exactly
-    # `CBP CBP CBP CBP`, mode 18 by `intraL intraC CBP*4`, mode 19 by `ue7 CBP*4`.
-    # Each CBP is a 6-bit mask over four 8x8 luma quadrants plus Cb/Cr.
-    for _g in range(CBP_GROUPS):
-        cbp, pos = read_ue(br, pos)
-        if cbp is None or cbp >= 64:
-            return None, pos, f"bad cbp {cbp}"
-        mask = CBP_PERMTAB[cbp]
-        r["groups"].append((cbp, mask))
-        if verbose:
-            print(f"    group{_g} cbp={cbp} mask={mask:06b}")
-        for b in range(6):
-            if mask & (1 << b):
-                co, pos, ov = decode_block(br, tab, vofs, rofs, pos,
-                                           stop_when_set, verbose)
-                r["blocks"] += 1
-                r["over"] |= ov
-                if verbose:
-                    print(f"      -> {['Y0','Y1','Y2','Y3','Cb','Cr'][b]}: {co}")
-    return r, pos, None
+    table = GRAMMAR.get(disp)
+    if table is None or mode is None or mode not in table:
+        raise ValueError(f"mode {mode} not in table {disp:#x}")
+    n_se, events = table[mode]
+    if stats is not None:
+        stats[(disp, mode)] = stats.get((disp, mode), 0) + 1
+    for _ in range(n_se):
+        _, pos = read_se(br, pos)
+    for ev in events:
+        kind = ev[0]
+        if kind == "intra2":                 # FUN_03000884: luma + chroma submode
+            _, pos = read_ue(br, pos)
+            _, pos = read_ue(br, pos)
+        elif kind == "ue1":                  # FUN_030008fc
+            for _ in range(ev[1]):
+                # H.264-style intra 4x4 mode: 1 bit when the predicted mode is
+                # reused, otherwise 3 more bits selecting the remainder.
+                pos += 1 if (br.peek32(pos) >> 31) & 1 else 4
+            _, pos = read_ue(br, pos)
+        elif kind == "disp":
+            pos = decode_unit(br, tab, vofs, rofs, pos, ev[1], depth + 1, stats)
+        elif kind == "resid":
+            for _ in range(ev[1]):
+                cbp, pos = read_ue(br, pos)
+                if cbp is None or cbp >= 64:
+                    raise ValueError(f"bad cbp {cbp}")
+                mask = CBP_PERMTAB[cbp]
+                for b in range(6):
+                    if mask & (1 << b):
+                        _, pos, _ = decode_block(br, tab, vofs, rofs, pos, True)
+    return pos
 
 
-def run(stop_when_set, n_mb=MB_PER_FRAME, quiet=True):
+def decode_frames(n_frames=None, quiet=True):
+    """Walk whole frames. Returns (frames_done, end_bit, stats, stop_reason)."""
     tab = load16(VLC)
     vofs, rofs = load(VOFS), load(ROFS)
     br = Bits(load(STREAM))
-    # One QP delta at the head of the frame (FUN_03000520, lr=0x03000734).
-    qp, pos = read_ue(br, 0)
-    ok = over = 0
-    for m in range(n_mb):
-        r, npos, err = decode_mb(br, tab, vofs, rofs, pos, stop_when_set)
-        if err:
-            return ok, over, m, err, pos
-        if r["over"]:
-            over += 1
+    total = len(load(STREAM)) * 8
+    _, pos = read_ue(br, 0)                  # one-time QP delta for the video
+    stats = {}
+    f = 0
+    why = "end of stream"
+    while (n_frames is None or f < n_frames) and pos < total - 256:
+        start = pos
+        try:
+            for _ in range(MB_PER_FRAME):
+                pos = decode_unit(br, tab, vofs, rofs, pos, TOP, 0, stats)
+        except ValueError as e:
+            # Known: the parse desyncs around byte 5198, past the end of the
+            # hardware trace that validates it. See doc section 11, "Still open".
+            why = f"desync in frame {f} at bit {pos}: {e}"
+            break
+        pos += 1                             # inter-frame marker bit
         if not quiet:
-            print(f"MB{m:3d} mode={r['mode']:2d} blocks={r['blocks']:2d} "
-                  f"bits={npos-pos}{' OVERFLOW' if r['over'] else ''}")
-        pos = npos
-        ok += 1
-    return ok, over, None, None, pos
+            print(f"frame {f:4d}: {pos - start} bits")
+        f += 1
+    return f, pos, stats, why
 
 
 if __name__ == "__main__":
-    for sws in (True, False):
-        label = "stop_when_set=True (disassembly)" if sws else "stop_when_set=False (legacy guess)"
-        ok, over, failm, err, pos = run(sws)
-        print(f"{label}:")
-        print(f"   MBs decoded: {ok}/105   with-overflow: {over}")
-        if err:
-            print(f"   FAILED at MB{failm}: {err} (bit {pos})")
-        else:
-            print(f"   full frame OK, ended at bit {pos}")
-        print()
+    frames, end, stats, why = decode_frames(quiet=False)
+    print(f"\n{frames} frames parsed, ended at bit {end} ({why})")
+    top = sorted((m, c) for (d, m), c in stats.items() if d == TOP)
+    print("top-level mode histogram:", dict(top))
