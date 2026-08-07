@@ -15,12 +15,32 @@ MOBICLIP_KEYINT_MAX = 90
 
 # Config
 if getattr(sys, 'frozen', False):
+    def _find_frozen_binary(name):
+        """Locate a bundled binary regardless of how PyInstaller placed it.
+
+        A onedir macOS .app puts a binary added via `binaries=`/--add-binary
+        in Contents/Frameworks, not next to sys._MEIPASS (Contents/MacOS) --
+        that split depends on how the build invoked PyInstaller (spec file
+        vs CLI flags can disagree), so check every place it could be rather
+        than assuming one."""
+        exe_dir = os.path.dirname(sys.executable)
+        candidates = [
+            os.path.join(sys._MEIPASS, name),
+            os.path.join(exe_dir, name),
+            os.path.join(exe_dir, "..", "Frameworks", name),
+            os.path.join(exe_dir, "..", "Resources", name),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+        return candidates[0]
+
     ffmpeg_name = "ffmpeg.exe" if os.name == 'nt' else "ffmpeg"
-    FFENC = os.path.join(sys._MEIPASS, ffmpeg_name)
+    FFENC = os.environ.get("FFMPEG", _find_frozen_binary(ffmpeg_name))
     ffprobe_name = "ffprobe.exe" if os.name == 'nt' else "ffprobe"
-    FFPROBE = os.environ.get("FFPROBE", os.path.join(sys._MEIPASS, ffprobe_name))
+    FFPROBE = os.environ.get("FFPROBE", _find_frozen_binary(ffprobe_name))
     ffplay_name = "ffplay.exe" if os.name == 'nt' else "ffplay"
-    FFPLAY = os.environ.get("FFPLAY", os.path.join(sys._MEIPASS, ffplay_name))
+    FFPLAY = os.environ.get("FFPLAY", _find_frozen_binary(ffplay_name))
 else:
     FFENC = os.environ.get("FFMPEG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg"))
     FFPROBE = os.environ.get("FFPROBE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe"))

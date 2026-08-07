@@ -353,18 +353,11 @@ class EncodeGUI(tk.Tk):
         # when decoding and a single side-by-side window when playing, so the
         # label says both things rather than naming only the decode behaviour.
         ttk.Label(self.decode_frame, text="3D eyes:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-        self.dec_eyes_var = tk.StringVar(value="both")
-        eyes_frame = ttk.Frame(self.decode_frame)
-        eyes_frame.grid(row=3, column=1, sticky="w", padx=5, pady=5)
-        for i, (val, label) in enumerate((("both", "Both (separate files / split-screen)"),
-                                          ("left", "Left only"),
-                                          ("right", "Right only"),
-                                          ("packed", "Keep packed"))):
-            ttk.Radiobutton(eyes_frame, text=label, value=val,
-                            variable=self.dec_eyes_var).grid(row=0, column=i, padx=(0, 8))
-        # How the eyes are packed. Normally read from the file, but a 3D file
-        # that carries no layout descriptor is indistinguishable from a 2D one,
-        # and then eye selection silently does nothing — so allow saying it.
+        # A stereoscopic input is always split into separate left/right files
+        # automatically -- no eye picker. The only thing left to say is how
+        # the eyes are packed, since a 3D file with no layout descriptor is
+        # indistinguishable from a 2D one and detection needs a hint.
+        ttk.Label(self.decode_frame, text="3D layout:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
         self.dec_stereo_var = tk.StringVar(value="Auto (from file)")
         self.dec_stereo_map = {
             "Auto (from file)": "auto",
@@ -376,10 +369,9 @@ class EncodeGUI(tk.Tk):
             "Side by side": "sbs",
             "Side by side, right first": "sbs-r",
         }
-        ttk.Combobox(eyes_frame, textvariable=self.dec_stereo_var,
+        ttk.Combobox(self.decode_frame, textvariable=self.dec_stereo_var,
                      values=list(self.dec_stereo_map.keys()), state="readonly",
-                     width=26).grid(row=1, column=0, columnspan=4, sticky="w",
-                                    pady=(6, 0))
+                     width=26).grid(row=3, column=1, sticky="w", padx=5, pady=5)
 
         self.dec_eyes_note = ttk.Label(self.decode_frame, text="", foreground="grey")
         self.dec_eyes_note.grid(row=4, column=1, sticky="w", padx=5)
@@ -618,9 +610,6 @@ class EncodeGUI(tk.Tk):
         cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
         cmd.extend(["play", inp])
 
-        eyes = self.dec_eyes_var.get()
-        if eyes and eyes != "both":
-            cmd.extend(["--eyes", eyes])
         stereo = self.dec_stereo_map.get(self.dec_stereo_var.get(), "auto")
         if stereo != "auto":
             cmd.extend(["--stereo", stereo])
@@ -644,9 +633,6 @@ class EncodeGUI(tk.Tk):
         outfile = self.dec_output_var.get().strip()
         if outfile:
             cmd.extend(["-o", outfile])
-        eyes = self.dec_eyes_var.get()
-        if eyes and eyes != "both":
-            cmd.extend(["--eyes", eyes])
         stereo = self.dec_stereo_map.get(self.dec_stereo_var.get(), "auto")
         if stereo != "auto":
             cmd.extend(["--stereo", stereo])
