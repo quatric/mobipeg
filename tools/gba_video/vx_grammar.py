@@ -90,7 +90,7 @@ GRAMMAR = {
          1: (0, []),
          2: (0, [('disp', 0x03003adc), ('disp', 0x03003adc)]),
          3: (2, []),
-         4: (1, []),
+         4: (3, []),
          5: (5, []),
          6: (0, []),
          7: (0, []),
@@ -240,7 +240,7 @@ GRAMMAR = {
          1: (0, [('disp', 0x03005294), ('disp', 0x03005294)]),
          2: (0, []),
          3: (2, []),
-         4: (1, []),
+         4: (3, []),
          5: (5, []),
          6: (0, []),
          7: (0, []),
@@ -254,7 +254,7 @@ GRAMMAR = {
          1: (0, [('disp', 0x03005494), ('disp', 0x03005494)]),
          2: (0, []),
          3: (2, []),
-         4: (4, []),
+         4: (3, []),
          5: (5, []),
          6: (0, []),
          7: (0, []),
@@ -268,7 +268,7 @@ GRAMMAR = {
          1: (0, [('disp', 0x030055fc), ('disp', 0x030055fc)]),
          2: (0, []),
          3: (2, []),
-         4: (4, []),
+         4: (3, []),
          5: (5, []),
          6: (0, []),
          7: (0, []),
@@ -292,6 +292,11 @@ GRAMMAR = {
         11: (2, []),
     },
 }
+
+# Mode 4 reads three se(v) in every table: one directly, plus one in each of the
+# two paired sub-helpers (the third callee is pure pixel averaging and reads
+# nothing). The static walker mis-counted this in six tables; three were caught by
+# hardware calibration and the rest by reading the handlers. Kept uniform here.
 
 TOP = 0x03001dac        # top-level macroblock mode dispatcher
 MB_PER_FRAME = 105      # 15x7 macroblocks, letterboxed in the 240x160 screen
