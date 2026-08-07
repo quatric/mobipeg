@@ -1171,3 +1171,60 @@ This parses the bitstream and nothing else. Reconstruction is untouched:
   suggests the DS-era relatives use a plain H.264-style integer transform, but that is an assumption here.
 - **Coefficient scan order.** `decode_block` writes coefficients at `run`-derived positions in raster
   order; the real zig-zag or field scan has not been identified.
+
+## 14. Reconstruction layer: architecture recovered, port started
+
+Building the decoder. What the disassembly says about reconstruction, all verified against the IWRAM
+image:
+
+### The codec is H.264-shaped
+
+- **Transform**: the 4×4 integer butterfly (`e2 = (d1>>1) - d3`, `e3 = d1 + (d3>>1)`), four columns at
+  `0x03005828`, then a row pass with `+32` rounding and `>>6` in each reconstruct routine.
+- **Dequantisation**: `factors[qp % 6] << (qp / 6)`, from tables at `0x03000680` (factors), `0x030006c8`
+  (row offset) and `0x030006f8` (shift), set up at `0x03000730`. The factor table is **byte-identical to
+  H.264's** — `(10,13,16), (11,14,18), (13,16,20), (14,18,23), (16,20,25), (18,23,29)`.
+- **Scan**: standard H.264 zig-zag, confirmed from which coefficient addresses each column of the
+  transform loads.
+- **Block size**: 4×4. Each CBP bit covers one 4×4 block, and four CBP groups give 16 luma + 8 chroma
+  blocks per macroblock.
+- **Whole-block intra**: modes 0-3 are vertical / horizontal / DC / plane, with DC taking the usual
+  availability fallbacks (`0x80` when neither edge exists).
+
+### Where it differs
+
+Prediction is a **recursive rectangular partition**, not a fixed set of shapes. Each dispatcher handles
+one block size, recovered from the `r4`/`r5` immediates its mode-6 handler passes to the intra predictor:
+
+| dispatcher | block | dispatcher | block | dispatcher | block |
+|---|---|---|---|---|---|
+| `0x03001dac` | 16×16 | `0x030030f4` | 8×16 | `0x030041cc` | 4×16 |
+| `0x03002184` | 16×8 | `0x03003584` | 8×8 | `0x03004468` | 4×8 |
+| `0x030024ac` | 16×4 | `0x03003818` | 8×4 | `0x03004750` | 4×4 |
+
+Mode 1 splits vertically, mode 2 horizontally, each recursing twice into the next dispatcher down. The
+remaining seven dispatchers sit below 4×4 and offer no whole-block intra mode.
+
+Also unlike H.264, **the prediction is written into the frame buffer first and the residual added on top
+in place** — `clip(pred + ((f + 32) >> 6))` reading and writing the same address, with a fixed pitch of
+`0x100` for both luma and chroma. A macroblock's position travels as a byte offset into that buffer,
+`mb_y*16*STRIDE + mb_x*16`, which is why the intra predictors test the offset itself for edge
+availability: bits 0-7 are zero exactly when `mb_x == 0`, bits 8-15 when `mb_y == 0`.
+
+### Ported so far (`tools/gba_video/vx_reconstruct.py`)
+
+Dequant tables, zig-zag, the 4×4 inverse transform, in-place residual addition, and intra
+vertical/horizontal/DC. Each constant is read from the image rather than assumed.
+
+### Not yet ported
+
+Intra plane mode; the four chroma intra modes at `0x03000874`; the nine intra 4×4 modes at `0x030008d8`;
+inter prediction (the predictor families, half-pel interpolation around `0x03001704`/`0x03002a8c`, and the
+motion vectors carried as `se(v)`); five of the six reconstruct variants; and reference-frame management.
+
+### Note on the first frame
+
+Frame 0 of segments 0 and 1 is *pure* intra with **no residual at all** — 104 mode-6 macroblocks and one
+split. With no residual and no neighbours at the top-left, it reconstructs to flat grey: a title card.
+Real picture content needs inter prediction as well, so there is no shortcut to a watchable frame via
+keyframes alone — segment 2 onward mixes inter modes into its keyframes.
