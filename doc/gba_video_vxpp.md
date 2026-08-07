@@ -615,12 +615,142 @@ is re-derivable from it via the file offsets recorded in §2/§3b.
 1. ~~Validate the codebook interpretation~~ DONE.
 2. ~~Resolve block order~~ DONE — indices `0x060-0x07F` are dead due to the escape check, not misordering.
 3. ~~Decompile caller chain 0x3005650~~ DONE — see §3b.
-4. **NEW — decompile `FUN_03001dac` and its jump table at `0x3001d4c`** (24-31 entries) to find the
-   per-region mode/type code that must precede `0x03005650`'s CBP read, and figure out why region 1 of
-   `stream00.video` desyncs at bit 40 (`ue(v)` giving an out-of-range CBP code of 98). This is the
-   critical blocker for full-frame validation — likely intra-mode or motion-vector data for non-"plain
-   inter CBP" regions that `0x03005650` alone doesn't parse.
-5. Once per-region mode dispatch is understood, extend `decode_vlc3.py` to walk a full frame/row and
-   confirm no further desyncs.
+4. ~~Decompile FUN_03001dac's jump table~~ DONE, and **superseded** — see §7. The static-analysis-only
+   desync chased in earlier checkpoints turned out to trace to two real bugs (wrong byte order, wrong
+   table address), not a missing per-region dispatch layer. Fixed and verified live against mGBA.
+5. Once per-MB dispatch is fully understood (2 of the ~10 handler families still need live verification
+   — see §7's open items), extend `vx_sim.py` to walk the full first frame and confirm no further
+   desyncs.
 6. Reassemble the full symbol table `{code, len, run, value, more}` for `vx.c`.
 7. Implement `libavcodec/vx.c` modeled on `mobiclip.c`; validate against all 4 streams.
+
+---
+
+## 7. mGBA live ground-truth session (2026-08-07) — two real bugs found and fixed
+
+Static analysis alone had stalled (see §5 blocker #6's long back-and-forth). This session used mGBA's
+GDB stub (`-g`, port 2345; client = `tools/gba_video/gdbrsp.py`) to get actual hardware register/memory
+state instead of continuing to guess from disassembly. That immediately paid off — **two real, distinct
+bugs were found and fixed**, and the very first coefficient of frame 0's first coded macroblock now
+decodes to a value that matches live hardware exactly.
+
+### Workflow notes (useful for next time)
+
+- `mGBA -g <rom>` does **not** halt at boot — the CPU runs freely from power-on, and the GDB stub just
+  becomes reachable. Connecting before the cart has booted past its splash/menu into actual playback
+  means breakpoints on decoder functions won't fire for ~15-25 real seconds; wait or the `cont()` call
+  times out.
+- Each Python client process should do **one continuous script per emulator boot**. Disconnecting and
+  reconnecting does not pause the emulator, so a second script attempting to re-arm a breakpoint that
+  already fired once this boot (e.g. `FUN_03006df8`, the once-per-video "main player entry") will hang
+  forever waiting for an event that already passed.
+- Launching mGBA: `nohup ... -g "$ROM" > log 2>&1 < /dev/null & disown` in its own shell call, `pkill -f
+  mGBA` in a separate prior call — combining launch+wait+use in one Bash call was unreliable in this
+  sandboxed environment (backgrounded child got reaped).
+- `gdbrsp.py`'s `bp()`/`cont()`/`rmbp()` pattern (breakpoint at a call site, continue, capture regs,
+  remove, breakpoint at the return address `lr`, continue again) works well for capturing a function's
+  input/output state. Pure single-stepping (`r.cmd('s')`) is more robust for anything that needs to
+  distinguish a real function return from a call into a shared subroutine (e.g. the bit-refill helper
+  `FUN_030007a8`, which `FUN_03005794` calls internally — a naive "PC left the function's address range"
+  check false-positives on it).
+
+### Bug 1 — byte order: the accumulator is filled from little-endian HALFWORDS, not raw bytes
+
+`FUN_0300076c`/`FUN_030007a8` refill the bit accumulator via `ldrh r10,[r1],#2` — a little-endian
+16-bit load — then treat the result MSB-first. That means every 2-byte pair from the file is
+**byte-swapped** relative to naive in-file-order MSB-first reading. Every simulator this session and
+prior ones built the accumulator by reading raw file bytes as one continuous MSB-first stream, which is
+wrong at every halfword boundary.
+
+Proof: the stream's first two bytes are `69 04`. Loaded as a halfword that's `0x0469`. Decoding `0x0469`
+as `ue(v)` (5 leading zeros, stop bit, 5-bit suffix `00011`=3, value = 3 + 31 = **34**) matches a live
+mGBA capture of the very first bitstream read of the video (the QP-delta in `FUN_03000520`) exactly.
+Naive raw-byte-order MSB-first decoding of the same two bytes gives **2** — wrong.
+
+Fixed in `tools/gba_video/vx_sim.py`'s `Bits` class: precompute a per-halfword-swapped copy of the input
+once in `__init__`, so `peek32()` stays a simple MSB-first byte reader over the swapped buffer.
+
+### Bug 2 — wrong codebook table address: it's a runtime EWRAM copy, not the static ROM location
+
+Every session before this one (going back to the very first) assumed the VLC/escape codebook (`fp` in
+`FUN_03005794`) was a **flat ROM address**, `0x0800a000`. That assumption was never actually verified
+against a live `fp` value — it was inferred once, early on, from a decompile note ("Writes `sl +
+0x08000000` into `[ctx,#0x20]`") and never rechecked.
+
+Live capture at the entry to `FUN_03005794` (breakpoint at `0x03005794`, then `fp = *(r0+0x20)` read via
+`r.mem`) gives **`fp = 0x020010e4`** — an **EWRAM** address (`0x02000000-0x0203FFFF` range), not a ROM
+address at all. The codebook is copied into EWRAM at runtime (presumably during video setup, from
+wherever it actually lives in the bank-switched ROM — not investigated further, doesn't matter for the
+simulator). Every table lookup this session and all prior ones was reading the *wrong table entirely*.
+
+Proof: `table[89]` from the old (wrong, static-ROM) dump was `0x0098`. The live EWRAM table's `table[89]`
+is `0x808d`. Single-stepping the real ARM code for this exact lookup (escape variant 1, at the very
+first coefficient of frame 0's first coded MB) confirms hardware genuinely reads `0x808d` there — and
+decoding it (`len=13, base value=8, value_offset_table[64]=8` → combined `16`, sign bit set → **-16**,
+`run=0`, `last=1`, single coefficient) matches a live single-stepped hardware trace of that exact
+coefficient **exactly** (value, run, and the stop condition all confirmed bit-for-bit).
+
+Also confirms, as a side effect: the `last`-flag polarity from the (B) correction in §5 blocker #6 is
+**right** — real hardware's `tst r4,#1; beq <loop start>` genuinely stops (branch not taken) when the
+bit is 1, matching `stop_when_set=True`. That conclusion survives; the buffer-overflow objection raised
+against it earlier was itself caused by Bug 2 producing garbage table lookups downstream, not a real
+problem with the polarity.
+
+**Live table + escape tables saved**: dumped fresh from EWRAM (`fp=0x020010e4`, `fp+0x2000`, `fp+0x2080`)
+and copied over the old (wrong) `tools/gba_video/vlc_rom_full4096.bin` /
+`value_offset_table.bin` / `run_offset_table.bin` equivalents in `/tmp/gbavx/` — **these old filenames
+now mean the live/correct table**, not the original ROM-address dump. `vofs` should be loaded in full
+(128 bytes) now, not truncated to the first 48 as earlier sessions guessed (that truncation was itself
+an artifact of reading the wrong, ROM-address table, where bytes past offset 0x30 genuinely were
+unrelated code).
+
+**Also confirmed correct, unchanged**: the true stream start really is file offset `0x20238` (container
+offset `0x20200 + 0x38`) — this was the *original*, very first session's guess, and it's right. A long
+detour this session chasing an apparent "bank-switched" ROM location (`0x2ca3a`, `0x103a`+something) was
+a red herring from a stale mid-stream GDB capture, not evidence against the container-offset extraction.
+Re-verified by direct byte search of the flat ROM for the confirmed-live first 16 bytes
+(`69 04 dd 84 02 03 18 cc 60 16 b3 c0 05 06 d4 99`) — unique hit at `0x20238`. The CBP permutation table
+at `0x3005610` was also independently re-checked live and is unchanged/correct (it's static IWRAM code,
+not runtime data, so it was never suspect the way the two bugs above were).
+
+### Validated this session (live, bit-for-bit against mGBA)
+
+With both fixes applied, a live 40-call trace of real `ue(v)` reads (QP-delta, mode-selects, intra
+submodes, CBP codes) for the first several MBs of frame 0 was captured and cross-checked:
+
+```
+34, 1, 2, 18, 2, 0, 1, 6, 1, 0, 6, 0, 0, 6, 1, 0, 6, 1, 0, 6, 1, 0, 6, 1, 0, ...
+```
+
+`vx_sim.py` (fixed) reproduces the **first 8 of these exactly**: QP-delta=34; MB0 mode=1 (skip); MB1
+mode=2 (skip); MB2 mode=18 (coded intra) with submodes luma=2/chroma=0; group0 CBP=1 (mask `0b01111` →
+Y0-Y3 coded); group1 CBP=6. And the first coefficient of MB2's group0 Y0 block was verified via full
+single-step trace to decode to exactly `-16, run=0, last=1` — matching hardware precisely, including the
+escape-variant-1 codepath, the second-level table lookup, and the value-offset-table addition.
+
+### Still open
+
+- **A small, unresolved drift appears after group 1's `Y2` block** (my_vals index 8 diverges from the
+  live trace: mine gives `0`, live gives `1`). Chased extensively this session via peek32 comparisons and
+  register captures but not root-caused — ruled out: the CBP permutation table (re-verified live,
+  correct), the escape-variant math (correct for the coefficients checked), and simple off-by-N-bit
+  guesses (tested against real accumulator snapshots, none matched). A live single-step trace specifically
+  through group 0's `Y2`/`Y3` blocks and the group-0→group-1 transition would likely resolve this
+  quickly, but repeated attempts this session were undermined by GDB-stub flakiness (breakpoints timing
+  out on fresh boots, the "bp at lr" pattern hanging intermittently after many prior connections to the
+  same long-lived emulator process) and a bug in an ad hoc "did the function return" step-counter (it
+  false-positived on the internal call to the refill subroutine `FUN_030007a8`). Next session: prefer
+  fresh emulator boots over reusing one across many scripts, and single-step continuously through a
+  block rather than trying to detect "returned" from register state alone (watch for `pc` actually
+  leaving the full `0x03005650-0x03006050`-ish caller/callee range, or just count exact instruction
+  addresses against a known-good disassembly walk).
+- Two of the ~10 underlying MB predictor types are still fully unverified even structurally:
+  `FUN_03001854` (modes 5/17) and the `FUN_03002184`/`FUN_030030f4` pair (modes 1/2/13/14) — live trace
+  this session did confirm mode 1 and 2 (skip variants) consume **zero** extra bits beyond the
+  mode-select code itself (contradicting nothing, but not yet explaining what `FUN_03002184`/
+  `FUN_030030f4` actually *do* pixel-wise), and did NOT exercise their "coded" (13/14) counterparts.
+- QP-delta re-read condition (`FUN_03000520`'s `uVar7 & 0x80000000` flag) still not explained — only
+  fired once in the live 40-call trace (at the very start), consistent with "once per frame" but not
+  proven for later frames/slices.
+- Once the group-1 drift is fixed, extend the live-validated prefix into a full first-frame walk and
+  compare MB-by-MB against a longer live trace before touching `vx.c` itself.
