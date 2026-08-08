@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import vxgb_sim as V
+import vxgb_decode as D
 
 
 class VXGBParserTest(unittest.TestCase):
@@ -31,6 +32,16 @@ class VXGBParserTest(unittest.TestCase):
         self.assertEqual((pos, total), (1, 0))
         self.assertEqual(coeffs, [0] * 16)
         self.assertEqual(state.luma[(0, 0)], 0)
+
+    def test_gba_transform_keeps_standard_h264_scan_order(self):
+        # VXGB shares CAVLC with the DS codec, but not its transposed scan.
+        # The GBA inverse transform loads coefficients in standard H.264
+        # zigzag order, which is already what vx_reconstruct accepts.
+        coeffs = list(range(16))
+        unit = {'x': 4, 'y': 8, 'resid': [(1, [(0, coeffs[:])])]}
+        adapted = D._adapt_unit(unit, 0, 0)
+        self.assertEqual(adapted['off'], 8 * D.R.STRIDE + 4)
+        self.assertEqual(adapted['resid'][0][1][0][1], coeffs)
 
 
 if __name__ == '__main__':
