@@ -105,7 +105,10 @@ static int decode_blob(ADSVideoContext *s, const uint8_t *src, int src_size,
     if (src_size < 8)
         return AVERROR_INVALIDDATA;
     out_size = ff_majesco_get_output_size(src, src_size);
-    if (!out_size || out_size > (1 << 22))
+    /* Retail Dora streams carry up to 1100 frames in one chunk. Their valid
+     * expanded index planes reach 4,664,000 bytes, just over the old arbitrary
+     * 4 MB guard. Eight MB still bounds hostile allocations comfortably. */
+    if (!out_size || out_size > (1 << 23))
         return AVERROR_INVALIDDATA;
 
     out = av_malloc(out_size + AV_INPUT_BUFFER_PADDING_SIZE);
@@ -196,16 +199,21 @@ static int decode_chunk(AVCodecContext *avctx, const AVPacket *avpkt)
 {
     ADSVideoContext *s = avctx->priv_data;
     const uint8_t *buf = avpkt->data;
-    int size_a, size_b, ret, per_frame;
+    int nb_frames, size_a, size_b, ret, per_frame;
+
+    /* Do not leave a partially parsed chunk live after an error. The receive
+     * API may be called again after returning invalid data; stale frame counts
+     * would otherwise make it expand a freed or missing index buffer. */
+    s->nb_frames = s->next_frame = 0;
 
     if (avpkt->size < 8)
         return AVERROR_INVALIDDATA;
 
-    s->nb_frames = AV_RL32(buf) >> 16;
-    size_a       = (AV_RL32(buf + 4) & 0x1FFF) * 4;
-    size_b       = (AV_RL32(buf + 4) >> 13)    * 4;
+    nb_frames = AV_RL32(buf) >> 16;
+    size_a    = (AV_RL32(buf + 4) & 0x1FFF) * 4;
+    size_b    = (AV_RL32(buf + 4) >> 13)    * 4;
 
-    if (!s->nb_frames || !size_a || !size_b ||
+    if (!nb_frames || !size_a || !size_b ||
         8 + (int64_t)size_a + size_b > avpkt->size)
         return AVERROR_INVALIDDATA;
 
@@ -213,14 +221,26 @@ static int decode_chunk(AVCodecContext *avctx, const AVPacket *avpkt)
     av_freep(&s->index);
 
     ret = decode_blob(s, buf + 8, size_a, &s->codebook, &s->codebook_size);
-    if (ret < 0)
+    if (ret < 0) {
+        av_log(avctx, AV_LOG_ERROR, "could not decompress video codebook: %s\n",
+               av_err2str(ret));
         return ret;
+    }
 
     ret = decode_blob(s, buf + 8 + size_a, size_b, &s->index, &s->index_size);
-    if (ret < 0)
+    if (ret < 0) {
+        av_log(avctx, AV_LOG_ERROR, "could not decompress video index: %s\n",
+               av_err2str(ret));
         return ret;
+    }
 
-    per_frame = s->index_size / s->nb_frames;
+    if (s->index_size % nb_frames) {
+        av_log(avctx, AV_LOG_ERROR,
+               "video index size %d is not divisible by %d frames\n",
+               s->index_size, nb_frames);
+        return AVERROR_INVALIDDATA;
+    }
+    per_frame = s->index_size / nb_frames;
     ret = setup_geometry(avctx, per_frame, AV_RL32(buf) & 7);
     if (ret < 0)
         return ret;
@@ -241,6 +261,7 @@ static int decode_chunk(AVCodecContext *avctx, const AVPacket *avpkt)
     undelta(s->codebook, s->luma_region);
     undelta(s->codebook + s->luma_region, 2 * NB_ENTRIES * s->chroma_rows);
 
+    s->nb_frames  = nb_frames;
     s->next_frame = 0;
     s->chunk_pts  = avpkt->pts;
 
