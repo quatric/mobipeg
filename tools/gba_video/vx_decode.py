@@ -24,7 +24,12 @@ import vx_reconstruct as R
 import vx_sim as S
 
 STRIDE = R.STRIDE
-MARGIN = STRIDE                    # one row above the image, so (-1,-1) is addressable
+# The hardware frame buffers are far larger than the image, so a motion vector
+# pointing off the edge still lands in allocated memory. Mirror that with a
+# generous margin above and below rather than one row -- vectors reach +/-128
+# pixels, and a block near an edge would otherwise index past the end.
+SLACK = 160
+MARGIN = SLACK * STRIDE
 GREY = 0x80
 
 
@@ -33,8 +38,8 @@ class Frame:
 
     def __init__(self, width, height):
         self.width, self.height = width, height
-        self.luma = bytearray([GREY]) * (STRIDE * (height + 2))
-        self.chroma = bytearray([GREY]) * (STRIDE * (height // 2 + 2))
+        self.luma = bytearray([GREY]) * (STRIDE * (height + 2 * SLACK))
+        self.chroma = bytearray([GREY]) * (STRIDE * (height // 2 + 2 * SLACK))
 
     def copy(self):
         f = Frame(self.width, self.height)
@@ -164,6 +169,20 @@ def write_pgm(fr, path):
             f.write(bytes(fr.luma[row:row + fr.width]))
 
 
+def write_nv12(fr, fh):
+    """Raw NV12: the luma plane, then the chroma plane as-is.
+
+    The decoder's chroma layout -- Cb and Cr interleaved, half resolution in both
+    directions -- is exactly NV12's UV plane, so no repacking is needed.
+    """
+    for y in range(fr.height):
+        row = MARGIN + y * STRIDE
+        fh.write(bytes(fr.luma[row:row + fr.width]))
+    for y in range(fr.height // 2):
+        row = MARGIN + y * STRIDE
+        fh.write(bytes(fr.chroma[row:row + fr.width]))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -172,7 +191,18 @@ def main():
     ap.add_argument("--width", type=int, default=240)
     ap.add_argument("--height", type=int, default=112)
     ap.add_argument("--stream", default=S.STREAM)
+    ap.add_argument("--raw", help="write raw NV12 here instead of PGMs")
     args = ap.parse_args()
+
+    if args.raw:
+        with open(args.raw, "wb") as fh:
+            for i, fr in enumerate(decode_frames(args.stream, args.width,
+                                                 args.height, args.frames)):
+                write_nv12(fr, fh)
+                if not (i % 25):
+                    print("frame", i, flush=True)
+        print("wrote", args.raw)
+        return 0
 
     os.makedirs(args.outdir, exist_ok=True)
     for i, fr in enumerate(decode_frames(args.stream, args.width, args.height,
