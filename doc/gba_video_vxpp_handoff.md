@@ -103,13 +103,12 @@ Everything below was read out of the decoder image, not guessed.
    complete self-contained seek segment and may emit many frames. The decoder should validate the
    `GVX1` prefix, skip the recorded leading bits, read the per-segment quantiser and emit the prefix's
    frame count while retaining its four-slot reference arena within the packet.
-2. **The earlier `VXGB` GBA revision.** Kostya documented a Majesco-published GBA stream beginning
-   with `VXGB` and described it as a simplified H.264 relative close to `VXDS`. The actual
-   `Shrek (USA) (Rev 5)` ROM confirms a `VXGB` stream at `0x20200`, while `Shrek (USA) (Rev 6)` has
-   `VX++` at the same offset and a very similar-looking header. Neither the native demuxer nor the
-   Python extractor accepts `VXGB` yet. Start by teaching the extractor to classify both magics and
-   compare the Rev 5 stream/seek layout and decoder image against the now-solved Rev 6 `VX++` path.
-   Source: [Kostya's codec note](https://codecs.multimedia.cx/2025/08/a-quick-glance-at-another-bunch-of-codecs/).
+2. **The earlier `VXGB` GBA revision.** Container extraction, audio, the complete bitstream parser and
+   Python pixel reconstruction are now implemented; see `gba_video_vxgb.md`. The Rev 5 decoder is ROM
+   `0xb548` → IWRAM `0x03000000`, all sixteen recursive dispatchers map to VX++, and the syntax break
+   is standard H.264-style CAVLC residuals rather than VX++'s ROM coefficient codebook. All 195 seek
+   segments parse and all 194 recorded transitions are bit-exact. Python frame 103 matches the live
+   mGBA scene spatially. A byte-exact YUV hardware dump and native decoder remain.
 3. **Optional audio hardware capture.** Framing is exact and the codec core was already validated on
    DS/SX data, but dumping GBA PCM would provide the same byte-for-byte final check used for video.
 
