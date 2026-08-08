@@ -19,6 +19,7 @@ import os
 import sys
 
 from vx_grammar import GRAMMAR, TOP, MB_PER_FRAME
+from vx_reconstruct import BLOCK_SIZE
 
 ROM = os.environ.get("VXPP_ROM", "")  # path to the GBA Video cart dump
 
@@ -208,12 +209,32 @@ def decode_block(br, tab, vofs, rofs, pos, stop_when_set=True, verbose=False):
     return co, pos, True
 
 
-def decode_unit(br, tab, vofs, rofs, pos, disp=TOP, depth=0, stats=None):
+def split_offset(parent, child, which):
+    """Byte offset of a split's second child, relative to its parent.
+
+    Derived from the two block sizes rather than the mode number: a child of
+    half the parent's height is the lower of a vertical split, otherwise it is
+    the right half of a horizontal one.
+    """
+    if which == 0:
+        return 0
+    pw, ph = BLOCK_SIZE[parent]
+    _, ch = BLOCK_SIZE[child]
+    return (ph // 2) * 0x100 if ch == ph // 2 else pw // 2
+
+
+def decode_unit(br, tab, vofs, rofs, pos, disp=TOP, depth=0, stats=None,
+                off=0, sink=None):
     """Decode one node of the recursive block partition, starting at `disp`.
 
     The codec is not a flat macroblock loop: each of the 16 dispatchers reads a
     mode with ue(v) and may recurse into smaller dispatchers, so a top-level
     macroblock expands into a tree. Returns the new bit position.
+
+    `off` is the block's byte offset within the macroblock and `sink`, if given,
+    receives one dict per decoded node -- everything a reconstructor needs. The
+    symbols were always being read; passing a sink only stops them being thrown
+    away, so the bit positions this returns are unchanged either way.
     """
     if depth > 14:
         raise ValueError("partition nested too deep")
@@ -224,30 +245,52 @@ def decode_unit(br, tab, vofs, rofs, pos, disp=TOP, depth=0, stats=None):
     n_se, events = table[mode]
     if stats is not None:
         stats[(disp, mode)] = stats.get((disp, mode), 0) + 1
+    se = []
     for _ in range(n_se):
-        _, pos = read_se(br, pos)
+        v, pos = read_se(br, pos)
+        se.append(v)
+    unit = {"disp": disp, "mode": mode, "off": off, "depth": depth,
+            "size": BLOCK_SIZE.get(disp), "se": se}
+    child = 0
     for ev in events:
         kind = ev[0]
         if kind == "intra2":                 # FUN_03000884: luma + chroma submode
-            _, pos = read_ue(br, pos)
-            _, pos = read_ue(br, pos)
+            luma, pos = read_ue(br, pos)
+            chroma, pos = read_ue(br, pos)
+            unit["intra"] = (luma, chroma)
         elif kind == "ue1":                  # FUN_030008fc
+            flags = []
             for _ in range(ev[1]):
                 # H.264-style intra 4x4 mode: 1 bit when the predicted mode is
                 # reused, otherwise 3 more bits selecting the remainder.
-                pos += 1 if (br.peek32(pos) >> 31) & 1 else 4
-            _, pos = read_ue(br, pos)
+                if (br.peek32(pos) >> 31) & 1:
+                    flags.append(None)
+                    pos += 1
+                else:
+                    flags.append((br.peek32(pos + 1) >> 29) & 7)
+                    pos += 4
+            chroma, pos = read_ue(br, pos)
+            unit["intra4"] = (flags, chroma)
         elif kind == "disp":
-            pos = decode_unit(br, tab, vofs, rofs, pos, ev[1], depth + 1, stats)
+            pos = decode_unit(br, tab, vofs, rofs, pos, ev[1], depth + 1, stats,
+                              off + split_offset(disp, ev[1], child), sink)
+            child += 1
         elif kind == "resid":
+            groups = []
             for _ in range(ev[1]):
                 cbp, pos = read_ue(br, pos)
                 if cbp is None or cbp >= 64:
                     raise ValueError(f"bad cbp {cbp}")
                 mask = CBP_PERMTAB[cbp]
+                blocks = []
                 for b in range(6):
                     if mask & (1 << b):
-                        _, pos, _ = decode_block(br, tab, vofs, rofs, pos, True)
+                        co, pos, _ = decode_block(br, tab, vofs, rofs, pos, True)
+                        blocks.append((b, co))
+                groups.append((mask, blocks))
+            unit["resid"] = groups
+    if sink is not None:
+        sink(unit)
     return pos
 
 
