@@ -106,16 +106,44 @@ grammar, every CAVLC decision and both framing differences without relying on
 emulator timing.
 
 `tools/gba_video/vxgb_decode.py` also connects those symbols to the solved VX++
-prediction/reconstruction primitives. A 20-second 7 fps decode stays coherent
-through the DreamWorks intro, and decoded frame 103 spatially matches the live
-mGBA screenshot at emulator frame 900 (cloud, moon, sparkle and block edges).
-The visible brightness difference is the final GBA YUV-to-BGR555 display path,
-which the Python output leaves as native NV12.
+prediction/reconstruction primitives. A live mGBA capture of the decoder's
+240x160 native frame buffer now matches the corresponding Python frame in all
+57,600 NV12 bytes (38,400 luma and 19,200 interleaved chroma bytes).
+
+That comparison exposed one important distinction from the DS codec. VXGB
+shares its CAVLC tables with VXDS, but the GBA inverse transform loads the
+decoded coefficient array in standard H.264 zigzag order. The first reference
+decoder incorrectly transposed it into the DS `VX` scan, producing the jagged
+crescent and block edges seen in the early sample. Removing that transpose
+makes the native luma and chroma planes byte-exact. The final GBA
+YUV-to-BGR555 display conversion remains separate from the stored NV12 planes.
+
+## Native decoder
+
+`libavformat/gbavx.c` now recognizes both revision magics and preserves the
+source magic plus header quantizer in video extradata. `libavcodec/gbavxdec.c`
+implements the original `VXGB` revision through the receive-frame API: one
+`GVX1` seek packet retains its bit cursor while emitting every contained frame,
+and each independent segment begins with the cartridge's four 0x80-filled
+reference slots.
+
+The prediction and CAVLC implementation is shared with `libavcodec/vx.c`,
+parameterized by the GBA mode permutation, coded-block table, coefficient scan
+and lack of per-frame word alignment. The C transform writes its second pass
+transposed, so its internal GBA scan table is pre-transposed; the externally
+visible coefficient placement is still the standard H.264 order proved above.
+
+Native output is exact against the hardware-proven Python reference for all
+140 frames of the 20-second sample. A 160-frame comparison also crosses the
+first independently decodable boundary at frame 155: all 18,432,000 RGB bytes
+match, and both sides consume the seek table's bit offset exactly. The decoder
+emits RGB24 using the cartridge transform (`R=Y+2Cr`, `G=Y-Cr-Cb/2`,
+`B=Y+2Cb`). `VX++` is explicitly rejected until its separate quantizer and VLC
+rules are ported.
 
 ## Remaining work
 
-The remaining validation step is a byte-for-byte comparison of a live mGBA YUV
-frame buffer, analogous to the VX++ frame suite; the visual frame-103 match is
-strong but not a substitute for that. A native implementation can share the
-CAVLC machinery already in `libavcodec/vx.c`; it still needs the GBA recursive
-mode mapping, reference-ring packet contract and YCbCr output adapter.
+Extending direct mGBA frame-buffer captures to busy frames and a seek boundary
+would provide the same broad hardware coverage already recorded for VX++.
+Native `VX++` decoding remains separate work; its demuxing, packet framing and
+audio are already complete.

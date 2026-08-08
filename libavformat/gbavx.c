@@ -1,5 +1,5 @@
 /*
- * ActImagine "VX++" GBA Video cartridge demuxer
+ * ActImagine VX GBA Video cartridge demuxer
  * Copyright (c) 2026 the FFmpeg developers
  *
  * This file is part of FFmpeg.
@@ -22,13 +22,13 @@
 /**
  * @file
  * The 64 MB GBA Video cartridges (Shrek + Shark Tale and friends) hold movies
- * in an ActImagine container tagged 'VX++'. It is not the DS '.vx' container
- * and not either Majesco stack; see doc/gba_video_ads.md.
+ * in ActImagine containers tagged 'VXGB' or 'VX++'. They are not the DS '.vx'
+ * container and not either Majesco stack; see doc/gba_video_ads.md.
  *
  * A stream is a 0x38-byte header, then the video bitstream, then the audio,
  * then a chapter table. Offsets in the header are stream-relative:
  *
- *     +00 'VX++'          +1c audio offset
+ *     +00 revision tag    +1c audio offset
  *     +04 frame count     +20 chapter table offset
  *     +08 width           +24 first frame of the last chapter
  *     +0c height          +28 seek table offset
@@ -40,8 +40,8 @@
  * middle column is the whole story: the video is one continuous bitstream with
  * no per-frame sizes. The seek entries do provide independently decodable
  * segment boundaries, however, so each interval is exposed as one packet for
- * the GBA-specific decoder. This bitstream is not the one libavcodec/vx.c
- * decodes - it is an earlier generation of the codec.
+ * the GBA-specific decoder. VXGB is the original revision; VX++ changes the
+ * quantizer signalling and is retained for future decoder support.
  *
  * The audio is the DS codec unchanged. Its region opens with the same
  * 3124-byte codebook block, and every AFrame is a whole number of 16-bit words
@@ -79,6 +79,7 @@
 
 typedef struct GBAVXStream {
     int64_t off;
+    uint32_t magic;
     uint32_t nb_frames, width, height;
     uint32_t frame_rate, quantizer, sample_rate;
     uint32_t audio_off, chapter_off, seek_off, nb_seek;
@@ -154,6 +155,7 @@ static int header_ok(const GBAVXStream *st, int64_t filesize)
 static void parse_header(GBAVXStream *st, int64_t off, const uint8_t *h)
 {
     st->off         = off;
+    st->magic       = AV_RL32(h + 0x00);
     st->nb_frames   = AV_RL32(h + 0x04);
     st->width       = AV_RL32(h + 0x08);
     st->height      = AV_RL32(h + 0x0c);
@@ -176,7 +178,8 @@ static int gbavx_probe(const AVProbeData *p)
     for (int i = 0; i + VX_HEADER_SIZE <= p->buf_size; i += 4) {
         GBAVXStream st;
 
-        if (AV_RL32(p->buf + i) != MKTAG('V', 'X', '+', '+'))
+        if (AV_RL32(p->buf + i) != GBA_VX_MAGIC_VXPP &&
+            AV_RL32(p->buf + i) != GBA_VX_MAGIC_VXGB)
             continue;
         parse_header(&st, i, p->buf + i);
         /* The file is longer than the probe buffer, so bound by the header's
@@ -312,7 +315,8 @@ static int gbavx_read_header(AVFormatContext *avctx)
         avio_seek(pb, pos, SEEK_SET);
         if (avio_read(pb, h, VX_HEADER_SIZE) != VX_HEADER_SIZE)
             break;
-        if (AV_RL32(h) != MKTAG('V', 'X', '+', '+')) {
+        if (AV_RL32(h) != GBA_VX_MAGIC_VXPP &&
+            AV_RL32(h) != GBA_VX_MAGIC_VXGB) {
             pos += 4;
             continue;
         }
@@ -323,8 +327,9 @@ static int gbavx_read_header(AVFormatContext *avctx)
         }
 
         av_log(avctx, AV_LOG_VERBOSE,
-               "  [%d] VX++ at 0x%"PRIx64", %ux%u, %u frames, %u Hz\n",
-               idx, pos, st.width, st.height, st.nb_frames, st.sample_rate);
+               "  [%d] %c%c%c%c at 0x%"PRIx64", %ux%u, %u frames, %u Hz\n",
+               idx, st.magic, st.magic >> 8, st.magic >> 16, st.magic >> 24,
+               pos, st.width, st.height, st.nb_frames, st.sample_rate);
 
         if (want >= 0 ? idx == want : (int64_t)st.chapter_off > best_size) {
             best      = pos;
@@ -336,7 +341,7 @@ static int gbavx_read_header(AVFormatContext *avctx)
     }
 
     if (best < 0) {
-        av_log(avctx, AV_LOG_ERROR, "no VX++ stream found in this ROM\n");
+        av_log(avctx, AV_LOG_ERROR, "no VXGB/VX++ stream found in this ROM\n");
         return AVERROR_INVALIDDATA;
     }
     s->st = best_st;
@@ -352,6 +357,11 @@ static int gbavx_read_header(AVFormatContext *avctx)
         vst->codecpar->codec_id   = AV_CODEC_ID_GBA_VX;
         vst->codecpar->width      = best_st.width;
         vst->codecpar->height     = best_st.height;
+        ret = ff_alloc_extradata(vst->codecpar, GBA_VX_EXTRADATA_SIZE);
+        if (ret < 0)
+            return ret;
+        AV_WL32(vst->codecpar->extradata, best_st.magic);
+        AV_WL32(vst->codecpar->extradata + 4, best_st.quantizer);
         s->video_idx = vst->index;
         avpriv_set_pts_info(vst, 64, 1, VX_FRAMES_PER_SECOND);
         vst->avg_frame_rate = (AVRational) { VX_FRAMES_PER_SECOND, 1 };
@@ -541,7 +551,7 @@ static const AVOption gbavx_options[] = {
 };
 
 static const AVClass gbavx_class = {
-    .class_name = "GBA Video (VX++) demuxer",
+    .class_name = "GBA Video (VXGB/VX++) demuxer",
     .item_name  = av_default_item_name,
     .option     = gbavx_options,
     .version    = LIBAVUTIL_VERSION_INT,
@@ -549,7 +559,7 @@ static const AVClass gbavx_class = {
 
 const FFInputFormat ff_gbavx_demuxer = {
     .p.name         = "gbavx",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("ActImagine GBA Video ROM (VX++)"),
+    .p.long_name    = NULL_IF_CONFIG_SMALL("ActImagine GBA Video ROM (VXGB/VX++)"),
     .p.extensions   = "gba",
     .p.priv_class   = &gbavx_class,
     .p.flags        = AVFMT_GENERIC_INDEX,

@@ -1,5 +1,5 @@
 /*
- * ActImagine GBA VX++ packet framing
+ * ActImagine GBA VX packet framing
  * Copyright (c) 2026 the FFmpeg developers
  *
  * This file is part of FFmpeg.
@@ -20,6 +20,16 @@
  * bitstream order. All header fields are little-endian. */
 #define GBA_VX_PACKET_MAGIC MKTAG('G', 'V', 'X', '1')
 #define GBA_VX_PACKET_HEADER_SIZE 16
+
+/* The demuxer preserves the source revision and its stream quantizer. */
+#define GBA_VX_EXTRADATA_SIZE 8
+#define GBA_VX_MAGIC_VXPP MKTAG('V', 'X', '+', '+')
+#define GBA_VX_MAGIC_VXGB MKTAG('V', 'X', 'G', 'B')
+
+/* Extradata layout:
+ *   +0  u32 source magic ('VX++' or 'VXGB')
+ *   +4  u32 stream quantizer
+ */
 
 /* Header layout:
  *   +0  u32 magic
