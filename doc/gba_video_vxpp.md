@@ -1572,3 +1572,49 @@ frame 9 shows no inter modes at all — so this is not an inter-prediction or re
 
 The striping above; how the three reference frames rotate between frames; and chroma output (the
 driver writes luma-only PGMs, though chroma is reconstructed).
+
+## 21. Motion vector prediction and the reference ring
+
+The first decoded video was blocky, and reference-frame rotation was only part of it.
+
+### The predicted vector was never being applied
+
+Modes 0/8/10 carry no `se(v)` because they use the vector *predicted from neighbours*, and 3/9/11
+carry a delta to that prediction. The first driver did neither: it read `se` as an absolute vector,
+so those modes copied with (0,0) and the delta modes used the delta alone.
+
+The three neighbours are **left (`-2`), above (`-0x24`) and above-right (`-0x22`)** — H.264's A, B, C
+over the `0x24` row stride — and the median is the usual `sum - min - max`.
+
+### The context entry is an arithmetic sum, not a bitfield
+
+`add fp, fp, ip, lsl #8` packs the vector as `mv_x + (mv_y << 8)`, so a **negative `mv_x` borrows from
+the high byte**. The decoder undoes this when reading a neighbour: it takes the high byte with `asr #8`,
+sign-extends the low byte, and then adds one back to y when x is negative (`addlt r5, r5, #1`). Packing
+with an OR instead of a sum is wrong for every negative horizontal vector.
+
+Mode 5 is the exception: its two `se(v)` are an absolute vector, not a delta, and it never writes the
+context back.
+
+### The reference frames are a four-buffer ring
+
+At `0x03006d30` the frame driver computes `n & 3`, `(n-1) & 3` and `(n-2) & 3` from a counter it bumps
+once per frame, and indexes a four-entry table of buffers:
+
+    reference 0 = buffer[n & 3]        the previous frame
+    reference 1 = buffer[(n-1) & 3]    two frames back
+    reference 2 = buffer[(n-2) & 3]    three frames back
+
+So the three references are simply the last three decoded frames, and modes 0/3, 8/9 and 10/11 select
+between them.
+
+### Correction to §19: the context base is `ctx + 0xec`
+
+The frame driver passes `ctx + 0xbc` to the macroblock loop, but `FUN_03000520` re-bases it by
+`4 + 0x2c` before the predictors see it, so `r0 = ctx + 0xec`. The reference bases are therefore at
+`ctx+0xcc`..`ctx+0xe0`, not `ctx+0x9c`..`ctx+0xb0`.
+
+The check that settles it: the driver stores zero to `ctx+0xec` and `ctx+0xf0` immediately before the
+loop, and those are the macroblock's luma and chroma offsets, which must start at zero. Only with a
+base of `0xec` do all twelve fields line up with stores the driver actually makes — with `0xbc` the
+reference bases land on addresses nothing ever writes.
