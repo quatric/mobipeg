@@ -205,6 +205,7 @@ extern const FFCodec ff_mobiclip_decoder;
 extern const FFCodec ff_fastvideo_decoder;
 extern const FFCodec ff_fastvideo_encoder;
 extern const FFCodec ff_ads_gba_decoder;
+extern const FFCodec ff_gba_vx_decoder;
 extern const FFCodec ff_odh_decoder;
 extern const FFCodec ff_odh_encoder;
 extern const FFCodec ff_ads_gba_audio_decoder;
