@@ -5,12 +5,11 @@
  * Retail-faithful 3DS MOFLEX writer.  The byte grammar is reverse-engineered
  * from retail moflex (e.g. ESJ_MD4 boss) by instrumenting the demuxer:
  *
- *   - The stream is a sequence of variable-length blocks split at an
- *     m->block_size-byte threshold: a frame that would overflow the
- *     threshold is split (endframe=0, no terminator) and continues in the
- *     next block, otherwise the block ends with a single 0x00 terminator.
- *     No block — including retail's nominal 4096-byte ones — is zero-padded
- *     to a fixed boundary; that was a prior misreading of the format.
+ *   - The stream is a sequence of m->block_size-byte blocks (retail uses
+ *     4096).  A block fills to exactly block_size bytes, then the trailing
+ *     frame is split (endframe=0, no terminator) and continues in the next
+ *     block.  A block that runs out of data ends early with a single 0x00
+ *     terminator and is zero-padded out to the block_size boundary.
  *
  *   - Each block begins (after an optional 4C32 sync header) with one flags
  *     byte = (counter<<2)|1.  bit0=1 (VariablePacketSize), bit1=0.  The 6-bit
@@ -49,11 +48,11 @@
 #include "mo_audioenc.h"
 
 /* Block size is carried in the 4C32 sync header as BE16(block_size - 1), so it is
- * per-file rather than a constant.  It is only a split threshold now (blocks are
- * always VariablePacketSize, never padded) — retail 3DS titles nominally use 4096,
- * the Mobiclip 3DS SDK encoder emits 2048.  Default to the SDK value so our output
- * matches SDK references byte-for-byte; -mo_block 4096 reproduces the retail split. */
-#define MOFLEX_BLOCK_DEFAULT 2048
+ * per-file rather than a constant.  Every block (including the final one) is
+ * zero-padded out to this boundary, matching retail's fixed-size framing;
+ * -mo_block lets it be overridden (e.g. 2048 to match the 3DS SDK encoder's
+ * output byte-for-byte) but defaults to the retail value. */
+#define MOFLEX_BLOCK_DEFAULT 4096
 #define SEEK_ENTRY_SZ  24
 #define SYNC_INTERVAL  1000000   /* µs between sync points (~1/sec)        */
 
@@ -340,27 +339,27 @@ static int open_block(AVFormatContext *s, int64_t pts, int frame_start)
                 m->next_sync_us += SYNC_INTERVAL;
         }
     }
-    avio_w8(m->dyn, (m->counter << 2) | 1);   /* flags byte; bit0=1 = VariablePacketSize.
-        Retail files are NOT padded to fixed block_size boundaries — every block is
-        variable-size and terminated by a single 0x00, same as the final block. */
+    avio_w8(m->dyn, m->counter << 2);   /* flags byte; bit0=0 = fixed-size (retail) */
     m->block_start = off;
     return 0;
 }
 
 /* Emit one logical frame (one EP packet) as one or more chunks, splitting at
- * m->block_size-byte thresholds with endframe=0 on partial chunks.
+ * m->block_size-byte block boundaries with endframe=0 on partial chunks.
  *
  * final_ef controls the endframe bit on the truly last chunk. */
 
-/* Write the 0x00 EP terminator and close the open block.  Every block is
- * VariablePacketSize (flags bit0=1, set in open_block): the demuxer stops
- * reading at this terminator and resumes right after it — no padding to
- * m->block_size is written or needed. */
+/* Write 0x00 terminator and zero-pad the open block to m->block_size bytes.
+ * With fixed-size blocks (bit0=0) the demuxer seeks to pos+size after every
+ * block, so the padding bytes are simply skipped. */
 static void close_block_m(MOFLEXMuxContext *m)
 {
     if (m->block_start < 0)
         return;
     avio_w8(m->dyn, 0x00);   /* EP terminator */
+    int64_t boundary = m->block_start + m->block_size;
+    while (avio_tell(m->dyn) < boundary)
+        avio_w8(m->dyn, 0x00);
     m->block_start = -1;
 }
 
@@ -416,7 +415,7 @@ static int emit_frame(AVFormatContext *s, int si, const uint8_t *data, int size,
             if (exactly_filled && payload > 0)
                 m->block_start = -1;   /* block exactly full, no terminator */
             else
-                close_block_m(m);      /* terminator, no padding */
+                close_block_m(m);      /* terminator + zero-pad to m->block_size */
         } else {
             /* Not enough room for even a minimal chunk. */
             close_block_m(m);
@@ -634,7 +633,7 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
             int64_t bs = avio_tell(pb);   /* block starts at the sync header */
             if (bs == 0)
                 write_sync_header(s, pb, 1);
-            avio_w8(pb, (counter << 2) | 1);   /* bit0=1 = VariablePacketSize, no padding */
+            avio_w8(pb, counter << 2);   /* bit0=0 = fixed-size (retail) */
             block_start = bs;
         }
         int64_t cur   = avio_tell(pb);
@@ -661,16 +660,20 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
                 block_start = -1;
             } else {
                 avio_w8(pb, 0x00);
+                while (avio_tell(pb) < block_start + m->block_size) avio_w8(pb, 0x00);
                 block_start = -1;
             }
         } else {
             avio_w8(pb, 0x00);
+            while (avio_tell(pb) < block_start + m->block_size) avio_w8(pb, 0x00);
             block_start = -1;
         }
     }
-    /* Close the final block: single 0x00 terminator, no padding. */
-    if (block_start >= 0)
+    /* Terminate and pad the final block. */
+    if (block_start >= 0) {
         avio_w8(pb, 0x00);
+        while (avio_tell(pb) < block_start + m->block_size) avio_w8(pb, 0x00);
+    }
     return 0;
 }
 
@@ -850,9 +853,10 @@ static const AVOption moflex_options[] = {
       OFFSET(mo_layout), AV_OPT_TYPE_INT, {.i64 = 6}, 0, 255, ENC },
     { "mo_layout2", "video 1 ImageLayout (only used with a 2nd video stream)", OFFSET(mo_layout2),
       AV_OPT_TYPE_INT, {.i64 = 6}, 0, 255, ENC },
-    /* Written to the 4C32 sync header as BE16(block_size-1) and used as the
-     * split threshold for every block (no padding).  SDK = 2048, retail 3DS = 4096. */
-    { "mo_block",   "block split threshold in bytes (2048 = 3DS SDK, 4096 = retail)", OFFSET(block_size),
+    /* Written to the 4C32 sync header as BE16(block_size-1); every block is
+     * zero-padded out to this size.  Retail 3DS = 4096 (default); the 3DS SDK
+     * encoder emits 2048-byte blocks instead. */
+    { "mo_block",   "fixed block size in bytes, zero-padded (4096 = retail, 2048 = 3DS SDK)", OFFSET(block_size),
       AV_OPT_TYPE_INT, {.i64 = MOFLEX_BLOCK_DEFAULT}, 512, 65536, ENC },
     /* 3 = MoLiveStreamVideoWithLayout (retail; hardware fast path), 1 = plain
      * video descriptor (what the 3DS SDK encoder writes).  Type 1 is reported
