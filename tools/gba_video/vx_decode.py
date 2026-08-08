@@ -32,6 +32,13 @@ SLACK = 160
 MARGIN = SLACK * STRIDE
 GREY = 0x80
 
+# Four frame buffers in a ring (0x03006d30): reference 0 is buffer[n & 3],
+# reference 1 buffer[(n-1) & 3] and reference 2 buffer[(n-2) & 3], with n
+# incremented once per frame. So the three references are simply the last three
+# decoded frames, most recent first.
+REF_OF_MODE = {0: 0, 3: 0, 8: 1, 9: 1, 10: 2, 11: 2}
+REF_DEPTH = 3
+
 
 class Frame:
     """Luma and interleaved-chroma planes with the decoder's 0x100 pitch."""
@@ -48,7 +55,7 @@ class Frame:
         return f
 
 
-def _paint(fr, ref, unit, mb_luma, mb_chroma, qp):
+def _paint(fr, refs, unit, mb_luma, mb_chroma, qp, mv_pred, mvctx, mvidx):
     """Paint one leaf of the partition tree."""
     mode = unit["mode"]
     base = mode - 12 if mode >= 12 else mode
@@ -112,14 +119,25 @@ def _paint(fr, ref, unit, mb_luma, mb_chroma, qp):
         if cw and ch and len(se) >= 3:
             R.chroma_midpoint_corrected(fr.chroma, co, cw, ch, se[1:3])
     elif base == 5:
+        # An explicit vector, not a delta: 0x03001854 builds it straight from
+        # its two se(v). It also never writes the context back.
         mv_x, mv_y = (se + [0] * 5)[:2]
         dc = (se + [0] * 5)[2:5]
+        ref = refs[0]
         R.inter_copy_dc(fr.luma, ref.luma, lo, mv_x, mv_y, w, h, dc[0])
         R.inter_copy_chroma(fr.chroma, ref.chroma, co, mv_x, mv_y, w, h)
-    else:                                   # 0, 3, 8, 9, 10, 11 -- plain copy
-        mv_x, mv_y = (se + [0, 0])[:2]
+    else:
+        # 0/8/10 take the predicted vector as-is; 3/9/11 add a delta to it
+        # (0x030015a4's two se(v)). Both then store the result for later
+        # macroblocks to predict from.
+        mv_x, mv_y = mv_pred
+        if len(se) >= 2:
+            mv_x += se[0]
+            mv_y += se[1]
+        ref = refs[REF_OF_MODE[base]]
         R.inter_copy(fr.luma, ref.luma, lo, mv_x, mv_y, w, h)
         R.inter_copy_chroma(fr.chroma, ref.chroma, co, mv_x, mv_y, w, h)
+        mvctx[mvidx] = R.pack_mv(mv_x, mv_y)
 
     if mode >= 12 and "resid" in unit:
         _residual(fr, unit, lo, co, qp)
@@ -147,18 +165,28 @@ def decode_frames(path, width, height, n_frames, start_bit=0):
     mbs_x, mbs_y = width // 16, height // 16
     # Each seek segment opens with its own quantiser (doc section 13).
     qp, pos = S.read_ue(br, start_bit)
-    ref = Frame(width, height)
+    refs = [Frame(width, height) for _ in range(REF_DEPTH)]
+    # One halfword per macroblock, 18 to a row (stride 0x24), with a border row
+    # above and a border column to the left so the three neighbours always read
+    # an allocated zero at the frame edges.
+    row = R.MV_CONTEXT_STRIDE // 2
     for _ in range(n_frames):
-        fr = ref.copy()
+        fr = refs[0].copy()
+        mvctx = [0] * (row * (mbs_y + 2))
         for mb in range(mbs_x * mbs_y):
             mb_x, mb_y = mb % mbs_x, mb // mbs_x
             ml = mb_y * 16 * STRIDE + mb_x * 16
             mc = mb_y * 8 * STRIDE + mb_x * 16
+            idx = (mb_y + 1) * row + 1 + mb_x
+            mvctx[idx] = 0            # `strh r4,[r8]` with r4 = 0, before the mode
+            pred = R.predict_mv(*[R.unpack_mv(mvctx[idx + d])
+                                  for d in R.MV_NEIGHBOURS])
             pos = S.decode_unit(br, tab, vofs, rofs, pos, S.TOP, 0, None, 0,
-                                lambda u, a=ml, b=mc, f=fr: _paint(f, ref, u, a, b, qp))
+                                lambda u, a=ml, b=mc, f=fr, p=pred, i=idx:
+                                _paint(f, refs, u, a, b, qp, p, mvctx, i))
         pos += 1                                   # inter-frame marker
         yield fr
-        ref = fr
+        refs = [fr] + refs[:REF_DEPTH - 1]
 
 
 def write_pgm(fr, path):
