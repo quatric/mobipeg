@@ -614,7 +614,11 @@ def chroma_midpoint_corrected(buf, off, cw, ch, deltas):
 #   4        midpoint, corrected corners                    3 se
 #   5        motion compensation with DC correction         5 se
 #   6        intra 16x16              7        intra 4x4
+# Four frame buffers in a ring (0x03006d30): reference 0 is buffer[n & 3],
+# reference 1 buffer[(n-1) & 3], reference 2 buffer[(n-2) & 3], with n bumped
+# once per frame -- so the references are just the last three decoded frames.
 INTER_REFS = 3
+REF_RING = 4
 
 
 # ------------------------------------------------------ macroblock loop (0x03000520)
@@ -640,13 +644,34 @@ def predict_mv(a, b, c):
 
 
 def pack_mv(mv_x, mv_y):
-    """The halfword the predictor writes to the context."""
-    return (mv_x & 0xff) | ((mv_y & 0xff) << 8)
+    """The halfword the predictor writes: `add fp, fp, ip, lsl #8`.
+
+    An arithmetic sum, not a bitfield -- so a negative mv_x borrows from the
+    high byte.
+    """
+    return (mv_x + (mv_y << 8)) & 0xffff
 
 
 def unpack_mv(v):
-    x, y = v & 0xff, (v >> 8) & 0xff
-    return x - 256 if x > 127 else x, y - 256 if y > 127 else y
+    """Undo that, including the borrow.
+
+    The ARM reads the entry with ldrsh, takes the high byte with asr #8 and the
+    low byte by sign-extending, then adds one back to y when x is negative
+    (`addlt r5, r5, #1`) -- undoing the borrow the packing sum introduced.
+    """
+    s = v - 0x10000 if v & 0x8000 else v
+    x = s & 0xff
+    if x > 127:
+        x -= 256
+    y = s >> 8
+    if x < 0:
+        y += 1
+    return x, y
+
+
+# The three neighbours the median takes, as halfword offsets from a macroblock's
+# own context entry: left, above, above-right -- H.264's A, B and C.
+MV_NEIGHBOURS = (-1, -MV_CONTEXT_STRIDE // 2, -MV_CONTEXT_STRIDE // 2 + 1)
 
 
 # Per-macroblock the loop advances luma and chroma by 16 bytes each; per row of
@@ -656,28 +681,32 @@ MB_STEP = 16
 MB_ROW_STEP_LUMA = 0x1000
 MB_ROW_STEP_CHROMA = 0x800
 
-# The frame driver calls the macroblock loop with r0 = ctx + 0xbc (0x03006dc4),
-# which pins every [r0,#N] the predictors use to a concrete context field:
+# The frame driver passes ctx + 0xbc, but FUN_03000520 re-bases it by 4 + 0x2c,
+# so the predictors see r0 = ctx + 0xec. That pins every [r0,#N] to a field the
+# driver at 0x03006d90 demonstrably writes:
 #
-#   [r0,#-0x20] ctx+0x9c  reference 0, luma base
-#   [r0,#-0x1c] ctx+0xa0  reference 0, chroma base
-#   [r0,#-0x18] ctx+0xa4  reference 1, luma base
-#   [r0,#-0x14] ctx+0xa8  reference 1, chroma base
-#   [r0,#-0x10] ctx+0xac  reference 2, luma base
-#   [r0,#-0x0c] ctx+0xb0  reference 2, chroma base
-#   [r0,#-0x08] ctx+0xb4  current frame, luma base
-#   [r0,#-0x04] ctx+0xb8  current frame, chroma base
-#   [r0,# 0x00] ctx+0xbc  luma byte offset of the current macroblock
-#   [r0,# 0x04] ctx+0xc0  chroma byte offset of the current macroblock
-#   [r0,# 0x08] ctx+0xc4  motion-vector context pointer
-#   [r0,# 0x18] ctx+0xd4  frame width in pixels
+#   [r0,#-0x20] ctx+0xcc  reference 0, luma base
+#   [r0,#-0x1c] ctx+0xd0  reference 0, chroma base
+#   [r0,#-0x18] ctx+0xd4  reference 1, luma base
+#   [r0,#-0x14] ctx+0xd8  reference 1, chroma base
+#   [r0,#-0x10] ctx+0xdc  reference 2, luma base
+#   [r0,#-0x0c] ctx+0xe0  reference 2, chroma base
+#   [r0,#-0x08] ctx+0xe4  current frame, luma base
+#   [r0,#-0x04] ctx+0xe8  current frame, chroma base
+#   [r0,# 0x00] ctx+0xec  luma byte offset of the current macroblock
+#   [r0,# 0x04] ctx+0xf0  chroma byte offset of the current macroblock
+#   [r0,# 0x08] ctx+0xf4  motion-vector context pointer
+#   [r0,# 0x18] ctx+0x104 frame width in pixels
+#
+# The two offsets are stored as zero right before the loop runs, which is the
+# check that fixes the base: only at 0xec/0xf0 do the driver's stores line up.
 #
 # The two offsets at +0x00/+0x04 are what every predictor adds to its base, and
 # what the intra modes test for edge availability -- so a macroblock's position
 # and its neighbour availability are the same number.
-CTX_BASE = 0xbc
+CTX_BASE = 0xec
 CTX_FIELDS = {
-    "ref0_luma": -0x20, "ref0_chroma": -0x1c,
+    "ref0_luma": -0x20, "ref0_chroma": -0x1c,   # relative to ctx + CTX_BASE
     "ref1_luma": -0x18, "ref1_chroma": -0x14,
     "ref2_luma": -0x10, "ref2_chroma": -0x0c,
     "cur_luma": -0x08, "cur_chroma": -0x04,
