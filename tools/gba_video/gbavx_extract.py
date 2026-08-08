@@ -27,6 +27,25 @@ import sys
 MAGIC = b'VX++'
 HEADER_SIZE = 0x38
 
+# The coefficient codebook and the decoder itself both live in cartridge ROM and
+# are copied to RAM at boot, so a parser has to lift them alongside the streams.
+# Offsets are fixed for this cart; see doc/gba_video_vxpp.md section 15.
+#
+# The codebook is one contiguous blob: 4096 LE uint16 VLC cells, then the two
+# escape tables at +0x2000 and +0x2080, matching the runtime layout the decoder
+# indexes off its base pointer. Note 0x9ae4, *not* the 0xa000 that sections 3-5
+# assumed -- that address is 0x51c too far and yields a different table.
+#   name -> (rom offset, length)
+CODEBOOK = 0x9ae4
+TABLES = {
+    'vlc_rom_full4096.bin':   (CODEBOOK, 8192),           # 4096 LE uint16 cells
+    'value_offset_table.bin': (CODEBOOK + 0x2000, 128),   # escape: value offsets
+    'run_offset_table.bin':   (CODEBOOK + 0x2080, 128),   # escape: run offsets
+    # The decoder runs from IWRAM; this is the image copied there at boot, so
+    # ROM 0xbcc8 == IWRAM 0x03000000. Every address in the doc indexes into it.
+    'iwram.bin':              (0xbcc8, 0x8000),
+}
+
 # The audio region opens with the trained codebooks: 3*64*8 int16, then
 # 8 uint16 scale modifiers, 8 int32 lpc bases and one uint32 initial scale.
 # Same block, same size, as the DS files - see libavcodec/vx_audio.c.
@@ -142,6 +161,12 @@ def main():
         with open(base + '.audio', 'wb') as f:
             f.write(rom[s.off + s.audio_off:s.off + s.chapter_off])
         print('     -> %s.{hdr.txt,video,audio}' % base)
+
+    if args.outdir:
+        for name, (off, n) in sorted(TABLES.items()):
+            with open(os.path.join(args.outdir, name), 'wb') as f:
+                f.write(rom[off:off + n])
+        print('[tables] -> %s' % ', '.join(sorted(TABLES)))
 
     return 0
 
