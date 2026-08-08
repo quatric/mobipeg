@@ -2038,6 +2038,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .mime_types= MT("image/x-odh"),
     },
     {
+        .id        = AV_CODEC_ID_GBA_VX,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "gba_vx",
+        .long_name = NULL_IF_CONFIG_SMALL("ActImagine GBA VX++ Video"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "pcm_s16le",
