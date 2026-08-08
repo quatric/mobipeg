@@ -1376,3 +1376,73 @@ one bit accepts it, otherwise three bits carry a remainder with the predicted va
 5** — four block columns plus one border column preset to `9`, the "unavailable" marker that maps to
 DC. After the last block the loop reads one `ue(v)` for the chroma mode and dispatches through the
 chroma table, which is why the grammar shows a `ue` there.
+
+## 18. Inter prediction: full-pel, three reference frames, and two odd modes
+
+### There is no sub-pel interpolation
+
+§14 listed "half-pel interpolation loops around `0x03001704`/`0x03002a8c`" as work to do. That was a
+misreading. Motion vectors are **full-pel**, and the four-entry table at `0x03001568` — indexed by
+`fp & 3`, where `fp` is the luma source *byte offset* — selects between four **`ldm` alignment
+fixups**, not filter phases.
+
+Variant 1 (`0x03001650`) makes it plain: it loads from one byte *below* the source, pulls 17 bytes,
+and shifts the whole window right by 8 bits, reassembling exactly the bytes at the unaligned address.
+Variants 2 and 3 do the same at halfword and 3-byte offsets. `0x03001704` is inside variant 2.
+
+The variants also confirm each other. Chroma is misaligned by 2 exactly when `mv_x & 3 >= 2`, so
+variants 0 and 1 can copy chroma with a plain `ldm` while 2 and 3 must fix it up — and variant 2's
+chroma loop duly switches to `ldrh` with `lsl #16`/`lsr #16`. That was predicted before reading it.
+
+Since all four produce identical pixels, a byte-wise copy reproduces them; the split is an ARM
+addressing constraint with no bearing on the output.
+
+The vector maps to the two planes as `luma = mv_x + mv_y*0x100` and
+`chroma = (mv_x & ~1) + ((mv_y & ~1) >> 1)*0x100`. Chroma halves the vector, but since its samples are
+two bytes the x term reappears as `mv_x` rounded down to even — `bic #1` on a two's-complement value.
+
+### Three reference frames
+
+The pointers modes 0/8/10 and 3/9/11 select between are not motion-vector candidates but **reference
+frame bases**, in luma/chroma pairs: `[r0,#-0x20]/[r0,#-0x1c]` for reference 0, `-0x18`/`-0x14` for
+reference 1, `-0x10`/`-0x0c` for reference 2. Modes 0/8/10 copy from reference 0/1/2 using the vector
+the dispatcher predicted from neighbours; modes 3/9/11 add a two-`se(v)` delta to it.
+
+### Mode 4 is not inter at all, and mode 5 corrects brightness
+
+Two modes turn out to be neither plain copies nor plain intra, and the grammar's `se(v)` counts
+confirm both readings exactly:
+
+- **Mode 4 (3 `se(v)`)** — the §16 midpoint subdivision with a *coded* corner. Rather than deriving
+  the bottom-right corner from neighbours alone it uses
+  `((above_right + below_left + 1) >> 1) + 2*se(v)`, then runs the same fill (`0x03001a68`) mode 3
+  uses. Chroma gets its own correction per component via `0x03001a3c`, which calls `0x030019e0` — and
+  `0x030019e0` is exactly entry [10] of the chroma midpoint table at `0x03000e18`, an independent
+  consistency check. One luma plus two chroma corrections is the 3 `se(v)`.
+
+- **Mode 5 (5 `se(v)`)** — motion compensation with a **DC correction**. Two `se(v)` give an explicit
+  vector, then three more carry one offset per component, applied as `clip(pixel + 2*delta)`
+  (`adds sb, sb, r8, lsl #1`, `movlt #0`, `cmp #0xff`, `movgt #0xff`). It is a brightness/fade mode.
+
+### The 16×16 mode space, complete
+
+| mode | meaning | `se(v)` |
+|------|---------|---------|
+| 0, 8, 10 | copy from reference 0/1/2, predicted MV | 0 |
+| 3, 9, 11 | same, plus an MV delta | 2 |
+| 1 | split into two 16×8 (`0x03002184`) | 0 |
+| 2 | split into two 8×16 (`0x030030f4`) | 0 |
+| 4 | midpoint, corrected corners | 3 |
+| 5 | motion compensation, DC corrected | 5 |
+| 6 | intra 16×16 | 0 |
+| 7 | intra 4×4 | 0 |
+| 12–23 | modes 0–11 with a residual appended | as above |
+
+Every count matches `vx_grammar.py`, which was derived independently from the bitstream. The
+prediction path is now fully ported.
+
+### Still open
+
+The dispatcher's neighbour prediction of the motion vector before modes 0/3/8/9/10/11 consume it; how
+the three reference frames are rotated as frames are decoded; the five unread reconstruct variants;
+and the integration that walks `vx_sim`'s symbols into a frame buffer.
