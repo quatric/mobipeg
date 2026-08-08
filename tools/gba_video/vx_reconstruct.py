@@ -236,7 +236,28 @@ def _midpoint_fill(buf, off, w, h, bps=1, corner=None):
     which is why 16x16 recurses into 8x8 (both vertical) and 16x8 into 8x4
     (both horizontal). Verified against all nine size variants.
     """
-    if w < 2 or h < 2:
+    if w <= 1 and h <= 1:
+        return
+    # A block that has become one pixel thick keeps bisecting along its long
+    # side: the 4x2 leaf at 0x0300479c fills its last four pixels inline as
+    # ((-1,y) + (1,y)) >> 1, which is this same step on 2x1 children. Halving
+    # both sides only terminates cleanly on squares, which is why every
+    # non-square size was left half unwritten.
+    if h == 1:
+        sw = w // 2
+        mid = (buf[off - bps] + (corner if corner is not None
+                                 else buf[off + (w - 1) * bps])) >> 1
+        buf[off + (sw - 1) * bps] = mid & 0xff
+        _midpoint_fill(buf, off, sw, 1, bps, mid)
+        _midpoint_fill(buf, off + sw * bps, w - sw, 1, bps, corner)
+        return
+    if w == 1:
+        sh = h // 2
+        mid = (buf[off - STRIDE] + (corner if corner is not None
+                                    else buf[off + (h - 1) * STRIDE])) >> 1
+        buf[off + (sh - 1) * STRIDE] = mid & 0xff
+        _midpoint_fill(buf, off, 1, sh, bps, mid)
+        _midpoint_fill(buf, off + sh * STRIDE, 1, h - sh, bps, corner)
         return
     sw, sh = w // 2, h // 2
     bot_row = (h - 1) * STRIDE
@@ -248,16 +269,16 @@ def _midpoint_fill(buf, off, w, h, bps=1, corner=None):
         corner = buf[off + bot_row + (w - 1) * bps]
 
     bot = (buf[off + bot_row - bps] + corner) >> 1               # (-1, h-1)
-    buf[off + bot_row + (sw - 1) * bps] = bot                    # (sw-1, h-1)
+    buf[off + bot_row + (sw - 1) * bps] = bot & 0xff             # (sw-1, h-1)
 
     right = (buf[off + (w - 1) * bps - STRIDE] + corner) >> 1    # (w-1, -1)
-    buf[off + mid_row + (w - 1) * bps] = right                   # (w-1, sh-1)
+    buf[off + mid_row + (w - 1) * bps] = right & 0xff            # (w-1, sh-1)
 
     if not ((w.bit_length() + h.bit_length()) & 1):
         centre = (bot + buf[off + (sw - 1) * bps - STRIDE]) >> 1  # (sw-1, -1)
     else:
         centre = (right + buf[off + mid_row - bps]) >> 1          # (-1, sh-1)
-    buf[off + mid_row + (sw - 1) * bps] = centre
+    buf[off + mid_row + (sw - 1) * bps] = centre & 0xff
 
     _midpoint_fill(buf, off, sw, sh, bps)
     _midpoint_fill(buf, off + sw * bps, sw, sh, bps)
