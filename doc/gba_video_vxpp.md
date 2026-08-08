@@ -1043,7 +1043,7 @@ emulator — two questions this document spent sessions inferring.
 ### Frame geometry, confirmed
 
 ```
-[0] 0x00020200  240x112  34874 frames  12.19 fps  16384 Hz  20 chapters
+[0] 0x00020200  240x112  34874 frames  7.00 fps  16384 Hz  20 chapters
 ```
 
 **240×112** — exactly 15×7 macroblocks. The `MB_PER_FRAME = 105` inferred in §8 from the period of a
@@ -1460,7 +1460,7 @@ index selects into one of *two* three-entry tables:
 Variant 0 confirms §14's transform port instruction for instruction: `+0x20` on `d0` before the row
 pass, the same butterfly, `asr #6`, then the clamp. Variant 1 differs only in writing bytes 0, 2, 4, 6
 and reassembling 1, 3, 5, 7 untouched — the Cb half of an interleaved pair, which is the §17 layout
-showing up again. Variant 3 has no butterfly at all: it adds one value, `dc asr #6`, to every pixel,
+showing up again. Variant 3 has no butterfly at all: it adds one value, `(dc + 32) asr #6`, to every pixel,
 which is what a block carrying nothing but a DC coefficient needs.
 
 ### The coded-block-pattern is six bits over an 8×8 quadrant
@@ -1618,3 +1618,105 @@ The check that settles it: the driver stores zero to `ctx+0xec` and `ctx+0xf0` i
 loop, and those are the macroblock's luma and chroma offsets, which must start at zero. Only with a
 base of `0xec` do all twelve fields line up with stores the driver actually makes — with `0xbc` the
 reference bases land on addresses nothing ever writes.
+
+## 22. Residual quadrants follow the coded leaf's aspect
+
+The first reconstruction driver placed residual groups with a hard-coded two-quadrant row:
+`qx=(q%2)*8, qy=(q//2)*8`. That is right for 16×8 and 16×16 leaves, but wrong for 8×16: its two
+groups are stacked vertically, not side by side. The error affected both luma and chroma and is one
+source of the block damage in busy frames.
+
+The loop at `0x03005650` makes the geometry unambiguous. Its inner loop advances both plane pointers
+by `+8` and counts down the coded width by 8. The outer loop advances luma by `+0x800`, chroma by
+`+0x400`, and counts down the height by 8. Therefore groups are raster ordered with
+`groups_per_row = leaf_width / 8`; the chroma vertical step is half luma's because of 4:2:0.
+
+`vx_decode.py` now derives the group position from `unit["size"]`. Focused tests cover the distinct
+16×8, 8×16 and 16×16 layouts, and the parser remains exact over all four streams: **353/353** seek
+segments.
+
+## 23. Hardware-exact reconstruction through busy frames and seek boundaries
+
+Comparing packed NV12 planes directly against mGBA frame-buffer dumps exposed four independent driver
+errors. None required changing the bitstream grammar or inverse transform:
+
+- Mode 5 read five `se(v)` values but applied only the luma correction. `0x03001854` and
+  `0x0300192c` apply the fourth and fifth values independently to Cb and Cr as
+  `clip(sample + 2*delta)`.
+- Coded split modes 13 and 14 returned after their children, skipping the residual attached to the
+  parent node. Plain splits still stop after prediction; coded splits now run the common residual path.
+- Whole-block luma DC at `0x03000a54` does not take one weighted mean of all available edge pixels.
+  It rounds the top mean and left mean separately, then computes `(top + left + 1) >> 1`. The
+  distinction matters for rectangular blocks; the first observable error was a 16×8 block in frame 8.
+- Intra-4×4 DC tests edge availability using the plane-relative frame offset. The Python safety margin
+  had been included in that test, falsely making the top edge available. The first affected block was
+  at `(8,0)` in frame 9.
+
+The reconstruction driver also consumes extracted header metadata. It resets to every seek entry's
+exact video bit and reads that segment's opening quantiser, and it rotates four contiguous physical
+frame slots with the hardware's `0xa000`-byte luma and `0x5000`-byte chroma allocations.
+
+Fresh mGBA captures at frames 0, 1, 5, 7, 8, 9, 10, 100 and 325 of stream 0 now compare
+**byte-for-byte exact in both luma and chroma**. Frame 100 exercises the formerly corrupted busy
+material; frame 325 is the first frame at a seek/QP boundary. Focused unit tests retain each corrected
+geometry or rounding case, while `vx_validate.py` remains the all-stream grammar gate.
+
+## 24. Audio is the existing VX LPC codec in a raw AFrame stream
+
+The `.audio` region needs no new codec reverse engineering. Its first 3124 bytes have exactly the
+`libavcodec/vx_audio.c` layout: three 64×8 signed LPC codebooks, eight scale modifiers, eight LPC base
+coefficients and an initial scale. After that block is a headerless sequence of little-endian AFrames.
+Each AFrame starts with two 16-bit words; bits 13–12 of word 2 select 8, 5, 4 or 3 following pulse
+words, exactly as the DS-era decoder does. The first word at stream 0 byte 3124 is `0xfe47`, whose
+`prev_frame_offset` is `0x7f` (intra) and whose remaining fields are all valid under that grammar.
+
+Every nonterminal audio seek offset starts with one and only one intra AFrame. Walking the variable
+sizes from each offset to the next lands exactly on all **353/353** seek boundaries:
+
+```
+stream0: 637707 AFrames -> 180/180 seek segments exact
+stream1: 626494 AFrames -> 171/171 seek segments exact
+stream2:  10905 AFrames ->   1/1 seek segments exact
+stream3:  12943 AFrames ->   1/1 seek segments exact
+```
+
+This also corrects the frame-rate interpretation in §12. The header's `0x30c3` timing field is **not**
+Q10 frames/second. There are almost exactly `128/7` AFrames per video frame. At seven video frames per
+second that is 128 AFrames/second; each AFrame reconstructs 128 mono samples, giving the declared
+16384 Hz exactly. The two large streams are separate full movies of about 83 and 82 minutes, not
+47-minute halves. The GBA setup at `0x0300724c` routes Direct Sound FIFO A to both speakers, confirming
+mono output.
+
+`tools/gba_video/vx_audio_decode.py` ports the already-established fixed-point decoder math and writes
+mono S16 WAV. `vx_audio_validate.py` is the framing gate. As a complete smoke test, stream 2 decodes to
+1,395,840 samples (85.195 seconds), matching 595 video frames at 7 fps plus normal codec padding.
+
+The Python port explicitly wraps the fixed-point intermediates to signed 32-bit values, matching the
+C/ARM arithmetic rather than Python's unbounded integers. Its complete stream-2 PCM is byte-identical
+to `libavcodec/vx_audio.c`: both produce 2,791,680 bytes with SHA-256
+`b4c973965726440e038274804924d068e12028d7a5da29d6d8961c1e0f64edf6`.
+
+Native demux and audio are integrated. `libavformat/gbavx.c` scans the ROM, selects a movie with
+`-resource`, passes the 3124-byte codebook to the existing `vx_audio` decoder and packets whole raw
+AFrames. It builds an exact sample index from the cartridge seek table by counting AFrames between
+the recorded byte offsets; every indexed position is also checked for an intra AFrame. Decoder flush
+clears all history, so a seek starts in the same state as a fresh decoder. Indexed `-ss` output was
+compared byte-for-byte with continuous decoding at stream 0 seconds 300, 1200 and 4000 and stream 1
+second 1000; every one-second window matched exactly.
+
+The demuxer also exposes the video as `gba_vx`, one packet per seek-table interval. These are the only
+honest packet boundaries: each packet may contain hundreds of frames, since individual frame sizes are
+not recorded. `libavcodec/gba_vx.h` defines a 16-byte prefix carrying the leading bit skip, valid bit
+count and frame count. The payload is byte-swapped per little-endian halfword into ordinary MSB-first
+bit order, so the future decoder can use FFmpeg's normal bit reader after the recorded skip. Starting
+the Python decoder with fresh state at seek frames 325 and 612 reproduced the continuous decode
+byte-for-byte for the first five frames at each boundary, confirming that these packets are genuine
+independently decodable key segments. Dumping and independently parsing the native packets confirms
+their prefix fields and byte extents against all **353/353** container intervals. The native `gba_vx`
+decoder itself remains to be ported. `tools/gba_video/vx_native_packet_validate.py` is the repeatable
+native packet gate.
+
+```
+./ffmpeg -resource 2 -i "$ROM" -map 0:a:0 -c:a pcm_s16le stream02-native.wav
+./ffmpeg -ss 1200 -resource 0 -i "$ROM" -map 0:a:0 -t 1 seek.wav
+```
