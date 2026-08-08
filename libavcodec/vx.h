@@ -47,4 +47,11 @@ int ff_vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
                                   int width, int height, const uint16_t qtab[3],
                                   VXPic *dst, const VXPic refs[3]);
 
+/* Decode one original GBA VXGB frame. It uses the GBA mode numbering, coded
+ * block permutation and standard H.264 scan, and does not align between
+ * frames because a seek packet contains one continuous multi-frame stream. */
+int ff_vx_decode_gba_vframe(AVCodecContext *avctx, GetBitContext *gb,
+                            int width, int height, const uint16_t qtab[3],
+                            VXPic *dst, const VXPic refs[3]);
+
 #endif /* AVCODEC_VX_H */

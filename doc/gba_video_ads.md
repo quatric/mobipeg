@@ -36,7 +36,7 @@ Retail carts encountered so far split into four lineages or revisions:
 |---------|------|-------|
 | **ADS** | 32 MB | Majesco in-house stack using LZMA — this document |
 | **Hydrogen** | 32 MB | Majesco derivative using Inflate — this document |
-| **VXGB** | 64 MB | Earlier ActImagine GBA revision — Python reference decode implemented; native/hardware check pending |
+| **VXGB** | 64 MB | Earlier ActImagine GBA revision — native, hardware-exact decoder |
 | **VX++** | 64 MB | ActImagine codec and GBA-specific container — see `gba_video_vxpp.md` |
 
 `VXDS` belongs to the later DS container and is not a reliable classifier for

@@ -93,21 +93,41 @@ static const uint16_t quant4x4_tab[6][3] = {
     { 0x12, 0x17, 0x1D },
 };
 
-static const uint8_t residu_mask_new_tab[32] = {
+static const uint8_t vxds_residu_mask_tab[32] = {
     0x00, 0x08, 0x04, 0x02, 0x01, 0x1F, 0x0F, 0x0A,
     0x05, 0x0C, 0x03, 0x10, 0x0E, 0x0D, 0x0B, 0x07,
     0x09, 0x06, 0x1E, 0x1B, 0x1A, 0x1D, 0x17, 0x15,
     0x18, 0x12, 0x11, 0x1C, 0x14, 0x13, 0x16, 0x19,
 };
 
+static const uint8_t vxgb_residu_mask_tab[32] = {
+    0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x03, 0x05,
+    0x0A, 0x0C, 0x0F, 0x1F, 0x07, 0x0B, 0x0D, 0x0E,
+    0x06, 0x09, 0x13, 0x15, 0x1A, 0x1C, 0x11, 0x12,
+    0x14, 0x18, 0x17, 0x1B, 0x1D, 0x1E, 0x16, 0x19,
+};
+
 /* level[i] applies to zigzag position i; zigzag_scan[i] gives the raster
  * (row-major within a 4x4 block) position for that zigzag index. This is
  * the "swapped 2bit" zigzag actimagine uses (not the standard H.264 one). */
-static const uint8_t zigzag_scan[16] = {
+static const uint8_t vxds_zigzag_scan[16] = {
     0*4+0, 1*4+0, 0*4+1, 0*4+2,
     1*4+1, 2*4+0, 3*4+0, 2*4+1,
     1*4+2, 0*4+3, 1*4+3, 2*4+2,
     3*4+1, 3*4+2, 2*4+3, 3*4+3,
+};
+
+/* The original GBA VXGB revision keeps standard H.264 zigzag order. The
+ * shared transform writes its second pass transposed, so transpose the scan
+ * here to make the externally visible coefficient placement standard. */
+static const uint8_t vxgb_zigzag_scan[16] = {
+    0, 4, 1, 2, 5, 8, 12, 9, 6, 3, 7, 10, 13, 14, 11, 15,
+};
+
+/* GBA mode number -> the equivalent VXDS decode_mb case. */
+static const uint8_t vxgb_mode_map[24] = {
+     1,  2,  0,  4,  7,  3, 11, 15,  9,  5, 14,  6,
+    12, 13,  8, 16, 23, 10, 22, 19, 20, 17, 21, 18,
 };
 
 static const int cavlc_suffix_limit[7] = { 0, 3, 6, 12, 24, 48, 0x8000 };
@@ -125,6 +145,10 @@ typedef struct VXDecCtx {
     GetBitContext *gb;
     int width, height;
     const uint16_t *qtab;
+    const uint8_t *residu_mask;
+    const uint8_t *zigzag_scan;
+    const uint8_t *mode_map;
+    int align_frame;
 
     VXPic dst;
     const VXPic *refs[3];
@@ -643,7 +667,8 @@ static void idct_add(VXDecCtx *c, int x, int y, int plane, const int *dctv)
     int step = plane ? 2 : 1;
 
     for (int i = 0; i < 16; i++)
-        dct[zigzag_scan[i]] = dctv[i] * c->qtab[(zigzag_scan[i] & 1) + ((zigzag_scan[i] >> 2) & 1)];
+        dct[c->zigzag_scan[i]] = dctv[i] *
+            c->qtab[(c->zigzag_scan[i] & 1) + ((c->zigzag_scan[i] >> 2) & 1)];
 
     dct[0] += 1 << 5;
 
@@ -769,7 +794,7 @@ static int decode_residu_blocks(VXDecCtx *c, MBlock b)
 
             if (idx < 0 || idx > 0x1F)
                 return AVERROR_INVALIDDATA;
-            mask = residu_mask_new_tab[idx];
+            mask = c->residu_mask[idx];
 
             if (mask & 1) {
                 int nc = (coeff_y_get(c, b.x+x-1, b.y+y) + coeff_y_get(c, b.x+x, b.y+y-1) + 1) / 2;
@@ -834,6 +859,11 @@ static int decode_mb(VXDecCtx *c, MBlock b, MV pred_vec)
 {
     int mode = get_ue_golomb_31(c->gb);
     int ret;
+
+    if (mode < 0 || mode >= 24)
+        return AVERROR_INVALIDDATA;
+    if (c->mode_map)
+        mode = c->mode_map[mode];
 
     switch (mode) {
     case 0: /* v-split, no residu */
@@ -940,9 +970,12 @@ int ff_vx_calc_qtab(int quantizer, uint16_t qtab[3])
     return 0;
 }
 
-int ff_vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
-                                  int width, int height, const uint16_t qtab[3],
-                                  VXPic *dst, const VXPic refs[3])
+static int vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
+                            int width, int height, const uint16_t qtab[3],
+                            VXPic *dst, const VXPic refs[3],
+                            const uint8_t residu_mask[32],
+                            const uint8_t zigzag_scan[16],
+                            const uint8_t mode_map[24], int align_frame)
 {
     VXDecCtx c = { 0 };
     int ret;
@@ -956,6 +989,10 @@ int ff_vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
     c.width = width;
     c.height = height;
     c.qtab = qtab;
+    c.residu_mask = residu_mask;
+    c.zigzag_scan = zigzag_scan;
+    c.mode_map = mode_map;
+    c.align_frame = align_frame;
     c.dst = *dst;
     for (int i = 0; i < 3; i++)
         c.refs[i] = (refs[i].data[0]) ? &refs[i] : NULL;
@@ -991,7 +1028,7 @@ int ff_vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
         }
     }
 
-    {
+    if (c.align_frame) {
         int rem = get_bits_count(gb) & 15;
         if (rem)
             skip_bits(gb, 16 - rem);
@@ -1003,6 +1040,23 @@ end:
     av_freep(&c.coeff_uv);
     av_freep(&c.vectors);
     return ret;
+}
+
+int ff_vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
+                        int width, int height, const uint16_t qtab[3],
+                        VXPic *dst, const VXPic refs[3])
+{
+    return vx_decode_vframe(avctx, gb, width, height, qtab, dst, refs,
+                            vxds_residu_mask_tab, vxds_zigzag_scan, NULL, 1);
+}
+
+int ff_vx_decode_gba_vframe(AVCodecContext *avctx, GetBitContext *gb,
+                            int width, int height, const uint16_t qtab[3],
+                            VXPic *dst, const VXPic refs[3])
+{
+    return vx_decode_vframe(avctx, gb, width, height, qtab, dst, refs,
+                            vxgb_residu_mask_tab, vxgb_zigzag_scan,
+                            vxgb_mode_map, 0);
 }
 
 /* ---- AVCodec wrapper (video output stream) ---- */
