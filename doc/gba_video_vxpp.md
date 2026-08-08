@@ -1520,3 +1520,55 @@ literally the same number, which is why §17's availability trick works.
 Four frame buffers are allocated (the setup loop at `0x03006e40` runs `r7 = 0..3`), matching three
 references plus the frame being decoded. How the four are rotated between frames is the one piece of
 the architecture still unread.
+
+## 20. First reconstructed frames
+
+`tools/gba_video/vx_decode.py` now walks `vx_sim`'s symbols into a frame buffer and writes PGMs. The
+output is **recognisably the DreamWorks logo** — clouds and the crescent moon — so prediction,
+residual and geometry are broadly right.
+
+### Making the parser emit symbols
+
+`decode_unit` gained an optional `sink` and an `off`. The symbols were always being read; the sink
+only stops them being discarded, so bit positions are unchanged — and the four streams still validate
+**353/353 segments exact** after the change.
+
+Block position comes from the split tree. Mode 1 halves the height and mode 2 the width, which pins
+the size of the seven dispatchers that have no whole-block intra mode to check against. The sixteen
+are exactly the 4×4 grid of {2,4,8,16} widths and heights, and the seven without an intra mode are
+exactly those with a side of 2 — below what the intra predictors can address. Each of those seven is
+reached two independent ways and both agree.
+
+### Three bugs the pictures found
+
+- **The quantiser was being ignored.** The driver passed `qp=0` while the segment's opening `ue(v)`
+  gives 34. The container's `quantizer` field is 0, so the whole quantiser comes from the segment.
+- **`strb` truncates, it does not clamp.** Mode 4's corrected corner, `((TR+BL+1)>>1) + 2*se`, has to
+  wrap at 8 bits.
+- **Luma and chroma live in separate planes.** `inter_copy` had been written to do both against one
+  buffer pair, so its chroma pass was overwriting luma. Split into `inter_copy` and
+  `inter_copy_chroma`.
+
+A fourth fix is right but changed nothing visible yet: the midpoint fill takes its corner **in a
+register**, not by reading the byte back, which matters only for mode 4 where the stored byte is
+truncated and the register value is not.
+
+### Open: mode 4 blocks stripe
+
+Frames are correct except for scattered blocks of hard horizontal or vertical banding. Replacing every
+mode-4 block with flat grey removes the striping completely; doing the same for modes 6 or 7 does not.
+So the fault is in the corrected-corner midpoint mode.
+
+What has been checked and is *not* the cause: the zig-zag and dequant (the column transform's load
+offsets pick scan indices 0, 2, 3, 9 for column 0, which map to raster 0, 4, 8, 12 under the ported
+`ZIGZAG`, and its multiplier pattern matches H.264's 10/13/16 assignment); the `se(v)` ordering (luma,
+Cb, Cr, as the handler reads them); and the per-size handlers (`0x03003298` for 8×8 is structurally
+identical to `0x03001ac0` for 16×16, so one generic implementation is right).
+
+Note also that the frame at 240×112 uses only intra modes in its early frames — the mode histogram for
+frame 9 shows no inter modes at all — so this is not an inter-prediction or reference-frame problem.
+
+### Still open
+
+The striping above; how the three reference frames rotate between frames; and chroma output (the
+driver writes luma-only PGMs, though chroma is reconstructed).
