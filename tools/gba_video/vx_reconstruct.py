@@ -17,21 +17,38 @@ been written into the frame buffer.
 STRIDE = 0x100          # frame buffer pitch, luma and chroma alike
 CHROMA_BPS = 2          # Cb and Cr interleaved, two bytes per chroma sample
 
-# Block size handled by each dispatcher, from the r4/r5 immediates its mode-6
-# handler passes to the intra predictor at FUN_03000884.
+# Block size handled by each dispatcher. The nine with a whole-block intra mode
+# give their size directly, as the r4/r5 immediates their mode-6 handler passes
+# to the intra predictor at FUN_03000884. The other seven follow from the split
+# tree: mode 1 halves the height, mode 2 halves the width, so every dispatcher's
+# children pin its size. Each of those seven is reached two independent ways and
+# both agree -- 0x03003adc is 8x2 as 16x2's mode 2 and as 8x4's mode 1.
+#
+# The sixteen are exactly the 4x4 grid of {2,4,8,16} widths and heights, and the
+# seven without a whole-block intra mode are exactly those with a side of 2,
+# which is below what the intra predictors can address.
 BLOCK_SIZE = {
-    0x03001dac: (16, 16),
-    0x03002184: (16, 8),
-    0x030024ac: (16, 4),
-    0x030030f4: (8, 16),
-    0x03003584: (8, 8),
-    0x03003818: (8, 4),
-    0x030041cc: (4, 16),
-    0x03004468: (4, 8),
-    0x03004750: (4, 4),
-    # The remaining seven dispatchers sit below this and offer no whole-block
-    # intra mode, so their mode-6 slot carries no size.
+    0x03001dac: (16, 16), 0x03002184: (16, 8),
+    0x030024ac: (16, 4),  0x030028ec: (16, 2),
+    0x030030f4: (8, 16),  0x03003584: (8, 8),
+    0x03003818: (8, 4),   0x03003adc: (8, 2),
+    0x030041cc: (4, 16),  0x03004468: (4, 8),
+    0x03004750: (4, 4),   0x03004950: (4, 2),
+    0x03004fd0: (2, 16),  0x03005294: (2, 8),
+    0x03005494: (2, 4),   0x030055fc: (2, 2),
 }
+
+# Mode 1 splits into two blocks stacked vertically, mode 2 into two side by
+# side; the two 'disp' events of that mode are the halves in that order.
+SPLIT_VERTICAL, SPLIT_HORIZONTAL = 1, 2
+
+
+def split_offsets(disp, mode):
+    """Byte offsets of the two children of a split, relative to the parent."""
+    w, h = BLOCK_SIZE[disp]
+    if mode == SPLIT_VERTICAL:
+        return (0, (h // 2) * STRIDE)
+    return (0, w // 2)
 
 # A macroblock's position is carried as a byte offset into the frame buffer:
 #   offset = mb_y * 16 * STRIDE + mb_x * 16
@@ -206,7 +223,7 @@ def intra_midpoint(buf, off, w, h):
     _midpoint_fill(buf, off, w, h)
 
 
-def _midpoint_fill(buf, off, w, h, bps=1):
+def _midpoint_fill(buf, off, w, h, bps=1, corner=None):
     """One subdivision level: bottom-edge, right-edge, then centre, then recurse.
 
     The corner at (w-1, h-1) is already set on entry. Note these three use a
@@ -224,7 +241,11 @@ def _midpoint_fill(buf, off, w, h, bps=1):
     sw, sh = w // 2, h // 2
     bot_row = (h - 1) * STRIDE
     mid_row = (sh - 1) * STRIDE
-    corner = buf[off + bot_row + (w - 1) * bps]
+    # The fill takes the corner in a register (r6), not by reading the byte
+    # back, which matters for mode 4: it stores corner + 2*delta with strb --
+    # truncating -- but passes the untruncated value on to the fill.
+    if corner is None:
+        corner = buf[off + bot_row + (w - 1) * bps]
 
     bot = (buf[off + bot_row - bps] + corner) >> 1               # (-1, h-1)
     buf[off + bot_row + (sw - 1) * bps] = bot                    # (sw-1, h-1)
@@ -498,13 +519,21 @@ def mv_offsets(mv_x, mv_y):
 
 
 def inter_copy(buf, ref, off, mv_x, mv_y, w, h):
-    """Full-pel motion compensation of one block, luma and chroma together."""
-    ly, lc = mv_offsets(mv_x, mv_y)
+    """Full-pel motion compensation of one luma block."""
+    ly, _ = mv_offsets(mv_x, mv_y)
     for r in range(h):
         s = off + ly + r * STRIDE
         d = off + r * STRIDE
         buf[d:d + w] = ref[s:s + w]
-    # Chroma: w bytes wide (w/2 interleaved samples), h/2 rows.
+
+
+def inter_copy_chroma(buf, ref, off, mv_x, mv_y, w, h):
+    """The chroma half: w bytes wide (w/2 interleaved samples), h/2 rows.
+
+    Luma and chroma live in separate planes, so this takes its own buffer pair
+    rather than sharing luma's -- the vector is halved by mv_offsets.
+    """
+    _, lc = mv_offsets(mv_x, mv_y)
     for r in range(h // 2):
         s = off + lc + r * STRIDE
         d = off + r * STRIDE
@@ -539,8 +568,10 @@ def intra_midpoint_corrected(buf, off, w, h, delta):
     """
     a = buf[off + (w - 1) - STRIDE]
     b = buf[off + (h - 1) * STRIDE - 1]
-    buf[off + (h - 1) * STRIDE + (w - 1)] = ((a + b + 1) >> 1) + 2 * delta
-    _midpoint_fill(buf, off, w, h)
+    # strb truncates rather than clamps, so the correction wraps at 8 bits.
+    corner = ((a + b + 1) >> 1) + 2 * delta
+    buf[off + (h - 1) * STRIDE + (w - 1)] = corner & 0xff
+    _midpoint_fill(buf, off, w, h, 1, corner)
 
 
 def chroma_midpoint_corrected(buf, off, cw, ch, deltas):
@@ -549,9 +580,9 @@ def chroma_midpoint_corrected(buf, off, cw, ch, deltas):
         o = off + c
         a = buf[o + (cw - 1) * CHROMA_BPS - STRIDE]
         b = buf[o + (ch - 1) * STRIDE - CHROMA_BPS]
-        buf[o + (ch - 1) * STRIDE + (cw - 1) * CHROMA_BPS] = \
-            ((a + b + 1) >> 1) + 2 * deltas[c]
-        _midpoint_fill(buf, o, cw, ch, CHROMA_BPS)
+        corner = ((a + b + 1) >> 1) + 2 * deltas[c]
+        buf[o + (ch - 1) * STRIDE + (cw - 1) * CHROMA_BPS] = corner & 0xff
+        _midpoint_fill(buf, o, cw, ch, CHROMA_BPS, corner)
 
 
 # The 16x16 dispatcher's mode space, confirmed against vx_grammar.py's se(v)
