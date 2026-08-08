@@ -15,6 +15,7 @@ been written into the frame buffer.
 # ---------------------------------------------------------------- geometry
 
 STRIDE = 0x100          # frame buffer pitch, luma and chroma alike
+CHROMA_BPS = 2          # Cb and Cr interleaved, two bytes per chroma sample
 
 # Block size handled by each dispatcher, from the r4/r5 immediates its mode-6
 # handler passes to the intra predictor at FUN_03000884.
@@ -102,14 +103,58 @@ def idct4x4(coeffs, qp):
     return out
 
 
-def add_residual(buf, off, residual):
-    """clip(pred + residual), in place -- the frame buffer already holds the
-    prediction when the residual arrives (0x03005abc onward)."""
+# The residual loop (0x03005650) walks a macroblock in 8x8 quadrants. Each
+# quadrant reads one ue(v), maps it through the permutation table at 0x03005610,
+# and treats the result as a **6-bit coded-block-pattern**: bits 0-3 are the
+# quadrant's four luma 4x4 blocks, bit 4 is Cb and bit 5 is Cr. Four quadrants
+# per macroblock gives the 16 luma and 8 chroma blocks section 10 describes.
+#
+# While walking, r10 carries a plane index -- 0 luma, 1 Cb, 2 Cr -- and that
+# index selects the reconstruct variant. There are two tables of three:
+#   0x0300577c  full inverse transform, per plane
+#   0x03005788  DC-only fast path, per plane
+# so the "six reconstruct variants" are three planes times two paths, not six
+# different transforms. Chroma variants write every other byte and leave the
+# companion component untouched, since the two are interleaved.
+
+CBP_LUMA_BITS = 0x0f
+CBP_CB, CBP_CR = 0x10, 0x20
+
+# plane index -> (bytes per sample, byte offset within the sample)
+PLANE = {0: (1, 0), 1: (CHROMA_BPS, 0), 2: (CHROMA_BPS, 1)}
+
+
+def add_residual(buf, off, residual, plane=0):
+    """clip(pred + residual) for one 4x4 block (0x03005a94 and friends).
+
+    The frame buffer already holds the prediction when the residual arrives, so
+    this is an in-place add. `plane` picks the reconstruct variant: luma writes
+    consecutive bytes, Cb and Cr write every other one.
+    """
+    bps, base_off = PLANE[plane]
     for r in range(4):
-        base = off + r * STRIDE
+        base = off + base_off + r * STRIDE
         for c in range(4):
-            p = buf[base + c] + residual[r * 4 + c]
-            buf[base + c] = 0 if p < 0 else 255 if p > 255 else p
+            i = base + c * bps
+            p = buf[i] + residual[r * 4 + c]
+            buf[i] = 0 if p < 0 else 255 if p > 255 else p
+
+
+def add_residual_dc(buf, off, dc, plane=0):
+    """DC-only fast path (0x03005788's three entries, e.g. 0x03005c9c).
+
+    When a block carries nothing but its DC there is no transform at all: one
+    value is added to every pixel. `dc` is the dequantised DC, added as dc >> 6
+    -- the same shift the full path applies after its row pass.
+    """
+    bps, base_off = PLANE[plane]
+    v = dc >> 6
+    for r in range(4):
+        base = off + base_off + r * STRIDE
+        for c in range(4):
+            i = base + c * bps
+            p = buf[i] + v
+            buf[i] = 0 if p < 0 else 255 if p > 255 else p
 
 
 # ------------------------------------------------- whole-block intra modes
@@ -212,8 +257,6 @@ def _midpoint_fill(buf, off, w, h, bps=1):
 #
 # Mode order differs from luma, which is 0=vertical 1=horizontal:
 #   0 = DC, 1 = horizontal, 2 = vertical, 3 = midpoint subdivision.
-
-CHROMA_BPS = 2
 
 # log2 of a chroma dimension, indexed by the *luma* dimension >> 2. Table of
 # bytes at 0x03000c00; entries 0 and 3 are the unreachable slots.
@@ -522,19 +565,58 @@ def chroma_midpoint_corrected(buf, off, cw, ch, deltas):
 INTER_REFS = 3
 
 
+# ------------------------------------------------------ macroblock loop (0x03000520)
+
+# A macroblock's motion vector is predicted from three neighbours by the median,
+# computed the cheap way -- sum minus min minus max, per component -- which is
+# H.264's predictor. The result goes into fp/ip and the dispatcher at 0x03001dac
+# is called with it; modes 0/8/10 use it as-is, 3/9/11 add a two-se(v) delta.
+#
+# The predictor stores its final vector back with `strh`, packed as
+# mv_x | (mv_y << 8), so **each component is a signed byte** -- vectors are
+# limited to roughly +/-128 full pixels. The context is one such halfword per
+# macroblock with a row stride of 0x24 (18 entries: the frame's 15 plus border).
+MV_CONTEXT_STRIDE = 0x24
+MV_ENTRY_SIZE = 2
+
+
+def predict_mv(a, b, c):
+    """Median of three neighbouring vectors (0x030005b0)."""
+    def med(x, y, z):
+        return x + y + z - min(x, y, z) - max(x, y, z)
+    return med(a[0], b[0], c[0]), med(a[1], b[1], c[1])
+
+
+def pack_mv(mv_x, mv_y):
+    """The halfword the predictor writes to the context."""
+    return (mv_x & 0xff) | ((mv_y & 0xff) << 8)
+
+
+def unpack_mv(v):
+    x, y = v & 0xff, (v >> 8) & 0xff
+    return x - 256 if x > 127 else x, y - 256 if y > 127 else y
+
+
+# Per-macroblock the loop advances luma and chroma by 16 bytes each; per row of
+# macroblocks luma advances 0x1000 (16 lines) and chroma 0x800 (8 lines), with
+# the width read from [r0,#0x18].
+MB_STEP = 16
+MB_ROW_STEP_LUMA = 0x1000
+MB_ROW_STEP_CHROMA = 0x800
+
+
 # ---------------------------------------------------------------- TODO
 #
 # Still to reverse and port before this can render a picture:
 #
-#   * The five remaining reconstruct variants dispatched at 0x0300598c via the
-#     table at 0x0300577c -- 0x03005a94 is implemented above; 0x03005b2c,
-#     0x03005be4, 0x03005c9c, 0x03005e30 and 0x03006044 are not.
-#   * How the dispatcher predicts a macroblock's motion vector from its
-#     neighbours before modes 0/3/8/9/10/11 use it, and how the three reference
-#     frames are rotated as frames are decoded.
+#   * Which of the three reference frames a mode names is known, but not how the
+#     three are rotated as frames are decoded -- that lives in the frame-level
+#     setup around 0x03006e40, not in the macroblock loop.
 #   * Tying it all together: walk vx_sim's symbol stream into a frame buffer.
+#     Every primitive it needs is now here; what is missing is the driver.
 #
-# Done: the whole prediction path. 16x16 intra modes 0-3, the four chroma modes,
-# all nine 4x4 modes with their neighbour-predicted mode coding, full-pel motion
-# compensation from three reference frames, the corrected-corner midpoint mode
-# and the DC-corrected motion compensation mode.
+# Done: prediction and residual, end to end. 16x16 intra modes 0-3, the four
+# chroma modes, all nine 4x4 modes with their neighbour-predicted mode coding,
+# full-pel motion compensation from three reference frames, the corrected-corner
+# midpoint mode, the DC-corrected motion compensation mode, median motion vector
+# prediction, and both residual paths for all three planes.
