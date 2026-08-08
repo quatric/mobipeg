@@ -161,7 +161,7 @@ def intra_midpoint(buf, off, w, h):
     _midpoint_fill(buf, off, w, h)
 
 
-def _midpoint_fill(buf, off, w, h):
+def _midpoint_fill(buf, off, w, h, bps=1):
     """One subdivision level: bottom-edge, right-edge, then centre, then recurse.
 
     The corner at (w-1, h-1) is already set on entry. Note these three use a
@@ -177,41 +177,266 @@ def _midpoint_fill(buf, off, w, h):
     if w < 2 or h < 2:
         return
     sw, sh = w // 2, h // 2
-    corner = buf[off + (h - 1) * STRIDE + (w - 1)]
+    bot_row = (h - 1) * STRIDE
+    mid_row = (sh - 1) * STRIDE
+    corner = buf[off + bot_row + (w - 1) * bps]
 
-    bot = (buf[off + (h - 1) * STRIDE - 1] + corner) >> 1        # (-1, h-1)
-    buf[off + (h - 1) * STRIDE + (sw - 1)] = bot                 # (sw-1, h-1)
+    bot = (buf[off + bot_row - bps] + corner) >> 1               # (-1, h-1)
+    buf[off + bot_row + (sw - 1) * bps] = bot                    # (sw-1, h-1)
 
-    right = (buf[off + (w - 1) - STRIDE] + corner) >> 1          # (w-1, -1)
-    buf[off + (sh - 1) * STRIDE + (w - 1)] = right               # (w-1, sh-1)
+    right = (buf[off + (w - 1) * bps - STRIDE] + corner) >> 1    # (w-1, -1)
+    buf[off + mid_row + (w - 1) * bps] = right                   # (w-1, sh-1)
 
     if not ((w.bit_length() + h.bit_length()) & 1):
-        centre = (bot + buf[off + (sw - 1) - STRIDE]) >> 1       # (sw-1, -1)
+        centre = (bot + buf[off + (sw - 1) * bps - STRIDE]) >> 1  # (sw-1, -1)
     else:
-        centre = (right + buf[off + (sh - 1) * STRIDE - 1]) >> 1  # (-1, sh-1)
-    buf[off + (sh - 1) * STRIDE + (sw - 1)] = centre
+        centre = (right + buf[off + mid_row - bps]) >> 1          # (-1, sh-1)
+    buf[off + mid_row + (sw - 1) * bps] = centre
 
-    _midpoint_fill(buf, off, sw, sh)
-    _midpoint_fill(buf, off + sw, sw, sh)
-    _midpoint_fill(buf, off + sh * STRIDE, sw, sh)
-    _midpoint_fill(buf, off + sh * STRIDE + sw, sw, sh)
+    _midpoint_fill(buf, off, sw, sh, bps)
+    _midpoint_fill(buf, off + sw * bps, sw, sh, bps)
+    _midpoint_fill(buf, off + sh * STRIDE, sw, sh, bps)
+    _midpoint_fill(buf, off + sh * STRIDE + sw * bps, sw, sh, bps)
+
+
+# -------------------------------------------------------- chroma intra modes
+#
+# Cb and Cr are *interleaved* in one plane, two bytes per chroma sample, at the
+# same 0x100 pitch as luma -- mode 1 gives it away by loading a neighbour with
+# ldrh and replicating it with `orr r9, r9, r9, lsl #16`. A chroma block is
+# (w/2)x(h/2) samples, i.e. w bytes wide, and the predictors are handed the luma
+# dimensions and halve them themselves.
+#
+# Chroma also uses a different base pair than luma: [r0,#-4] + [r0,#4], where
+# luma uses [r0,#-8] + [r0,#0].
+#
+# Mode order differs from luma, which is 0=vertical 1=horizontal:
+#   0 = DC, 1 = horizontal, 2 = vertical, 3 = midpoint subdivision.
+
+CHROMA_BPS = 2
+
+# log2 of a chroma dimension, indexed by the *luma* dimension >> 2. Table of
+# bytes at 0x03000c00; entries 0 and 3 are the unreachable slots.
+DC_SHIFT = [0, 1, 2, 0, 3]
+
+
+def chroma_dc(buf, off, cw, ch, have_left, have_top):
+    """Chroma mode 0 (0x03000c08).
+
+    The ARM reads availability straight off the block's byte offset rather than
+    tracking it: the whole offset zero means no neighbours at all, `tst #0xff`
+    zero means mb_x == 0, `tst #0xff00` zero means mb_y == 0.
+
+    Note this averages the two edge DCs -- (top + left + 1) >> 1 -- instead of
+    summing every neighbouring sample and dividing once as H.264 does. With one
+    edge available its DC is used as-is, with neither the result is 0x80.
+    """
+    def edge_dc(vals, n):
+        return (sum(vals) + n // 2) >> DC_SHIFT[n >> 1]
+
+    if not have_left and not have_top:
+        cb = cr = 0x80
+    elif have_top and not have_left:
+        cb = edge_dc([buf[off - STRIDE + 2 * i] for i in range(cw)], cw)
+        cr = edge_dc([buf[off - STRIDE + 2 * i + 1] for i in range(cw)], cw)
+    elif have_left and not have_top:
+        cb = edge_dc([buf[off + r * STRIDE - 2] for r in range(ch)], ch)
+        cr = edge_dc([buf[off + r * STRIDE - 1] for r in range(ch)], ch)
+    else:
+        tb = edge_dc([buf[off - STRIDE + 2 * i] for i in range(cw)], cw)
+        tr = edge_dc([buf[off - STRIDE + 2 * i + 1] for i in range(cw)], cw)
+        lb = edge_dc([buf[off + r * STRIDE - 2] for r in range(ch)], ch)
+        lr_ = edge_dc([buf[off + r * STRIDE - 1] for r in range(ch)], ch)
+        cb, cr = (tb + lb + 1) >> 1, (tr + lr_ + 1) >> 1
+
+    for r in range(ch):
+        base = off + r * STRIDE
+        buf[base:base + 2 * cw] = bytes([cb, cr]) * cw
+
+
+def chroma_horizontal(buf, off, cw, ch):
+    """Chroma mode 1 (0x03000d90): replicate the sample pair to the left."""
+    for r in range(ch):
+        base = off + r * STRIDE
+        buf[base:base + 2 * cw] = bytes(buf[base - 2:base]) * cw
+
+
+def chroma_vertical(buf, off, cw, ch):
+    """Chroma mode 2 (0x03000dd4): replicate the row above."""
+    row = bytes(buf[off - STRIDE:off - STRIDE + 2 * cw])
+    for r in range(ch):
+        buf[off + r * STRIDE:off + r * STRIDE + 2 * cw] = row
+
+
+def chroma_midpoint(buf, off, cw, ch):
+    """Chroma mode 3 (0x03000e44): the mode-3 subdivision, run once per
+    component. The ARM seeds both corners, then calls one fill routine twice --
+    at byte +0 for Cb and +1 for Cr -- through its own 11-entry table at
+    0x03000e18, indexed by the luma dimensions exactly as luma's is.
+    """
+    for c in range(CHROMA_BPS):
+        o = off + c
+        a = buf[o + (cw - 1) * CHROMA_BPS - STRIDE]      # (cw-1, -1)
+        b = buf[o + (ch - 1) * STRIDE - CHROMA_BPS]      # (-1, ch-1)
+        buf[o + (ch - 1) * STRIDE + (cw - 1) * CHROMA_BPS] = (a + b + 1) >> 1
+        _midpoint_fill(buf, o, cw, ch, CHROMA_BPS)
+
+
+# ------------------------------------------------------------ intra 4x4 modes
+#
+# All nine are H.264's, in H.264's numbering, at the table at 0x030008d8:
+#   0 V, 1 H, 2 DC, 3 diagonal down-left, 4 diagonal down-right,
+#   5 vertical-right, 6 horizontal-down, 7 vertical-left, 8 horizontal-up.
+#
+# One real difference from H.264: there is no neighbour substitution. The
+# directional modes read T4..T7 unconditionally rather than replicating T3 when
+# the above-right block is unavailable, so whatever the frame buffer already
+# holds there is what gets filtered.
+
+def _nb(buf, off):
+    """Neighbours of a 4x4 block: 8 above (incl. above-right), 4 left, corner."""
+    return ([buf[off - STRIDE + i] for i in range(8)],
+            [buf[off + r * STRIDE - 1] for r in range(4)],
+            buf[off - STRIDE - 1])
+
+
+def _avg2(a, b):
+    return (a + b + 1) >> 1
+
+
+def _avg3(a, b, c):
+    return (a + 2 * b + c + 2) >> 2
+
+
+def intra4x4(buf, off, mode):
+    """Predict one 4x4 luma block. `off` is its byte offset in the frame buffer,
+    which is also what the ARM tests for edge availability."""
+    t, l, c = _nb(buf, off)
+    p = [[0] * 4 for _ in range(4)]
+
+    if mode == 0:
+        for y in range(4):
+            for x in range(4):
+                p[y][x] = t[x]
+    elif mode == 1:
+        for y in range(4):
+            for x in range(4):
+                p[y][x] = l[y]
+    elif mode == 2:
+        # 0x03000f90: +2 per available edge, shift 1 + (number of edges).
+        have_left = (off & 0xff) != 0
+        have_top = (off & 0xff00) != 0
+        if not have_left and not have_top:
+            dc = 0x80
+        else:
+            s, sh = 0, 1
+            if have_left:
+                s += sum(l) + 2
+                sh += 1
+            if have_top:
+                s += sum(t[:4]) + 2
+                sh += 1
+            dc = s >> sh
+        for y in range(4):
+            for x in range(4):
+                p[y][x] = dc
+    elif mode == 3:
+        for y in range(4):
+            for x in range(4):
+                k = x + y
+                p[y][x] = _avg3(t[6], t[7], t[7]) if k == 6 else \
+                    _avg3(t[k], t[k + 1], t[k + 2])
+    elif mode == 4:
+        for y in range(4):
+            for x in range(4):
+                if x > y:
+                    k = x - y
+                    p[y][x] = _avg3(t[k - 2] if k >= 2 else c, t[k - 1], t[k])
+                elif x < y:
+                    k = y - x
+                    p[y][x] = _avg3(l[k - 2] if k >= 2 else c, l[k - 1], l[k])
+                else:
+                    p[y][x] = _avg3(t[0], c, l[0])
+    elif mode == 5:
+        for y in range(4):
+            for x in range(4):
+                z = 2 * x - y
+                if z >= 0:
+                    k = x - (y >> 1)
+                    p[y][x] = _avg2(t[k - 1] if k >= 1 else c, t[k]) if not (z & 1) \
+                        else _avg3(t[k - 2] if k >= 2 else c, t[k - 1] if k >= 1 else c, t[k])
+                elif z == -1:
+                    p[y][x] = _avg3(l[0], c, t[0])
+                else:
+                    p[y][x] = _avg3(l[y - 1], l[y - 2], l[y - 3] if y >= 3 else c)
+    elif mode == 6:
+        for y in range(4):
+            for x in range(4):
+                z = 2 * y - x
+                if z >= 0:
+                    k = y - (x >> 1)
+                    p[y][x] = _avg2(l[k - 1] if k >= 1 else c, l[k]) if not (z & 1) \
+                        else _avg3(l[k - 2] if k >= 2 else c, l[k - 1] if k >= 1 else c, l[k])
+                elif z == -1:
+                    p[y][x] = _avg3(t[0], c, l[0])
+                else:
+                    p[y][x] = _avg3(t[x - 1], t[x - 2], t[x - 3] if x >= 3 else c)
+    elif mode == 7:
+        for y in range(4):
+            for x in range(4):
+                k = x + (y >> 1)
+                p[y][x] = _avg2(t[k], t[k + 1]) if not (y & 1) \
+                    else _avg3(t[k], t[k + 1], t[k + 2])
+    elif mode == 8:
+        for y in range(4):
+            for x in range(4):
+                z = x + 2 * y
+                k = y + (x >> 1)
+                if z < 5:
+                    p[y][x] = _avg2(l[k], l[k + 1]) if not (z & 1) \
+                        else _avg3(l[k], l[k + 1], l[k + 2])
+                elif z == 5:
+                    p[y][x] = _avg3(l[2], l[3], l[3])
+                else:
+                    p[y][x] = l[3]
+    else:
+        raise ValueError("intra 4x4 mode %d" % mode)
+
+    for y in range(4):
+        base = off + y * STRIDE
+        buf[base:base + 4] = bytes(p[y])
+
+
+# The mode of a 4x4 block is coded against its neighbours exactly as in H.264:
+# predicted = min(above, left), a 1 bit accepts it, otherwise 3 bits carry the
+# remainder with the predicted value skipped. The decoder keeps the neighbour
+# modes in a byte array at 0x030008c2 whose row stride is 5 -- four block columns
+# plus one border column preset to 9, the "unavailable" marker that maps to DC.
+I4_UNAVAILABLE = 9
+I4_CTX_STRIDE = 5
+
+
+def intra4x4_mode(above, left, flag, rem=None):
+    """Resolve one block's mode from its neighbours (loop at 0x030008fc)."""
+    pred = min(above, left)
+    if pred == I4_UNAVAILABLE:
+        pred = 2
+    if flag:
+        return pred
+    return rem + 1 if rem >= pred else rem
 
 
 # ---------------------------------------------------------------- TODO
 #
 # Still to reverse and port before this can render a picture:
 #
-#   * The four chroma intra modes at 0x03000874:
-#       0x03000c08, 0x03000d90, 0x03000dd4, 0x03000e44
-#   * The nine intra 4x4 modes at 0x030008d8, selected per sub-block by the
-#     flag/remainder coding in FUN_030008fc:
-#       0x03000ecc 0x03000eec 0x03000f90 0x03000fe0 0x030010c4
-#       0x030011ac 0x030012b0 0x030013b4 0x030014b0
 #   * Inter prediction: the predictor families reached from the mode tables,
 #     with the half-pel interpolation loops around 0x03001704/0x03002a8c, and
 #     the motion vectors carried as se(v) side data (3 for mode 4, 5 for mode 5).
 #   * The six reconstruct variants dispatched at 0x0300598c via the table at
 #     0x0300577c -- 0x03005a94 (implemented above) plus 0x03005b2c, 0x03005be4,
 #     0x03005c9c, 0x03005e30, 0x03006044.
-#   * Frame buffer plumbing: which of Cb/Cr the residual loop's plane index
-#     selects, and reference-frame management for inter prediction.
+#   * Reference-frame management for inter prediction.
+#
+# Done: the intra path is complete -- 16x16 modes 0-3, the four chroma modes,
+# and all nine 4x4 modes with their neighbour-predicted mode coding.
