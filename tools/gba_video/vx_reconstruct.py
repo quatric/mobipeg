@@ -426,17 +426,115 @@ def intra4x4_mode(above, left, flag, rem=None):
     return rem + 1 if rem >= pred else rem
 
 
+# ------------------------------------------------------------ inter prediction
+#
+# Motion vectors are **full-pel**. There is no sub-pel interpolation anywhere:
+# the four-entry table at 0x03001568, indexed by `fp & 3`, selects between four
+# ldm alignment fixups, not filter phases. Variant 1 loads from one byte below
+# the source, pulls 17 bytes and shifts the window right by 8 bits; variants 2
+# and 3 do the same at halfword and 3-byte offsets, and 2 and 3 additionally fix
+# up chroma, which is misaligned by 2 exactly when mv_x & 3 >= 2. All four
+# produce the same pixels, so a byte-wise copy reproduces them.
+#
+# A macroblock names one of THREE reference frames through the context pointer:
+#   [r0,#-0x20]/[r0,#-0x1c]   luma/chroma base of reference 0
+#   [r0,#-0x18]/[r0,#-0x14]   reference 1
+#   [r0,#-0x10]/[r0,#-0x0c]   reference 2
+# Modes 0/8/10 copy from reference 0/1/2 with the MV the dispatcher predicted
+# from neighbours; modes 3/9/11 are the same with a two-se(v) delta added.
+
+def mv_offsets(mv_x, mv_y):
+    """Byte offsets a motion vector produces in each plane (0x03001578).
+
+    Luma is simply mv_x + mv_y*STRIDE. Chroma halves the vector, but because
+    samples are two bytes the x term comes back out as mv_x rounded down to
+    even -- which is what `bic #1` does on a two's-complement value.
+    """
+    return (mv_x + mv_y * STRIDE,
+            (mv_x & ~1) + ((mv_y & ~1) // 2) * STRIDE)
+
+
+def inter_copy(buf, ref, off, mv_x, mv_y, w, h):
+    """Full-pel motion compensation of one block, luma and chroma together."""
+    ly, lc = mv_offsets(mv_x, mv_y)
+    for r in range(h):
+        s = off + ly + r * STRIDE
+        d = off + r * STRIDE
+        buf[d:d + w] = ref[s:s + w]
+    # Chroma: w bytes wide (w/2 interleaved samples), h/2 rows.
+    for r in range(h // 2):
+        s = off + lc + r * STRIDE
+        d = off + r * STRIDE
+        buf[d:d + w] = ref[s:s + w]
+
+
+def inter_copy_dc(buf, ref, off, mv_x, mv_y, w, h, dc):
+    """Mode 5 (0x03001854): motion compensation plus a coded DC correction.
+
+    The vector is explicit -- two se(v) rather than a predicted candidate -- and
+    three further se(v) carry one offset per component, applied as
+    clip(pixel + 2*delta). The doubling and the clamp are both in the ARM:
+    `adds sb, sb, r8, lsl #1`, `movlt #0`, `cmp #0xff`, `movgt #0xff`.
+    """
+    ly, _ = mv_offsets(mv_x, mv_y)
+    for r in range(h):
+        s = off + ly + r * STRIDE
+        d = off + r * STRIDE
+        for i in range(w):
+            p = ref[s + i] + 2 * dc
+            buf[d + i] = 0 if p < 0 else 255 if p > 255 else p
+
+
+def intra_midpoint_corrected(buf, off, w, h, delta):
+    """Mode 4 (0x03001ac0): the mode-3 subdivision with a *coded* corner.
+
+    Instead of taking the bottom-right corner straight from the neighbours, it
+    adds a signed correction: corner = ((TR + BL + 1) >> 1) + 2*se(v). The fill
+    that follows is the same 0x03001a68 routine mode 3 uses. Chroma gets its own
+    correction per component through 0x03001a3c, which is why the mode carries
+    three se(v) in total.
+    """
+    a = buf[off + (w - 1) - STRIDE]
+    b = buf[off + (h - 1) * STRIDE - 1]
+    buf[off + (h - 1) * STRIDE + (w - 1)] = ((a + b + 1) >> 1) + 2 * delta
+    _midpoint_fill(buf, off, w, h)
+
+
+def chroma_midpoint_corrected(buf, off, cw, ch, deltas):
+    """Chroma half of mode 4 (0x03001a3c), once per component."""
+    for c in range(CHROMA_BPS):
+        o = off + c
+        a = buf[o + (cw - 1) * CHROMA_BPS - STRIDE]
+        b = buf[o + (ch - 1) * STRIDE - CHROMA_BPS]
+        buf[o + (ch - 1) * STRIDE + (cw - 1) * CHROMA_BPS] = \
+            ((a + b + 1) >> 1) + 2 * deltas[c]
+        _midpoint_fill(buf, o, cw, ch, CHROMA_BPS)
+
+
+# The 16x16 dispatcher's mode space, confirmed against vx_grammar.py's se(v)
+# counts. Modes 12-23 are exactly modes 0-11 with a residual appended.
+#   0, 8,10  copy from reference 0/1/2, predicted MV        0 se
+#   3, 9,11  same, plus a two-se(v) MV delta                2 se
+#   1        split into two 16x8      2        two 8x16
+#   4        midpoint, corrected corners                    3 se
+#   5        motion compensation with DC correction         5 se
+#   6        intra 16x16              7        intra 4x4
+INTER_REFS = 3
+
+
 # ---------------------------------------------------------------- TODO
 #
 # Still to reverse and port before this can render a picture:
 #
-#   * Inter prediction: the predictor families reached from the mode tables,
-#     with the half-pel interpolation loops around 0x03001704/0x03002a8c, and
-#     the motion vectors carried as se(v) side data (3 for mode 4, 5 for mode 5).
-#   * The six reconstruct variants dispatched at 0x0300598c via the table at
-#     0x0300577c -- 0x03005a94 (implemented above) plus 0x03005b2c, 0x03005be4,
-#     0x03005c9c, 0x03005e30, 0x03006044.
-#   * Reference-frame management for inter prediction.
+#   * The five remaining reconstruct variants dispatched at 0x0300598c via the
+#     table at 0x0300577c -- 0x03005a94 is implemented above; 0x03005b2c,
+#     0x03005be4, 0x03005c9c, 0x03005e30 and 0x03006044 are not.
+#   * How the dispatcher predicts a macroblock's motion vector from its
+#     neighbours before modes 0/3/8/9/10/11 use it, and how the three reference
+#     frames are rotated as frames are decoded.
+#   * Tying it all together: walk vx_sim's symbol stream into a frame buffer.
 #
-# Done: the intra path is complete -- 16x16 modes 0-3, the four chroma modes,
-# and all nine 4x4 modes with their neighbour-predicted mode coding.
+# Done: the whole prediction path. 16x16 intra modes 0-3, the four chroma modes,
+# all nine 4x4 modes with their neighbour-predicted mode coding, full-pel motion
+# compensation from three reference frames, the corrected-corner midpoint mode
+# and the DC-corrected motion compensation mode.
