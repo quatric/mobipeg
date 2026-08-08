@@ -604,6 +604,35 @@ MB_STEP = 16
 MB_ROW_STEP_LUMA = 0x1000
 MB_ROW_STEP_CHROMA = 0x800
 
+# The frame driver calls the macroblock loop with r0 = ctx + 0xbc (0x03006dc4),
+# which pins every [r0,#N] the predictors use to a concrete context field:
+#
+#   [r0,#-0x20] ctx+0x9c  reference 0, luma base
+#   [r0,#-0x1c] ctx+0xa0  reference 0, chroma base
+#   [r0,#-0x18] ctx+0xa4  reference 1, luma base
+#   [r0,#-0x14] ctx+0xa8  reference 1, chroma base
+#   [r0,#-0x10] ctx+0xac  reference 2, luma base
+#   [r0,#-0x0c] ctx+0xb0  reference 2, chroma base
+#   [r0,#-0x08] ctx+0xb4  current frame, luma base
+#   [r0,#-0x04] ctx+0xb8  current frame, chroma base
+#   [r0,# 0x00] ctx+0xbc  luma byte offset of the current macroblock
+#   [r0,# 0x04] ctx+0xc0  chroma byte offset of the current macroblock
+#   [r0,# 0x08] ctx+0xc4  motion-vector context pointer
+#   [r0,# 0x18] ctx+0xd4  frame width in pixels
+#
+# The two offsets at +0x00/+0x04 are what every predictor adds to its base, and
+# what the intra modes test for edge availability -- so a macroblock's position
+# and its neighbour availability are the same number.
+CTX_BASE = 0xbc
+CTX_FIELDS = {
+    "ref0_luma": -0x20, "ref0_chroma": -0x1c,
+    "ref1_luma": -0x18, "ref1_chroma": -0x14,
+    "ref2_luma": -0x10, "ref2_chroma": -0x0c,
+    "cur_luma": -0x08, "cur_chroma": -0x04,
+    "off_luma": 0x00, "off_chroma": 0x04,
+    "mv_ctx": 0x08, "width": 0x18,
+}
+
 
 # ---------------------------------------------------------------- TODO
 #
