@@ -30,26 +30,24 @@ unpacks a ROM for inspection, `ads_audio.py` is the ported audio decode loop,
 
 ## Which GBA Video is which
 
-Retail carts split into two unrelated lineages:
+Retail carts encountered so far split into four lineages or revisions:
 
-| Era | Size | Codec |
-|-----|------|-------|
-| **GCC** | 64 MB | ActImagine **VX** (`VXDS` magic) — see `libavcodec/vx.c` |
-| **ADS** | 32 MB | Majesco in-house stack — this document |
+| Lineage | Size | Codec |
+|---------|------|-------|
+| **ADS** | 32 MB | Majesco in-house stack using LZMA — this document |
+| **Hydrogen** | 32 MB | Majesco derivative using Inflate — this document |
+| **VXGB** | 64 MB | Earlier ActImagine GBA stream revision — not yet decoded |
+| **VX++** | 64 MB | ActImagine codec and GBA-specific container — see `gba_video_vxpp.md` |
 
-Scan for the ASCII string `VXDS` to classify. Dragon Ball GT has none; it has
-`SFCD` at offset 3720 (0xE88).
-
-The 64 MB carts have **no `VXDS` magic either** — that magic belongs to the DS
-container, not to the codec. `Shrek + Shark Tale (USA) (Rev 5)` (game code
-`MSTE`, maker `5G`, the same maker as Dora) is VX all the same: the version tag
-**`VX++42`** sits in an ARM literal pool at ROM `0x135f8`. See the section on
-that cart at the end of this document for what its container does and does not
-give up.
+`VXDS` belongs to the later DS container and is not a reliable classifier for
+these cartridges. Dragon Ball GT has an `SFCD` archive at offset 3720 (0xE88);
+Dora is recognized by its Hydrogen resources; and the ActImagine carts carry
+literal **`VXGB`** or **`VX++`** stream headers. See the sections at the end of
+this document and `gba_video_vxpp.md`.
 
 Much of the No-Intro "Video" folder is homebrew (Sonic Boom, Super Mario
 World episodes, Dinosaur Office, Eek! The Cat, Legend of Lofi, Night Trap) —
-fan-made carts unrelated to either retail lineage.
+fan-made carts unrelated to the retail lineages.
 
 ## Container chain
 
@@ -633,15 +631,18 @@ nibble - the grid is always 60 wide and a frame 240 wide, so `blk_w` is 4 and
 240x159 for the movies).
 
 Neither a frame rate nor a sample rate is recorded anywhere in the container,
-so the demuxer exposes both as options (`-frame_rate`, `-sample_rate`,
-defaulting to 30 and 16384). Nothing records how many samples an audio block
-carries either, so blocks are paced off the movie's own length - video frame
-count over frame rate - since the two streams cover the same wall clock.
+so the demuxer exposes both as options (`-frame_rate`, `-sample_rate`, with a
+16384 Hz audio default). The shared ADS/Hydrogen player decodes exactly 0x404a
+(16458) samples per complete audio block. The block count therefore gives the
+movie's duration and lets the demuxer derive the nominal 12 fps video rate.
+Using a video-length average for ADS blocks is incorrect: it truncates about
+67 samples from every Dragon Ball GT block and produces an audible gap roughly
+once per second.
 
-Two caveats carry over from the analysis above and are not implementation
-bugs: video drifts because the predictor is still unknown, and audio degrades
-because the sample loop is not yet an exact transcription. The container, the
-LZMA layer, the colour transform and the audio context table are solid.
+The GBA display itself runs at about 59.7275 Hz, and these movies advance one
+frame every five refreshes (about 11.9455 fps). Exports that need tight A/V
+alignment can retain the fixed audio clock and use that hardware cadence for
+the video timestamps.
 
 
 

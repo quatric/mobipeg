@@ -38,9 +38,10 @@
  *
  * The seek table is {frame, video bit offset, audio byte offset, 0}, and that
  * middle column is the whole story: the video is one continuous bitstream with
- * no per-frame sizes, so nothing can cut it into packets without decoding it.
- * That bitstream is also not the one libavcodec/vx.c decodes - it is an earlier
- * generation of the codec - so only the audio is exposed here for now.
+ * no per-frame sizes. The seek entries do provide independently decodable
+ * segment boundaries, however, so each interval is exposed as one packet for
+ * the GBA-specific decoder. This bitstream is not the one libavcodec/vx.c
+ * decodes - it is an earlier generation of the codec.
  *
  * The audio is the DS codec unchanged. Its region opens with the same
  * 3124-byte codebook block, and every AFrame is a whole number of 16-bit words
@@ -50,6 +51,7 @@
  * states.
  */
 
+#include "libavutil/common.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
@@ -58,6 +60,7 @@
 #include "demux.h"
 #include "internal.h"
 #include "libavcodec/defs.h"
+#include "libavcodec/gba_vx.h"
 
 #define VX_HEADER_SIZE 0x38
 
@@ -81,12 +84,22 @@ typedef struct GBAVXStream {
     uint32_t audio_off, chapter_off, seek_off, nb_seek;
 } GBAVXStream;
 
+typedef struct GBAVXSegment {
+    uint32_t frame;
+    uint32_t video_bit;
+    int64_t audio_pos;
+    int64_t audio_pts;
+} GBAVXSegment;
+
 typedef struct GBAVXDemuxContext {
     const AVClass *class;
     const char *resource;               /* stream index to play */
 
     GBAVXStream st;
-    int audio_idx;
+    GBAVXSegment *segments;
+    int nb_segments;
+    int video_segment;
+    int video_idx, audio_idx;
     int64_t audio_pos, audio_end;
     int64_t audio_pts;
 } GBAVXDemuxContext;
@@ -97,6 +110,32 @@ static int aframe_size(uint32_t word2)
     static const uint8_t pulse_data_len[4] = { 8, 5, 4, 3 };
 
     return 4 + 2 * pulse_data_len[(word2 >> 12) & 3];
+}
+
+/* Count complete AFrames in [start, end). Seek-table boundaries must tile
+ * exactly; unlike the end of the whole audio region they carry no zero pad. */
+static int count_aframes(AVIOContext *pb, int64_t start, int64_t end,
+                         int64_t *count)
+{
+    int64_t pos = start, n = 0;
+
+    if (start > end || avio_seek(pb, start, SEEK_SET) < 0)
+        return AVERROR_INVALIDDATA;
+    while (pos < end) {
+        int size;
+
+        if (end - pos < 4)
+            return AVERROR_INVALIDDATA;
+        avio_skip(pb, 2);
+        size = aframe_size(avio_rl16(pb));
+        if (pos + size > end)
+            return AVERROR_INVALIDDATA;
+        avio_skip(pb, size - 4);
+        pos += size;
+        n++;
+    }
+    *count = n;
+    return 0;
 }
 
 static int header_ok(const GBAVXStream *st, int64_t filesize)
@@ -175,6 +214,84 @@ static void read_chapters(AVFormatContext *avctx, const GBAVXStream *st)
     av_free(start);
 }
 
+/* Build exact audio indexes from the container seek table. The table dates
+ * video in frames but gives audio in bytes, so count AFrames between byte
+ * offsets to avoid accumulating a fractional 128/7 cadence approximation. */
+static int read_indexes(AVFormatContext *avctx, AVStream *ast,
+                        GBAVXDemuxContext *s, const GBAVXStream *st)
+{
+    AVIOContext *pb = avctx->pb;
+    GBAVXSegment *segments;
+    int64_t previous = st->off + st->audio_off + VX_AUDIO_EXTRADATA_SIZE;
+    int64_t pts = 0;
+    uint32_t previous_frame = 0, previous_bit = 0;
+    int nb_segments = 0, ret;
+
+    segments = av_calloc(st->nb_seek, sizeof(*segments));
+    if (!segments)
+        return AVERROR(ENOMEM);
+
+    if (avio_seek(pb, st->off + st->seek_off, SEEK_SET) < 0)
+        goto invalid;
+    for (uint32_t i = 0; i < st->nb_seek; i++) {
+        uint32_t frame = avio_rl32(pb);
+        uint32_t video_bit = avio_rl32(pb);
+        uint32_t audio_off = avio_rl32(pb);
+        int64_t pos, n;
+
+        avio_skip(pb, 4);
+        if (!audio_off) {
+            if (frame != st->nb_frames || video_bit)
+                goto invalid;
+            continue;                       /* terminal sentinel */
+        }
+        if ((nb_segments && (frame <= previous_frame || video_bit <= previous_bit)) ||
+            (!nb_segments && (frame || video_bit)))
+            goto invalid;
+        pos = st->off + st->audio_off + audio_off;
+        if (pos < previous || pos + 2 > st->off + st->chapter_off)
+            goto invalid;
+        ret = count_aframes(pb, previous, pos, &n);
+        if (ret < 0)
+            goto fail;
+        pts += n * AFRAME_SAMPLES;
+
+        /* A random-access segment always opens with an intra AFrame. */
+        if (avio_seek(pb, pos, SEEK_SET) < 0 || ((avio_rl16(pb) >> 9) & 0x7f) != 0x7f)
+            goto invalid;
+        ret = av_add_index_entry(ast, pos, pts, 0, 0, AVINDEX_KEYFRAME);
+        if (ret < 0)
+            goto fail;
+        segments[nb_segments++] = (GBAVXSegment) {
+            .frame     = frame,
+            .video_bit = video_bit,
+            .audio_pos = pos,
+            .audio_pts = pts,
+        };
+        av_log(avctx, AV_LOG_TRACE,
+               "audio seek %u: video frame %u bit %u, byte 0x%"PRIx64", pts %"PRId64"\n",
+               i, frame, video_bit, pos, pts);
+        previous = pos;
+        previous_frame = frame;
+        previous_bit = video_bit;
+
+        /* count_aframes and the intra check seek away from the table. */
+        if (avio_seek(pb, st->off + st->seek_off + 16 * (i + 1), SEEK_SET) < 0)
+            goto invalid;
+    }
+    if (!nb_segments)
+        goto invalid;
+    s->segments = segments;
+    s->nb_segments = nb_segments;
+    return 0;
+
+invalid:
+    ret = AVERROR_INVALIDDATA;
+fail:
+    av_free(segments);
+    return ret;
+}
+
 static int gbavx_read_header(AVFormatContext *avctx)
 {
     GBAVXDemuxContext *s = avctx->priv_data;
@@ -185,7 +302,7 @@ static int gbavx_read_header(AVFormatContext *avctx)
     GBAVXStream st = { 0 }, best_st = { 0 };
     uint8_t h[VX_HEADER_SIZE];
 
-    s->audio_idx = -1;
+    s->video_idx = s->audio_idx = -1;
     if (filesize <= 0)
         return AVERROR_INVALIDDATA;
 
@@ -223,11 +340,23 @@ static int gbavx_read_header(AVFormatContext *avctx)
         return AVERROR_INVALIDDATA;
     }
     s->st = best_st;
+    s->audio_pos = best_st.off + best_st.audio_off + VX_AUDIO_EXTRADATA_SIZE;
+    s->audio_end = best_st.off + best_st.chapter_off;
 
-    av_log(avctx, AV_LOG_WARNING,
-           "video is a %ux%u %u-frame VX bitstream with no frame boundaries "
-           "and no decoder yet; demuxing audio only\n",
-           best_st.width, best_st.height, best_st.nb_frames);
+    {
+        AVStream *vst = avformat_new_stream(avctx, NULL);
+
+        if (!vst)
+            return AVERROR(ENOMEM);
+        vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        vst->codecpar->codec_id   = AV_CODEC_ID_GBA_VX;
+        vst->codecpar->width      = best_st.width;
+        vst->codecpar->height     = best_st.height;
+        s->video_idx = vst->index;
+        avpriv_set_pts_info(vst, 64, 1, VX_FRAMES_PER_SECOND);
+        vst->avg_frame_rate = (AVRational) { VX_FRAMES_PER_SECOND, 1 };
+        vst->duration = best_st.nb_frames;
+    }
 
     {
         AVStream *ast = avformat_new_stream(avctx, NULL);
@@ -257,11 +386,80 @@ static int gbavx_read_header(AVFormatContext *avctx)
             return AVERROR_INVALIDDATA;
     }
 
-    s->audio_pos = best_st.off + best_st.audio_off + VX_AUDIO_EXTRADATA_SIZE;
-    s->audio_end = best_st.off + best_st.chapter_off;
+    ret = read_indexes(avctx, avctx->streams[s->audio_idx], s, &best_st);
+    if (ret < 0)
+        return ret;
 
     read_chapters(avctx, &best_st);
 
+    return 0;
+}
+
+static int gbavx_read_seek(AVFormatContext *avctx, int stream_index,
+                           int64_t timestamp, int flags)
+{
+    GBAVXDemuxContext *s = avctx->priv_data;
+    int64_t frame;
+    int index = 0;
+
+    if ((stream_index != s->video_idx && stream_index != s->audio_idx) ||
+        flags & AVSEEK_FLAG_BYTE)
+        return AVERROR(ENOSYS);
+    frame = stream_index == s->video_idx ? timestamp :
+            av_rescale_q(timestamp, avctx->streams[s->audio_idx]->time_base,
+                         avctx->streams[s->video_idx]->time_base);
+    for (int i = 1; i < s->nb_segments && s->segments[i].frame <= frame; i++)
+        index = i;
+    s->video_segment = index;
+    s->audio_pos = s->segments[index].audio_pos;
+    s->audio_pts = s->segments[index].audio_pts;
+    return 0;
+}
+
+static int gbavx_read_video_packet(AVFormatContext *avctx, AVPacket *pkt)
+{
+    GBAVXDemuxContext *s = avctx->priv_data;
+    AVIOContext *pb = avctx->pb;
+    const GBAVXSegment *seg = &s->segments[s->video_segment];
+    int64_t end_bit = s->video_segment + 1 < s->nb_segments ?
+                      s->segments[s->video_segment + 1].video_bit :
+                      (int64_t)(s->st.audio_off - VX_HEADER_SIZE) * 8;
+    int64_t aligned_bit = seg->video_bit & ~15LL;
+    int64_t valid_bits = end_bit - aligned_bit;
+    int64_t pos = s->st.off + VX_HEADER_SIZE + aligned_bit / 8;
+    int payload_size, frames, ret;
+    uint8_t *payload;
+
+    if (valid_bits <= 0 || valid_bits > INT_MAX ||
+        pos < s->st.off + VX_HEADER_SIZE || pos >= s->st.off + s->st.audio_off)
+        return AVERROR_INVALIDDATA;
+    payload_size = FFALIGN(valid_bits, 16) / 8;
+    if (pos + payload_size > s->st.off + s->st.audio_off)
+        payload_size = s->st.off + s->st.audio_off - pos;
+    frames = (s->video_segment + 1 < s->nb_segments ?
+              s->segments[s->video_segment + 1].frame : s->st.nb_frames) - seg->frame;
+    if (payload_size <= 0 || frames <= 0)
+        return AVERROR_INVALIDDATA;
+
+    ret = av_new_packet(pkt, GBA_VX_PACKET_HEADER_SIZE + payload_size);
+    if (ret < 0)
+        return ret;
+    AV_WL32(pkt->data,      GBA_VX_PACKET_MAGIC);
+    AV_WL32(pkt->data + 4,  seg->video_bit - aligned_bit);
+    AV_WL32(pkt->data + 8,  valid_bits);
+    AV_WL32(pkt->data + 12, frames);
+    payload = pkt->data + GBA_VX_PACKET_HEADER_SIZE;
+    if (avio_seek(pb, pos, SEEK_SET) < 0 || avio_read(pb, payload, payload_size) != payload_size)
+        return AVERROR_INVALIDDATA;
+    for (int i = 0; i + 1 < payload_size; i += 2)
+        FFSWAP(uint8_t, payload[i], payload[i + 1]);
+
+    pkt->stream_index = s->video_idx;
+    pkt->pts = pkt->dts = seg->frame;
+    pkt->duration = frames;
+    pkt->pos = pos;
+    pkt->flags |= AV_PKT_FLAG_KEY;
+    s->video_segment++;
     return 0;
 }
 
@@ -270,7 +468,15 @@ static int gbavx_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     GBAVXDemuxContext *s = avctx->priv_data;
     AVIOContext *pb = avctx->pb;
     int64_t pos = s->audio_pos;
-    int nb_aframes = 0, ret;
+    int nb_aframes = 0, packet_is_key = 0, ret;
+
+    if (s->video_segment < s->nb_segments &&
+        (pos + 4 > s->audio_end ||
+         av_compare_ts(s->segments[s->video_segment].frame,
+                       avctx->streams[s->video_idx]->time_base,
+                       s->audio_pts,
+                       avctx->streams[s->audio_idx]->time_base) <= 0))
+        return gbavx_read_video_packet(avctx, pkt);
 
     if (pos + 4 > s->audio_end)
         return AVERROR_EOF;
@@ -278,11 +484,14 @@ static int gbavx_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     /* Walk whole AFrames so a packet never splits one. */
     avio_seek(pb, pos, SEEK_SET);
     while (nb_aframes < AFRAMES_PER_PACKET) {
+        uint16_t word1;
         int size;
 
         if (pos + 4 > s->audio_end)
             break;
-        avio_skip(pb, 2);
+        word1 = avio_rl16(pb);
+        if (!nb_aframes)
+            packet_is_key = ((word1 >> 9) & 0x7f) == 0x7f;
         size = aframe_size(avio_rl16(pb));
         if (pos + size > s->audio_end)
             break;
@@ -306,11 +515,20 @@ static int gbavx_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     pkt->stream_index = s->audio_idx;
     pkt->pts          = s->audio_pts;
     pkt->duration     = (int64_t)nb_aframes * AFRAME_SAMPLES;
-    pkt->flags       |= AV_PKT_FLAG_KEY;
+    if (packet_is_key)
+        pkt->flags |= AV_PKT_FLAG_KEY;
 
     s->audio_pts += pkt->duration;
     s->audio_pos  = pos;
 
+    return 0;
+}
+
+static int gbavx_read_close(AVFormatContext *avctx)
+{
+    GBAVXDemuxContext *s = avctx->priv_data;
+
+    av_freep(&s->segments);
     return 0;
 }
 
@@ -339,4 +557,6 @@ const FFInputFormat ff_gbavx_demuxer = {
     .read_probe     = gbavx_probe,
     .read_header    = gbavx_read_header,
     .read_packet    = gbavx_read_packet,
+    .read_seek      = gbavx_read_seek,
+    .read_close     = gbavx_read_close,
 };
