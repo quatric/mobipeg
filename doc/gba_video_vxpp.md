@@ -1322,3 +1322,57 @@ That is a real consistency check rather than a restatement: 16×16 recurses into
 
 Ported as a single recursive `intra_midpoint` in `tools/gba_video/vx_reconstruct.py`, since all eleven
 hardware routines are one function specialised by size.
+
+## 17. The intra path is complete: chroma is interleaved, and 4×4 is H.264's
+
+### Chroma is one interleaved plane, two bytes per sample
+
+Mode 1 gives it away: it loads a neighbour with `ldrh` and replicates it with
+`orr r9, r9, r9, lsl #16`. Cb and Cr sit interleaved in a single plane at the same `0x100` pitch as
+luma, so a chroma block is `(w/2)×(h/2)` samples — `w` bytes wide. That answers §14's open question
+about which of Cb/Cr the residual loop's plane index selects: neither, it is a byte offset of 0 or 1
+into an interleaved pair.
+
+Chroma predictors take a different base pair than luma — `[r0,#-4] + [r0,#4]` against luma's
+`[r0,#-8] + [r0,#0]` — are handed the *luma* dimensions and halve them themselves, and number their
+modes differently: **0 = DC, 1 = horizontal, 2 = vertical, 3 = midpoint**, where luma is
+0 = vertical, 1 = horizontal.
+
+Two details worth keeping:
+
+- **Availability is read straight off the block's byte offset**, never tracked: the whole offset zero
+  means no neighbours, `tst #0xff` zero means `mb_x == 0`, `tst #0xff00` zero means `mb_y == 0`. The
+  same trick appears in the 4×4 DC mode.
+- **Chroma DC averages the two edge DCs**, `(top + left + 1) >> 1`, rather than summing every
+  neighbouring sample and dividing once as H.264 does. Each edge DC is `(sum + n/2) >> log2(n)` with
+  the shift from a byte table at `0x03000c00` = `[0, 1, 2, 0, 3]` indexed by the luma dimension `>> 2`
+  (entries 0 and 3 are the unreachable slots). With one edge available its DC is used unrounded; with
+  neither the result is `0x80`.
+
+Mode 3 reuses the §16 subdivision, running it twice over its own 11-entry table at `0x03000e18` —
+once at byte `+0` for Cb and once at `+1` for Cr, with a 2-byte sample stride.
+
+### All nine 4×4 modes are H.264's, in H.264's numbering
+
+`0 V, 1 H, 2 DC, 3 diagonal down-left, 4 diagonal down-right, 5 vertical-right, 6 horizontal-down,
+7 vertical-left, 8 horizontal-up`, with the standard `(a + 2b + c + 2) >> 2` and `(a + b + 1) >> 1`
+taps. Modes 3 and 4 were read instruction by instruction; 5–8 were identified from the families of
+positions that share a computed value — `2x−y` for mode 5 including its `−1` and `−2/−3` special
+cases, `2y−x` for mode 6 — together with their neighbour sets (mode 7 reaches T6, mode 8 touches only
+the left column).
+
+**One real difference from H.264: there is no neighbour substitution.** The directional modes read
+`T4..T7` unconditionally instead of replicating `T3` when the above-right block is unavailable, so
+they filter whatever the frame buffer already holds there.
+
+The 4×4 DC does follow H.264: `+2` per available edge and a shift of `1 + edges`, from the two little
+sum helpers at `0x03000f38` (above) and `0x03000f64` (left).
+
+### Mode coding is H.264's too
+
+The loop at `0x030008fc` walks the 4×4 blocks in raster order: predicted mode is `min(above, left)`,
+one bit accepts it, otherwise three bits carry a remainder with the predicted value skipped
+(`rem >= pred → rem + 1`). Neighbour modes live in a byte array at `0x030008c2` with a **row stride of
+5** — four block columns plus one border column preset to `9`, the "unavailable" marker that maps to
+DC. After the last block the loop reads one `ue(v)` for the chroma mode and dispatches through the
+chroma table, which is why the grammar shows a `ue` there.
