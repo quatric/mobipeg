@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""List and unpack the 'VX++' movie streams in a 64 MB GBA Video cartridge.
+"""List and unpack ActImagine movie streams in a 64 MB GBA Video cartridge.
 
 These carts (Shrek + Shark Tale and friends) are ActImagine, but neither the
 ADS nor the Hydrogen stack and not the DS '.vx' container either. Their video
 is one continuous bitstream with no per-frame sizes, which is why the header's
-seek table addresses it in *bits*.
+seek table addresses it in *bits*.  Two GBA revisions are known: ``VX++`` and
+the earlier CAVLC-based ``VXGB`` revision.
 
     ./gbavx_extract.py rom.gba                 # list the streams
     ./gbavx_extract.py rom.gba -o outdir       # dump every stream
@@ -13,10 +14,9 @@ Each dumped stream becomes three files: `.hdr.txt` (fields, chapters, seek
 table), `.video` (the raw bitstream, starting at bit 0 of frame 0) and
 `.audio` (3124 bytes of codebook extradata, then the audio data).
 
-The bitstream itself is *not* the DS VX bitstream: libavcodec/vx.c rejects
-frame 0 under every quantizer and byte order, so this is an earlier generation
-of the codec that still needs its own reverse engineering. See
-doc/gba_video_ads.md.
+Neither bitstream is the DS VX bitstream. VXGB does reuse its H.264-style CAVLC
+residual coder, while VX++ replaces that component with a cartridge-ROM VLC
+codebook. See doc/gba_video_vxgb.md and doc/gba_video_vxpp.md.
 """
 
 import argparse
@@ -24,7 +24,7 @@ import os
 import struct
 import sys
 
-MAGIC = b'VX++'
+MAGICS = (b'VX++', b'VXGB')
 HEADER_SIZE = 0x38
 
 # The coefficient codebook and the decoder itself both live in cartridge ROM and
@@ -37,13 +37,23 @@ HEADER_SIZE = 0x38
 # assumed -- that address is 0x51c too far and yields a different table.
 #   name -> (rom offset, length)
 CODEBOOK = 0x9ae4
-TABLES = {
+VXPP_TABLES = {
     'vlc_rom_full4096.bin':   (CODEBOOK, 8192),           # 4096 LE uint16 cells
     'value_offset_table.bin': (CODEBOOK + 0x2000, 128),   # escape: value offsets
     'run_offset_table.bin':   (CODEBOOK + 0x2080, 128),   # escape: run offsets
     # The decoder runs from IWRAM; this is the image copied there at boot, so
     # ROM 0xbcc8 == IWRAM 0x03000000. Every address in the doc indexes into it.
     'iwram.bin':              (0xbcc8, 0x8000),
+}
+
+# The original VXGB decoder has no external VLC codebook.  Its complete IWRAM
+# source image begins 0x780 bytes earlier than VX++ in the Shrek Rev 5 ROM.
+# A live mGBA dump during movie playback matches this 32 KiB ROM window in
+# 32516/32768 bytes; the remaining bytes are self-modified immediates, relocated
+# pointers and interrupt state.  Keeping the ROM image makes every 0x0300xxxx
+# decoder address available to the disassembler without an emulator.
+VXGB_TABLES = {
+    'iwram.bin':              (0xb548, 0x8000),
 }
 
 # The audio region opens with the trained codebooks: 3*64*8 int16, then
@@ -56,7 +66,7 @@ class Stream:
     def __init__(self, rom, off):
         f = struct.unpack_from('<4s13I', rom, off)
         self.off = off
-        (_, self.nb_frames, self.width, self.height, self.frame_rate,
+        (self.magic, self.nb_frames, self.width, self.height, self.frame_rate,
          self.quantizer, self.sample_rate, self.audio_off, self.chapter_off,
          self.last_chapter, self.seek_off, self.nb_seek, self.unk30,
          self.unk34) = f
@@ -81,7 +91,7 @@ class Stream:
         """
         if self.frame_rate == 0x30c3:
             return 7.0
-        raise ValueError("unknown VX++ frame timing field %#x" % self.frame_rate)
+        raise ValueError("unknown GBA VX frame timing field %#x" % self.frame_rate)
 
     def ok(self, romlen):
         return (self.width in range(16, 241) and self.height in range(16, 241)
@@ -94,6 +104,7 @@ class Stream:
     def describe(self):
         secs = self.nb_frames / self.fps
         out = [
+            'magic           %s' % self.magic.decode('ascii'),
             'offset          0x%08x' % self.off,
             'size            0x%08x' % self.size,
             'frames          %d' % self.nb_frames,
@@ -120,11 +131,17 @@ class Stream:
 
 
 def find_streams(rom):
-    out, pos = [], 0
-    while True:
-        pos = rom.find(MAGIC, pos)
-        if pos < 0:
-            return out
+    out, positions = [], set()
+    for magic in MAGICS:
+        pos = 0
+        while True:
+            pos = rom.find(magic, pos)
+            if pos < 0:
+                break
+            positions.add(pos)
+            pos += 4
+
+    for pos in sorted(positions):
         if not (pos & 3):
             try:
                 s = Stream(rom, pos)
@@ -132,9 +149,7 @@ def find_streams(rom):
                 s = None
             if s and s.ok(len(rom)):
                 out.append(s)
-                pos += s.size
-                continue
-        pos += 4
+    return out
 
 
 def main():
@@ -149,12 +164,13 @@ def main():
 
     streams = find_streams(rom)
     if not streams:
-        print('no VX++ streams in %s' % args.rom, file=sys.stderr)
+        print('no VX++ or VXGB streams in %s' % args.rom, file=sys.stderr)
         return 1
 
     for i, s in enumerate(streams):
-        print('[%d] 0x%08x  %dx%d  %d frames  %.2f fps  %d Hz  %d chapters'
-              % (i, s.off, s.width, s.height, s.nb_frames, s.fps,
+        print('[%d] %s 0x%08x  %dx%d  %d frames  %.2f fps  %d Hz  %d chapters'
+              % (i, s.magic.decode('ascii'), s.off, s.width, s.height,
+                 s.nb_frames, s.fps,
                  s.sample_rate, len(s.chapters)))
         if not args.outdir:
             continue
@@ -169,11 +185,17 @@ def main():
             f.write(rom[s.off + s.audio_off:s.off + s.chapter_off])
         print('     -> %s.{hdr.txt,video,audio}' % base)
 
-    if args.outdir:
-        for name, (off, n) in sorted(TABLES.items()):
+    magics = {s.magic for s in streams}
+    if args.outdir and b'VX++' in magics:
+        for name, (off, n) in sorted(VXPP_TABLES.items()):
             with open(os.path.join(args.outdir, name), 'wb') as f:
                 f.write(rom[off:off + n])
-        print('[tables] -> %s' % ', '.join(sorted(TABLES)))
+        print('[tables] -> %s' % ', '.join(sorted(VXPP_TABLES)))
+    elif args.outdir and b'VXGB' in magics:
+        for name, (off, n) in sorted(VXGB_TABLES.items()):
+            with open(os.path.join(args.outdir, name), 'wb') as f:
+                f.write(rom[off:off + n])
+        print('[VXGB decoder] -> %s' % ', '.join(sorted(VXGB_TABLES)))
 
     return 0
 
