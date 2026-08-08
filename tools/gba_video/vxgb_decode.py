@@ -16,27 +16,9 @@ import vx_reconstruct as R
 import vxgb_sim as S
 
 
-# VXGB/DS CAVLC writes coefficients in ActImagine's transposed zigzag, while
-# vx_reconstruct accepts the VX++ scan order. Re-index without changing values.
-VXGB_ZIGZAG = (0, 4, 1, 2, 5, 8, 12, 9, 6, 3, 7, 10, 13, 14, 11, 15)
-_TO_VXPP_SCAN = tuple(R.ZIGZAG.index(raster) for raster in VXGB_ZIGZAG)
-
-
 def _adapt_unit(unit, mb_x, mb_y):
     unit['off'] = ((unit['y'] - mb_y) * R.STRIDE + unit['x'] - mb_x)
-    if 'resid' in unit:
-        unit['resid'] = [
-            (mask, [(plane, _reorder(coeffs)) for plane, coeffs in blocks])
-            for mask, blocks in unit['resid']
-        ]
     return unit
-
-
-def _reorder(coeffs):
-    out = [0] * 16
-    for source, target in enumerate(_TO_VXPP_SCAN):
-        out[target] = coeffs[source]
-    return out
 
 
 def load_metadata(path):
