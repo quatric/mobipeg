@@ -98,17 +98,19 @@ Everything below was read out of the decoder image, not guessed.
 
 ## What is left
 
-1. **Native `gba_vx` video decoder.** The ROM demuxer, segment packet contract and native audio path
-   are done. Port the hardware-exact Python video reference into `libavcodec`; one decoder packet is a
+1. **Native `VX++` video decoder.** The ROM demuxer, segment packet contract and native audio path
+   are done. Port the hardware-exact Python VX++ video reference into `libavcodec`; one decoder packet is a
    complete self-contained seek segment and may emit many frames. The decoder should validate the
    `GVX1` prefix, skip the recorded leading bits, read the per-segment quantiser and emit the prefix's
    frame count while retaining its four-slot reference arena within the packet.
-2. **The earlier `VXGB` GBA revision.** Container extraction, audio, the complete bitstream parser and
-   Python pixel reconstruction are now implemented; see `gba_video_vxgb.md`. The Rev 5 decoder is ROM
-   `0xb548` → IWRAM `0x03000000`, all sixteen recursive dispatchers map to VX++, and the syntax break
-   is standard H.264-style CAVLC residuals rather than VX++'s ROM coefficient codebook. All 195 seek
-   segments parse and all 194 recorded transitions are bit-exact. Python frame 103 matches the live
-   mGBA scene spatially. A byte-exact YUV hardware dump and native decoder remain.
+2. **The earlier `VXGB` GBA revision is native.** See `gba_video_vxgb.md`. The Rev 5 decoder is ROM
+   `0xb548` → IWRAM `0x03000000`; all sixteen recursive dispatchers map to VX++, while residuals use
+   standard H.264-style CAVLC rather than VX++'s ROM coefficient codebook. `libavcodec/gbavxdec.c`
+   now emits multiple frames per `GVX1` seek packet and shares parameterized prediction/CAVLC code
+   with `vx.c`. A live 57,600-byte NV12 capture matches Python, all 140 frames of the 20-second native
+   sample match the hardware-proven reference after RGB conversion, and a 160-frame comparison stays
+   exact across the first seek boundary at frame 155. Wider direct mGBA busy-frame/seek captures are
+   the only optional coverage still missing for this revision.
 3. **Optional audio hardware capture.** Framing is exact and the codec core was already validated on
    DS/SX data, but dumping GBA PCM would provide the same byte-for-byte final check used for video.
 
