@@ -1446,3 +1446,54 @@ prediction path is now fully ported.
 The dispatcher's neighbour prediction of the motion vector before modes 0/3/8/9/10/11 consume it; how
 the three reference frames are rotated as frames are decoded; the five unread reconstruct variants;
 and the integration that walks `vx_sim`'s symbols into a frame buffer.
+
+## 19. The residual path and the macroblock loop
+
+### The "six reconstruct variants" are three planes times two paths
+
+Not six transforms. The residual loop keeps a plane index in `r10` — 0 luma, 1 Cb, 2 Cr — and that
+index selects into one of *two* three-entry tables:
+
+- `0x0300577c` — full inverse transform, per plane: `0x03005a94`, `0x03005b2c`, `0x03005be4`
+- `0x03005788` — DC-only fast path, per plane: `0x03005c9c`, `0x03005e30`, `0x03006044`
+
+Variant 0 confirms §14's transform port instruction for instruction: `+0x20` on `d0` before the row
+pass, the same butterfly, `asr #6`, then the clamp. Variant 1 differs only in writing bytes 0, 2, 4, 6
+and reassembling 1, 3, 5, 7 untouched — the Cb half of an interleaved pair, which is the §17 layout
+showing up again. Variant 3 has no butterfly at all: it adds one value, `dc asr #6`, to every pixel,
+which is what a block carrying nothing but a DC coefficient needs.
+
+### The coded-block-pattern is six bits over an 8×8 quadrant
+
+The loop at `0x03005650` walks a macroblock in 8×8 quadrants. Each quadrant reads **one `ue(v)`**,
+maps it through the permutation table at `0x03005610`, and reads the result as six bits: bits 0–3 are
+the quadrant's four luma 4×4 blocks, bit 4 is Cb, bit 5 is Cr. Four quadrants per macroblock gives the
+16 luma and 8 chroma blocks §10 arrived at, and confirms §10's correction of §8 from the other
+direction.
+
+Block stepping inside a quadrant is `+4`, `+0x3fc`, `+4` — right, then down-and-back-left, then right.
+
+### Motion vectors are predicted by the median of three
+
+The macroblock loop (`0x03000520`, the vector code at `0x030005b0`) computes, per component,
+`sum − min − max` of three neighbouring vectors — the cheap median, and H.264's predictor. It leaves
+the result in `fp`/`ip` and calls the dispatcher, which is why modes 0/8/10 can use the vector without
+reading anything and modes 3/9/11 need only a delta.
+
+The predictor writes its final vector back with `strh` as `mv_x | (mv_y << 8)`, so **each component is
+a signed byte** and vectors span roughly ±128 full pixels. The context is one halfword per macroblock
+with a row stride of `0x24` — 18 entries where the 240-wide frame needs 15, the remainder being
+border.
+
+### Loop geometry
+
+Per macroblock, luma and chroma each advance 16 bytes. Per macroblock row, luma advances `0x1000`
+(16 lines) and chroma `0x800` (8 lines) — chroma being half height but the same width in bytes, since
+its samples are two bytes. The frame width is read from `[r0,#0x18]`.
+
+### Still open
+
+Only two things. How the three reference frames are rotated as frames are decoded — that lives in the
+frame-level setup near `0x03006e40`, not in the macroblock loop. And the driver that walks `vx_sim`'s
+symbol stream into a frame buffer: every primitive it needs now exists, but nothing calls them in
+sequence yet.
