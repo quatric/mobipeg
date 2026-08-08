@@ -73,8 +73,15 @@ class Stream:
 
     @property
     def fps(self):
-        """0x30c3 on every retail stream, i.e. 12.19 fps."""
-        return self.frame_rate / 1024.0
+        """Playback cadence for the retail 0x30c3 timing field.
+
+        This field is not Q10 frames/second.  The audio stream proves the
+        cadence independently: 128/7 AFrames per video frame, 128 samples per
+        AFrame and 16384 samples/second gives exactly 7 video frames/second.
+        """
+        if self.frame_rate == 0x30c3:
+            return 7.0
+        raise ValueError("unknown VX++ frame timing field %#x" % self.frame_rate)
 
     def ok(self, romlen):
         return (self.width in range(16, 241) and self.height in range(16, 241)

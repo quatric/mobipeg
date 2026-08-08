@@ -161,11 +161,12 @@ def add_residual_dc(buf, off, dc, plane=0):
     """DC-only fast path (0x03005788's three entries, e.g. 0x03005c9c).
 
     When a block carries nothing but its DC there is no transform at all: one
-    value is added to every pixel. `dc` is the dequantised DC, added as dc >> 6
-    -- the same shift the full path applies after its row pass.
+    value is added to every pixel. `dc` is the dequantised DC, added as
+    ``(dc + 32) >> 6`` -- the same rounding and shift the full path applies
+    after its row pass.
     """
     bps, base_off = PLANE[plane]
-    v = dc >> 6
+    v = (dc + 32) >> 6
     for r in range(4):
         base = off + base_off + r * STRIDE
         for c in range(4):
@@ -191,8 +192,12 @@ def intra_horizontal(buf, off, w, h):
 
 
 def intra_dc(buf, off, w, h, have_left, have_top):
-    """Mode 2 (0x03000a54): mean of the top row and left column, with the
-    availability fallbacks the ARM takes (neither -> 128)."""
+    """Mode 2 (0x03000a54): rounded edge means, with availability fallbacks.
+
+    When both edges exist the ARM rounds each edge mean independently, then
+    rounds the mean of those two results.  This is observably different from
+    taking one weighted mean when the block is rectangular.
+    """
     if not have_left and not have_top:
         dc = 0x80
     elif have_top and not have_left:
@@ -200,9 +205,9 @@ def intra_dc(buf, off, w, h, have_left, have_top):
     elif have_left and not have_top:
         dc = (sum(buf[off + r * STRIDE - 1] for r in range(h)) + h // 2) // h
     else:
-        s = sum(buf[off - STRIDE + i] for i in range(w))
-        s += sum(buf[off + r * STRIDE - 1] for r in range(h))
-        dc = (s + (w + h) // 2) // (w + h)
+        top = (sum(buf[off - STRIDE + i] for i in range(w)) + w // 2) // w
+        left = (sum(buf[off + r * STRIDE - 1] for r in range(h)) + h // 2) // h
+        dc = (top + left + 1) // 2
     for r in range(h):
         base = off + r * STRIDE
         buf[base: base + w] = bytes([dc]) * w
@@ -393,9 +398,15 @@ def _avg3(a, b, c):
     return (a + 2 * b + c + 2) >> 2
 
 
-def intra4x4(buf, off, mode):
-    """Predict one 4x4 luma block. `off` is its byte offset in the frame buffer,
-    which is also what the ARM tests for edge availability."""
+def intra4x4(buf, off, mode, frame_off=None):
+    """Predict one 4x4 luma block.
+
+    ``off`` indexes the host buffer, while ``frame_off`` is the decoder's
+    plane-relative offset used for edge-availability tests.  They differ in
+    the reconstruction driver because its safety margin precedes the plane.
+    """
+    if frame_off is None:
+        frame_off = off
     t, l, c = _nb(buf, off)
     p = [[0] * 4 for _ in range(4)]
 
@@ -409,8 +420,8 @@ def intra4x4(buf, off, mode):
                 p[y][x] = l[y]
     elif mode == 2:
         # 0x03000f90: +2 per available edge, shift 1 + (number of edges).
-        have_left = (off & 0xff) != 0
-        have_top = (off & 0xff00) != 0
+        have_left = (frame_off & 0xff) != 0
+        have_top = (frame_off & 0xff00) != 0
         if not have_left and not have_top:
             dc = 0x80
         else:
@@ -562,7 +573,7 @@ def inter_copy_chroma(buf, ref, off, mv_x, mv_y, w, h):
 
 
 def inter_copy_dc(buf, ref, off, mv_x, mv_y, w, h, dc):
-    """Mode 5 (0x03001854): motion compensation plus a coded DC correction.
+    """The luma half of mode 5's motion compensation plus DC correction.
 
     The vector is explicit -- two se(v) rather than a predicted candidate -- and
     three further se(v) carry one offset per component, applied as
@@ -576,6 +587,23 @@ def inter_copy_dc(buf, ref, off, mv_x, mv_y, w, h, dc):
         for i in range(w):
             p = ref[s + i] + 2 * dc
             buf[d + i] = 0 if p < 0 else 255 if p > 255 else p
+
+
+def inter_copy_chroma_dc(buf, ref, off, mv_x, mv_y, w, h, dc):
+    """The interleaved Cb/Cr half of mode 5 (0x0300192c).
+
+    `dc` is `(Cb, Cr)`, the fourth and fifth se(v) values. The ARM loads a
+    halfword, applies `2*dc[0]` to its low byte and `2*dc[1]` to its high byte,
+    clamps each independently, and writes the pair back.
+    """
+    _, lc = mv_offsets(mv_x, mv_y)
+    for r in range(h // 2):
+        s = off + lc + r * STRIDE
+        d = off + r * STRIDE
+        for i in range(0, w, CHROMA_BPS):
+            for component in range(CHROMA_BPS):
+                p = ref[s + i + component] + 2 * dc[component]
+                buf[d + i + component] = 0 if p < 0 else 255 if p > 255 else p
 
 
 def intra_midpoint_corrected(buf, off, w, h, delta):

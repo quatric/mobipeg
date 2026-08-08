@@ -53,8 +53,10 @@
 #include "internal.h"
 #include "libavcodec/defs.h"
 
-/* Samples in one Hydrogen audio block; see derive_frame_rate(). */
-#define HYDROGEN_SAMPLES_PER_BLOCK 16458
+/* Samples in one Majesco audio block; see derive_frame_rate().  The ADS and
+ * Hydrogen players use the same codec loop and reload the same 0x404a sample
+ * counter for every block. */
+#define ADS_SAMPLES_PER_BLOCK 16458
 
 #define T_VIDEO 1
 #define T_AUDIO 2
@@ -82,8 +84,7 @@ typedef struct GBAVideoDemuxContext {
     int nb_blocks, block;
     uint16_t *block_size;       /* in words */
     int64_t audio_pts;
-    int samples_per_block;      /* estimated, see read_header */
-    int64_t nb_video_frames;
+    int samples_per_block;
 } GBAVideoDemuxContext;
 
 /** Skip a NUL-terminated obfuscated string, padded to four bytes. */
@@ -196,7 +197,6 @@ static int parse_video_resource(AVFormatContext *avctx, int64_t off,
     st->codecpar->width      = 240;
     st->codecpar->height     = 160;
     st->nb_frames            = (w0 >> 8) & 0xFFFF;
-    s->nb_video_frames       = st->nb_frames;
     s->video_idx             = st->index;
     avpriv_set_pts_info(st, 64, 1, s->frame_rate);
 
@@ -246,12 +246,13 @@ static int parse_audio_resource(AVFormatContext *avctx, int64_t off,
 }
 
 /**
- * Time a Hydrogen movie from its soundtrack.
+ * Time a Majesco movie from its soundtrack.
  *
  * Nothing in the container states a frame rate, but the audio decoder re-reads
- * a header every 0x404a samples (SoundPlayer_ADPCM at 0x08005f54) and a block
- * carries exactly that many, so the block count fixes the running time and the
- * video's own frame count then fixes its rate.
+ * a header every 0x404a samples (SoundPlayer_ADPCM at 0x08005f54) and both the
+ * ADS and Hydrogen players carry exactly that many samples per block.  The
+ * block count therefore fixes the running time and the video's own frame
+ * count fixes its rate.
  */
 static int derive_frame_rate(AVFormatContext *avctx, int64_t base, int count)
 {
@@ -283,7 +284,7 @@ static int derive_frame_rate(AVFormatContext *avctx, int64_t base, int count)
         return 0;
 
     return av_clip(av_rescale(frames, s->sample_rate,
-                              (int64_t)HYDROGEN_SAMPLES_PER_BLOCK * blocks),
+                              (int64_t)ADS_SAMPLES_PER_BLOCK * blocks),
                    1, 240);
 }
 
@@ -302,7 +303,7 @@ static int read_mmstr(AVFormatContext *avctx, int64_t base)
     count = avio_rl32(pb) & s->count_mask;
 
     if (!s->frame_rate) {
-        s->frame_rate = s->inflate ? derive_frame_rate(avctx, base, count) : 0;
+        s->frame_rate = derive_frame_rate(avctx, base, count);
         if (!s->frame_rate)
             s->frame_rate = 30;
         av_log(avctx, AV_LOG_VERBOSE, "frame rate %d\n", s->frame_rate);
@@ -336,19 +337,8 @@ static int read_mmstr(AVFormatContext *avctx, int64_t base)
         return AVERROR_INVALIDDATA;
     }
 
-    /* Neither the block table nor the block itself records how many samples a
-     * block carries, so pace the audio off the movie's own length: the two
-     * streams cover the same wall clock. Without video there is nothing to
-     * pace against and blocks are timed by their coded size instead. */
-    if (s->audio_idx >= 0 && s->inflate) {
-        s->samples_per_block = HYDROGEN_SAMPLES_PER_BLOCK;
-    } else if (s->audio_idx >= 0) {
-        if (s->nb_video_frames > 0)
-            s->samples_per_block = av_rescale(s->nb_video_frames, s->sample_rate,
-                                              (int64_t)s->frame_rate * s->nb_blocks);
-        if (s->samples_per_block <= 0)
-            s->samples_per_block = 0;
-    }
+    if (s->audio_idx >= 0)
+        s->samples_per_block = ADS_SAMPLES_PER_BLOCK;
 
     return 0;
 }
@@ -721,7 +711,7 @@ static int gbavideo_read_close(AVFormatContext *avctx)
 
 #define OFFSET(x) offsetof(GBAVideoDemuxContext, x)
 static const AVOption gbavideo_options[] = {
-    { "frame_rate", "video frame rate (0 = derive it, else 30)",
+    { "frame_rate", "video frame rate (0 = derive it, falling back to 30)",
       OFFSET(frame_rate), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 240,
       AV_OPT_FLAG_DECODING_PARAM },
     { "sample_rate", "audio sample rate (the container does not record one)",
