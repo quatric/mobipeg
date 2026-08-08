@@ -21,10 +21,16 @@ import sys
 from vx_grammar import GRAMMAR, TOP, MB_PER_FRAME
 
 ROM = os.environ.get("VXPP_ROM", "")  # path to the GBA Video cart dump
-VLC = "/tmp/gbavx/vlc_rom_full4096.bin"
-VOFS = "/tmp/gbavx/value_offset_table.bin"
-ROFS = "/tmp/gbavx/run_offset_table.bin"
-STREAM = os.environ.get("VXPP_STREAM", "/tmp/gbavx/stream00.video")
+
+# Streams and VLC tables both come out of the cart via gbavx_extract.py -o. They
+# default to build_gbavx/ at the repo root rather than /tmp, which gets cleared:
+#   ./gbavx_extract.py <rom.gba> -o "$(git rev-parse --show-toplevel)/build_gbavx"
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATA = os.environ.get("VXPP_DATA", os.path.join(_REPO, "build_gbavx"))
+VLC = os.path.join(DATA, "vlc_rom_full4096.bin")
+VOFS = os.path.join(DATA, "value_offset_table.bin")
+ROFS = os.path.join(DATA, "run_offset_table.bin")
+STREAM = os.environ.get("VXPP_STREAM", os.path.join(DATA, "stream00.video"))
 
 CBP_PERMTAB = [
     0x00,0x0f,0x1f,0x08,0x02,0x01,0x04,0x3f,0x0a,0x05,0x0e,0x0b,0x03,0x0c,0x10,0x0d,
