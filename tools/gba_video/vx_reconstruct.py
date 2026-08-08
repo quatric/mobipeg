@@ -146,11 +146,61 @@ def intra_dc(buf, off, w, h, have_left, have_top):
         buf[base: base + w] = bytes([dc]) * w
 
 
+def intra_midpoint(buf, off, w, h):
+    """Mode 3 (0x03000ba4): recursive midpoint subdivision -- NOT H.264 plane.
+
+    The entry seeds the block's bottom-right corner from the two far neighbours,
+    then dispatches to one of eleven size-specialised fills through the table at
+    0x03000b78, indexed by (w>>3) + 4*(h>>3) -- indices 3 and 7 are zero, being
+    the combinations that cannot occur. All eleven are the same three writes
+    around a recursive quadrant split, so they collapse into one function.
+    """
+    br = ((buf[off + (w - 1) - STRIDE] +          # (w-1, -1)
+           buf[off + (h - 1) * STRIDE - 1]) + 1) >> 1   # (-1, h-1)
+    buf[off + (h - 1) * STRIDE + (w - 1)] = br
+    _midpoint_fill(buf, off, w, h)
+
+
+def _midpoint_fill(buf, off, w, h):
+    """One subdivision level: bottom-edge, right-edge, then centre, then recurse.
+
+    The corner at (w-1, h-1) is already set on entry. Note these three use a
+    bare >>1 with no rounding, unlike the +1 the corner seed above applies.
+
+    Which pair of points the centre interpolates between depends on the block's
+    aspect: vertically down column sw-1 when log2(w)+log2(h) is even, and
+    horizontally along row sh-1 when it is odd. That parity is unchanged by
+    halving both sides, so a block keeps one axis for its whole recursion --
+    which is why 16x16 recurses into 8x8 (both vertical) and 16x8 into 8x4
+    (both horizontal). Verified against all nine size variants.
+    """
+    if w < 2 or h < 2:
+        return
+    sw, sh = w // 2, h // 2
+    corner = buf[off + (h - 1) * STRIDE + (w - 1)]
+
+    bot = (buf[off + (h - 1) * STRIDE - 1] + corner) >> 1        # (-1, h-1)
+    buf[off + (h - 1) * STRIDE + (sw - 1)] = bot                 # (sw-1, h-1)
+
+    right = (buf[off + (w - 1) - STRIDE] + corner) >> 1          # (w-1, -1)
+    buf[off + (sh - 1) * STRIDE + (w - 1)] = right               # (w-1, sh-1)
+
+    if not ((w.bit_length() + h.bit_length()) & 1):
+        centre = (bot + buf[off + (sw - 1) - STRIDE]) >> 1       # (sw-1, -1)
+    else:
+        centre = (right + buf[off + (sh - 1) * STRIDE - 1]) >> 1  # (-1, sh-1)
+    buf[off + (sh - 1) * STRIDE + (sw - 1)] = centre
+
+    _midpoint_fill(buf, off, sw, sh)
+    _midpoint_fill(buf, off + sw, sw, sh)
+    _midpoint_fill(buf, off + sh * STRIDE, sw, sh)
+    _midpoint_fill(buf, off + sh * STRIDE + sw, sw, sh)
+
+
 # ---------------------------------------------------------------- TODO
 #
 # Still to reverse and port before this can render a picture:
 #
-#   * Whole-block intra mode 3 (0x03000ba4) -- plane prediction.
 #   * The four chroma intra modes at 0x03000874:
 #       0x03000c08, 0x03000d90, 0x03000dd4, 0x03000e44
 #   * The nine intra 4x4 modes at 0x030008d8, selected per sub-block by the

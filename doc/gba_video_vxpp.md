@@ -1228,3 +1228,97 @@ Frame 0 of segments 0 and 1 is *pure* intra with **no residual at all** — 104 
 split. With no residual and no neighbours at the top-left, it reconstructs to flat grey: a title card.
 Real picture content needs inter prediction as well, so there is no shortcut to a watchable frame via
 keyframes alone — segment 2 onward mixes inter modes into its keyframes.
+
+---
+
+## 15. The emulator is no longer needed, and §3's codebook address was wrong
+
+Everything the parser needs is in the cartridge, statically. Two findings remove the mGBA/GDB stub
+from the workflow entirely — which matters, because that stub was the least reliable part of it.
+
+### The decoder image is in ROM: `0xbcc8` == IWRAM `0x03000000`
+
+The decoder runs from IWRAM, but IWRAM is filled from ROM at boot, so the image can simply be lifted.
+Searching the ROM for the two-instruction signature of the coefficient loop
+(`add r12,r12,r5,lsl #2` / `str r6,[r12],#4`, documented in §11) gives exactly **one** hit, at ROM
+`0x114d4`, which puts the image base at ROM `0xbcc8`.
+
+Confirmed three independent ways before being relied on:
+
+- all 16 entries of the mode jump table at `0x03001d4c` are valid IWRAM pointers;
+- the dequant factors at `0x03000680` read 10, 13, 16, 11, 14, 18, 13, 16, 20 — H.264's table;
+- the reconstruct-variant table at `0x0300577c` yields `0x03005a94`, `0x03005b2c`, `0x03005be4`,
+  `0x03005c9c`, `0x03005e30`, `0x03006044` — the exact six addresses earlier sessions recorded live.
+
+`gbavx_extract.py -o` now writes `iwram.bin` alongside the streams, and `vx_dis.py` disassembles any
+range of it. Every `0x03xxxxxx` address in this document indexes straight into that file.
+
+### The codebook is at ROM `0x9ae4`, not `0xa000`
+
+§5's "Bug 2" established that the live codebook is not the `0x8000a000` one — it read the true table
+from an EWRAM copy at `fp=0x020010e4` and noted the ROM source was "not investigated further". It is
+worth investigating: the blob is in ROM verbatim, at **`0x9ae4`**, `0x51c` below the address §3 and §5
+assumed.
+
+Located from the two live values those sections preserved — `table[89] == 0x808d` and
+`value_offset_table[64] == 8` — which together leave three candidates in the whole 64 MB ROM. Only
+`0x9ae4` has all 4096 cells non-zero with no code length above 13; the other two carry 345 and 433
+impossible lengths, i.e. they are noise. The layout matches the runtime one exactly: 4096 LE uint16
+cells, then the escape tables at `+0x2000` and `+0x2080`. It also sits flush against the IWRAM image
+at `0xbcc8`, which is a coherent cartridge layout.
+
+**Proof**: with the tables regenerated from `0x9ae4`, all four streams parse bit-exactly again —
+**353/353 seek segments, 70,437 frames**. From `0xa000` the parser dies on the first frame of the
+first stream in under half a second. A wrong codebook cannot produce a bit-exact parse of a whole
+cartridge; a right one cannot fail instantly.
+
+### Method note
+
+The failure was caught in the first second by `vx_validate.py`, written minutes earlier as a permanent
+tool precisely because the previous session's checks had lived in `/tmp` and been lost. The cost of
+rebuilding the parser's inputs from a documented-but-superseded recipe was one command; the cost of
+*not noticing* would have been a wrong table quietly feeding every later reconstruction result. Both
+the disassembler and the validator now live in `tools/gba_video/`, and the extractor emits the tables
+it needs, so the whole pipeline reproduces from the ROM alone.
+
+## 16. Intra mode 3 is recursive midpoint subdivision, not plane prediction
+
+The luma table's fourth entry (`0x03000ba4`) was assumed to be H.264's plane mode. It is not.
+
+The entry seeds the block's **bottom-right corner** from the two far neighbours —
+`(above_right + below_left + 1) >> 1`, taking `(w-1,-1)` and `(-1,h-1)` — and then dispatches through
+an 11-entry table at `0x03000b78` indexed by `(w>>3) + 4*(h>>3)`. Indices 3 and 7 hold zero, being
+exactly the combinations that cannot occur, and the table ends precisely where mode 3's own code
+begins — an 11-word fit that confirms the indexing.
+
+Each of the eleven targets is the same three writes, then a recursion into four quadrants. For a block
+whose bottom-right corner is set, with `sw,sh = w/2,h/2`:
+
+    bottom_mid(sw-1, h-1) = (left(-1, h-1)  + corner) >> 1
+    right_mid (w-1, sh-1) = (top (w-1, -1)  + corner) >> 1
+    centre    (sw-1, sh-1)                                     -- see axis rule
+
+Note the bare `>>1`, with none of the `+1` rounding the corner seed uses.
+
+### The centre's axis follows a parity rule
+
+The centre can be reached two ways, and which one the code uses varies by block shape. Reading all
+nine size variants:
+
+| w×h  | 4×4 | 8×4 | 16×4 | 4×8 | 8×8 | 16×8 | 4×16 | 8×16 | 16×16 |
+|------|-----|-----|------|-----|-----|------|------|------|-------|
+| axis |  V  |  H  |  V   |  H  |  V  |  H   |  V   |  H   |   V   |
+
+- **V** — `(bottom_mid + top(sw-1,-1)) >> 1`, down column `sw-1`
+- **H** — `(right_mid + left(-1,sh-1)) >> 1`, along row `sh-1`
+
+The rule is **vertical iff log2(w) + log2(h) is even**. "Square versus rectangular" fits six of the
+nine and fails on 16×4 and 4×16, which are 4:1 yet vertical — worth stating because it was the first
+hypothesis and it is wrong.
+
+The parity is invariant under halving both sides, so a block keeps one axis for its entire recursion.
+That is a real consistency check rather than a restatement: 16×16 recurses into 8×8 (V into V) and
+16×8 into 8×4 (H into H), and every one of the eleven routines calls only same-parity children.
+
+Ported as a single recursive `intra_midpoint` in `tools/gba_video/vx_reconstruct.py`, since all eleven
+hardware routines are one function specialised by size.
