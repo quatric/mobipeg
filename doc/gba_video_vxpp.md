@@ -1497,3 +1497,26 @@ Only two things. How the three reference frames are rotated as frames are decode
 frame-level setup near `0x03006e40`, not in the macroblock loop. And the driver that walks `vx_sim`'s
 symbol stream into a frame buffer: every primitive it needs now exists, but nothing calls them in
 sequence yet.
+
+### The decoder context, pinned
+
+The frame driver calls the macroblock loop with `r0 = ctx + 0xbc` (`0x03006dc4`), which turns every
+`[r0,#N]` in the predictors into a concrete field:
+
+| `[r0,#N]` | ctx | meaning |
+|-----------|-----|---------|
+| `-0x20` / `-0x1c` | `0x9c` / `0xa0` | reference 0, luma / chroma base |
+| `-0x18` / `-0x14` | `0xa4` / `0xa8` | reference 1, luma / chroma base |
+| `-0x10` / `-0x0c` | `0xac` / `0xb0` | reference 2, luma / chroma base |
+| `-0x08` / `-0x04` | `0xb4` / `0xb8` | current frame, luma / chroma base |
+| `0x00` / `0x04` | `0xbc` / `0xc0` | luma / chroma byte offset of this macroblock |
+| `0x08` | `0xc4` | motion-vector context pointer |
+| `0x18` | `0xd4` | frame width in pixels |
+
+The offsets at `+0x00`/`+0x04` are both what every predictor adds to its base *and* what the intra
+modes test for edge availability — a macroblock's position and its neighbour availability are
+literally the same number, which is why §17's availability trick works.
+
+Four frame buffers are allocated (the setup loop at `0x03006e40` runs `r7 = 0..3`), matching three
+references plus the frame being decoded. How the four are rotated between frames is the one piece of
+the architecture still unread.
