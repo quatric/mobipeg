@@ -2041,7 +2041,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .id        = AV_CODEC_ID_GBA_VX,
         .type      = AVMEDIA_TYPE_VIDEO,
         .name      = "gba_vx",
-        .long_name = NULL_IF_CONFIG_SMALL("ActImagine GBA VX++ Video"),
+        .long_name = NULL_IF_CONFIG_SMALL("ActImagine GBA VX Video"),
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
