@@ -164,8 +164,15 @@ static av_cold int vx_audio_close(AVCodecContext *avctx)
 static av_cold void vx_audio_flush(AVCodecContext *avctx)
 {
     VXAudioContext *s = avctx->priv_data;
-    for (int c = 0; c < s->nch; c++)
+    for (int c = 0; c < s->nch; c++) {
         s->st[c].have_prev = s->st[c].have_prev2 = 0;
+        memset(s->st[c].pulses_prev, 0, sizeof(s->st[c].pulses_prev));
+        memset(s->st[c].pulses_prev2, 0, sizeof(s->st[c].pulses_prev2));
+        memset(s->st[c].samples_prev, 0, sizeof(s->st[c].samples_prev));
+        s->st[c].scale_prev = 0;
+        memset(s->st[c].lpc_filter_prev, 0, sizeof(s->st[c].lpc_filter_prev));
+        memset(s->st[c].influence_prev, 0, sizeof(s->st[c].influence_prev));
+    }
 }
 
 static void unpack_pulse_values(int mode, const uint16_t *pulse_data, int *out, int *out_qty)
