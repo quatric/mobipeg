@@ -686,6 +686,7 @@ jobs:
             pyinstaller --name "mobipeg-gui" --windowed \
               "${BINARY_ARGS[@]}" \
               --add-data "logo.png;." --icon=logo.png \
+              --version-file version_info.txt \
               --distpath pyinst_dist encode_gui.py
             cd pyinst_dist
             # 7z may not exist on arm64 Windows runners — fall back to PowerShell
