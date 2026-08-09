@@ -37,7 +37,7 @@ Retail carts encountered so far split into four lineages or revisions:
 | **ADS** | 32 MB | Majesco in-house stack using LZMA — this document |
 | **Hydrogen** | 32 MB | Majesco derivative using Inflate — this document |
 | **VXGB** | 64 MB | Earlier ActImagine GBA revision — native, hardware-exact decoder |
-| **VX++** | 64 MB | ActImagine codec and GBA-specific container — see `gba_video_vxpp.md` |
+| **VX++** | 64 MB | ActImagine GBA revision — native, hardware-exact decoder; see `gba_video_vxpp.md` |
 
 `VXDS` belongs to the later DS container and is not a reliable classifier for
 these cartridges. Dragon Ball GT has an `SFCD` archive at offset 3720 (0xE88);
@@ -954,11 +954,9 @@ every refill and kicks a DMA when it crosses. That is also why the open routine
 appears to compare `VX++` against `0x08001000` — it is comparing against the
 window, not a fixed ROM address.
 
-**What is still missing for a decoder:** the frame header, the macroblock mode
-syntax that selects among the six handlers, and whatever the four handlers
-other than the plain inter one add — in particular whether any of them carries
-a real residual, since nothing seen so far codes one. Those are all reachable
-from the same disassembly; none of them is a research problem any more.
+This was the initial static picture. The frame grammar, all sixteen recursive
+dispatchers, proprietary residual VLC, reconstruction and native decoder are
+now complete; see `gba_video_vxpp.md` for the hardware-validated result.
 
 ### Driving the cart under mGBA
 

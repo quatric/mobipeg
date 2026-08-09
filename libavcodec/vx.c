@@ -107,6 +107,17 @@ static const uint8_t vxgb_residu_mask_tab[32] = {
     0x14, 0x18, 0x17, 0x1B, 0x1D, 0x1E, 0x16, 0x19,
 };
 
+static const uint8_t vxpp_residu_mask_tab[64] = {
+    0x00, 0x0F, 0x1F, 0x08, 0x02, 0x01, 0x04, 0x3F,
+    0x0A, 0x05, 0x0E, 0x0B, 0x03, 0x0C, 0x10, 0x0D,
+    0x07, 0x2F, 0x06, 0x09, 0x20, 0x1B, 0x1E, 0x17,
+    0x1A, 0x1D, 0x15, 0x11, 0x13, 0x12, 0x18, 0x14,
+    0x1C, 0x37, 0x3B, 0x3E, 0x19, 0x2B, 0x21, 0x27,
+    0x16, 0x2A, 0x2E, 0x25, 0x22, 0x3D, 0x2D, 0x28,
+    0x24, 0x35, 0x23, 0x3A, 0x33, 0x2C, 0x29, 0x30,
+    0x26, 0x31, 0x3C, 0x32, 0x39, 0x36, 0x34, 0x38,
+};
+
 /* level[i] applies to zigzag position i; zigzag_scan[i] gives the raster
  * (row-major within a 4x4 block) position for that zigzag index. This is
  * the "swapped 2bit" zigzag actimagine uses (not the standard H.264 one). */
@@ -148,7 +159,11 @@ typedef struct VXDecCtx {
     const uint8_t *residu_mask;
     const uint8_t *zigzag_scan;
     const uint8_t *mode_map;
+    const uint8_t *vxpp_vlc;
+    const uint8_t *vxpp_value;
+    const uint8_t *vxpp_run;
     int align_frame;
+    int gba_arena;
 
     VXPic dst;
     const VXPic *refs[3];
@@ -169,11 +184,30 @@ static int mid_pred3(int a, int b, int c)
     return FFMAX(FFMIN(a, b), FFMIN(FFMAX(a, b), c));
 }
 
-static inline int px_get(const uint8_t *data, int linesize, int width, int height,
-                          int plane, int x, int y)
+static MV gba_mv_context(MV v)
 {
+    uint16_t packed = (uint16_t)v.x + ((uint16_t)v.y << 8);
+    MV out = { sign_extend(packed, 8), sign_extend(packed >> 8, 8) };
+
+    if (out.x < 0)
+        out.y++;
+    return out;
+}
+
+static inline int px_get(const VXDecCtx *c, const VXPic *pic,
+                         int plane, int x, int y)
+{
+    const uint8_t *data = pic->data[plane];
+    int linesize = pic->linesize[plane];
+
+    if (c->gba_arena) {
+        if (!plane)
+            return data[y * linesize + x];
+        return data[((y & ~1) / 2) * linesize + (x & ~1)];
+    }
+
     int step = plane ? 2 : 1;
-    int cw = width / step, ch = height / step;
+    int cw = c->width / step, ch = c->height / step;
     int cx = (x < 0) ? -1 : x / step;
     int cy = (y < 0) ? -1 : y / step;
     if (cx < 0) cx += cw;
@@ -181,20 +215,32 @@ static inline int px_get(const uint8_t *data, int linesize, int width, int heigh
     return data[cy * linesize + cx];
 }
 
-static inline void px_set(uint8_t *data, int linesize, int plane, int x, int y, int val)
+static inline void px_set(const VXDecCtx *c, const VXPic *pic,
+                          int plane, int x, int y, int val)
 {
+    uint8_t *data = pic->data[plane];
+    int linesize = pic->linesize[plane];
+
+    if (c->gba_arena) {
+        if (!plane)
+            data[y * linesize + x] = val;
+        else
+            data[((y & ~1) / 2) * linesize + (x & ~1)] = val;
+        return;
+    }
+
     int step = plane ? 2 : 1;
     data[(y / step) * linesize + (x / step)] = val;
 }
 
 static inline int dst_get(VXDecCtx *c, int plane, int x, int y)
 {
-    return px_get(c->dst.data[plane], c->dst.linesize[plane], c->width, c->height, plane, x, y);
+    return px_get(c, &c->dst, plane, x, y);
 }
 
 static inline void dst_set(VXDecCtx *c, int plane, int x, int y, int val)
 {
-    px_set(c->dst.data[plane], c->dst.linesize[plane], plane, x, y, val);
+    px_set(c, &c->dst, plane, x, y, val);
 }
 
 static inline int coeff_y_get(VXDecCtx *c, int x, int y)
@@ -600,17 +646,18 @@ static int predict_inter(VXDecCtx *c, MBlock b, MV pred_vec, int has_delta, cons
         vec.x += get_se_golomb(c->gb);
         vec.y += get_se_golomb(c->gb);
     }
-    if (!mv_in_bounds(c, b, vec))
+    if (!c->gba_arena && !mv_in_bounds(c, b, vec))
         return AVERROR_INVALIDDATA;
 
-    c->vectors[(b.y / 16 + 1) * c->vectors_stride + (b.x / 16 + 1)] = vec;
+    c->vectors[(b.y / 16 + 1) * c->vectors_stride + (b.x / 16 + 1)] =
+        c->gba_arena ? gba_mv_context(vec) : vec;
 
     for (int plane = 0; plane < 3; plane++) {
         int step = plane ? 2 : 1;
         for (int j = 0; j < b.h; j += step) {
             for (int i = 0; i < b.w; i += step) {
-                int val = px_get(ref->data[plane], ref->linesize[plane], c->width, c->height,
-                                  plane, b.x + i + vec.x, b.y + j + vec.y);
+                int val = px_get(c, ref, plane, b.x + i + vec.x,
+                                 b.y + j + vec.y);
                 dst_set(c, plane, b.x + i, b.y + j, val);
             }
         }
@@ -628,7 +675,7 @@ static int predict_inter_dc(VXDecCtx *c, MBlock b)
     vec.y = get_se_golomb(c->gb);
     if (!ref || !ref->data[0])
         return AVERROR_INVALIDDATA;
-    if (!mv_in_bounds(c, b, vec))
+    if (!c->gba_arena && !mv_in_bounds(c, b, vec))
         return AVERROR_INVALIDDATA;
 
     dcy = get_se_golomb(c->gb);
@@ -650,8 +697,8 @@ static int predict_inter_dc(VXDecCtx *c, MBlock b)
         int step = plane ? 2 : 1;
         for (int j = 0; j < b.h; j += step) {
             for (int i = 0; i < b.w; i += step) {
-                int val = px_get(ref->data[plane], ref->linesize[plane], c->width, c->height,
-                                  plane, b.x + i + vec.x, b.y + j + vec.y);
+                int val = px_get(c, ref, plane, b.x + i + vec.x,
+                                 b.y + j + vec.y);
                 dst_set(c, plane, b.x + i, b.y + j, av_clip_uint8(val + dc[plane]));
             }
         }
@@ -785,7 +832,7 @@ static int decode_residu_cavlc(VXDecCtx *c, int x, int y, int nc, int plane)
     return total_coeff;
 }
 
-static int decode_residu_blocks(VXDecCtx *c, MBlock b)
+static int decode_residu_blocks_cavlc(VXDecCtx *c, MBlock b)
 {
     for (int y = 0; y < b.h; y += 8) {
         for (int x = 0; x < b.w; x += 8) {
@@ -835,6 +882,107 @@ static int decode_residu_blocks(VXDecCtx *c, MBlock b)
         }
     }
     return 0;
+}
+
+static int decode_vxpp_coefficient(VXDecCtx *c, int *value, int *run,
+                                   int *last)
+{
+    GetBitContext *gb = c->gb;
+    unsigned acc = show_bits_long(gb, 32);
+    uint16_t cell;
+    int len;
+
+    if ((acc >> 25) != 3) {
+        cell = AV_RL16(c->vxpp_vlc + 2 * (acc >> 20));
+    } else if (!(acc & (1U << 24))) {
+        skip_bits(gb, 8);
+        acc = show_bits_long(gb, 32);
+        cell = AV_RL16(c->vxpp_vlc + 2 * (acc >> 20));
+        *value = ((cell >> 4) & 0x1F) + c->vxpp_value[cell >> 9];
+        goto table_value;
+    } else if (!(acc & (1U << 23))) {
+        skip_bits(gb, 9);
+        acc = show_bits_long(gb, 32);
+        cell = AV_RL16(c->vxpp_vlc + 2 * (acc >> 20));
+        *value = (cell >> 4) & 0x1F;
+        *last  = cell >> 15;
+        *run   = ((cell >> 9) & 0x3F) +
+                 c->vxpp_run[*last * 0x40 + *value];
+        goto table_sign;
+    } else {
+        skip_bits(gb, 9);
+        *last  = get_bits1(gb);
+        *run   = get_bits(gb, 6);
+        *value = sign_extend(get_bits(gb, 12), 12);
+        return 0;
+    }
+
+    *value = (cell >> 4) & 0x1F;
+table_value:
+    *run  = (cell >> 9) & 0x3F;
+    *last = cell >> 15;
+table_sign:
+    len = cell & 0x0F;
+    if (!len)
+        return AVERROR_INVALIDDATA;
+    if ((acc >> (32 - len)) & 1)
+        *value = -*value;
+    skip_bits(gb, len);
+    return 0;
+}
+
+static int decode_residu_vxpp(VXDecCtx *c, int x, int y, int plane)
+{
+    int level[16] = { 0 };
+    int pos = 0, ret;
+
+    for (int i = 0; i < 24; i++) {
+        int value, run, last;
+
+        ret = decode_vxpp_coefficient(c, &value, &run, &last);
+        if (ret < 0 || run < 0 || pos + run >= 16)
+            return AVERROR_INVALIDDATA;
+        pos += run;
+        level[pos++] = value;
+        if (last) {
+            idct_add(c, x, y, plane, level);
+            return 0;
+        }
+    }
+    return AVERROR_INVALIDDATA;
+}
+
+static int decode_residu_blocks_vxpp(VXDecCtx *c, MBlock b)
+{
+    for (int y = 0; y < b.h; y += 8) {
+        for (int x = 0; x < b.w; x += 8) {
+            int idx = get_ue_golomb(c->gb);
+            int mask, ret;
+
+            if (idx < 0 || idx >= FF_ARRAY_ELEMS(vxpp_residu_mask_tab))
+                return AVERROR_INVALIDDATA;
+            mask = vxpp_residu_mask_tab[idx];
+            for (int block = 0; block < 6; block++) {
+                int plane = block < 4 ? 0 : block - 3;
+                int bx = block < 4 ? (block & 1) * 4 : 0;
+                int by = block < 4 ? (block >> 1) * 4 : 0;
+
+                if (mask & (1 << block)) {
+                    ret = decode_residu_vxpp(c, b.x + x + bx,
+                                             b.y + y + by, plane);
+                    if (ret < 0)
+                        return ret;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int decode_residu_blocks(VXDecCtx *c, MBlock b)
+{
+    return c->vxpp_vlc ? decode_residu_blocks_vxpp(c, b) :
+                         decode_residu_blocks_cavlc(c, b);
 }
 
 static void clear_total_coeff(VXDecCtx *c, MBlock b)
@@ -975,7 +1123,11 @@ static int vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
                             VXPic *dst, const VXPic refs[3],
                             const uint8_t residu_mask[32],
                             const uint8_t zigzag_scan[16],
-                            const uint8_t mode_map[24], int align_frame)
+                            const uint8_t mode_map[24], int align_frame,
+                            int gba_arena,
+                            const uint8_t *vxpp_vlc,
+                            const uint8_t *vxpp_value,
+                            const uint8_t *vxpp_run)
 {
     VXDecCtx c = { 0 };
     int ret;
@@ -993,6 +1145,10 @@ static int vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
     c.zigzag_scan = zigzag_scan;
     c.mode_map = mode_map;
     c.align_frame = align_frame;
+    c.gba_arena = gba_arena;
+    c.vxpp_vlc   = vxpp_vlc;
+    c.vxpp_value = vxpp_value;
+    c.vxpp_run   = vxpp_run;
     c.dst = *dst;
     for (int i = 0; i < 3; i++)
         c.refs[i] = (refs[i].data[0]) ? &refs[i] : NULL;
@@ -1023,8 +1179,12 @@ static int vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
                 ret = AVERROR_INVALIDDATA;
                 goto end;
             }
-            if ((ret = decode_mb(&c, b, pred_vec)) < 0)
+            if ((ret = decode_mb(&c, b, pred_vec)) < 0) {
+                av_log(avctx, AV_LOG_ERROR,
+                       "macroblock (%d,%d) failed at bit %d\n",
+                       x, y, get_bits_count(gb));
                 goto end;
+            }
         }
     }
 
@@ -1047,7 +1207,8 @@ int ff_vx_decode_vframe(AVCodecContext *avctx, GetBitContext *gb,
                         VXPic *dst, const VXPic refs[3])
 {
     return vx_decode_vframe(avctx, gb, width, height, qtab, dst, refs,
-                            vxds_residu_mask_tab, vxds_zigzag_scan, NULL, 1);
+                            vxds_residu_mask_tab, vxds_zigzag_scan, NULL, 1,
+                            0, NULL, NULL, NULL);
 }
 
 int ff_vx_decode_gba_vframe(AVCodecContext *avctx, GetBitContext *gb,
@@ -1056,7 +1217,18 @@ int ff_vx_decode_gba_vframe(AVCodecContext *avctx, GetBitContext *gb,
 {
     return vx_decode_vframe(avctx, gb, width, height, qtab, dst, refs,
                             vxgb_residu_mask_tab, vxgb_zigzag_scan,
-                            vxgb_mode_map, 0);
+                            vxgb_mode_map, 0, 1, NULL, NULL, NULL);
+}
+
+int ff_vx_decode_gba_vxpp_vframe(AVCodecContext *avctx, GetBitContext *gb,
+                                 int width, int height,
+                                 const uint16_t qtab[3], VXPic *dst,
+                                 const VXPic refs[3], const uint8_t *vlc,
+                                 const uint8_t *value, const uint8_t *run)
+{
+    return vx_decode_vframe(avctx, gb, width, height, qtab, dst, refs,
+                            NULL, vxgb_zigzag_scan, vxgb_mode_map, 0,
+                            1, vlc, value, run);
 }
 
 /* ---- AVCodec wrapper (video output stream) ---- */
