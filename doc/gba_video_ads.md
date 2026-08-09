@@ -30,7 +30,7 @@ unpacks a ROM for inspection, `ads_audio.py` is the ported audio decode loop,
 
 ## Which GBA Video is which
 
-Retail carts encountered so far split into four lineages or revisions:
+Retail carts encountered so far split into five lineages or revisions:
 
 | Lineage | Size | Codec |
 |---------|------|-------|
@@ -38,12 +38,15 @@ Retail carts encountered so far split into four lineages or revisions:
 | **Hydrogen** | 32 MB | Majesco derivative using Inflate — this document |
 | **VXGB** | 64 MB | Earlier ActImagine GBA revision — native, hardware-exact decoder |
 | **VX++** | 64 MB | ActImagine GBA revision — native, hardware-exact decoder; see `gba_video_vxpp.md` |
+| **FVMV** | 32 MB | Nintendo / Pokemon stack — complete offline decoder; see `gba_video_fvmv.md` |
 
 `VXDS` belongs to the later DS container and is not a reliable classifier for
 these cartridges. Dragon Ball GT has an `SFCD` archive at offset 3720 (0xE88);
 Dora is recognized by its Hydrogen resources; and the ActImagine carts carry
 literal **`VXGB`** or **`VX++`** stream headers. See the sections at the end of
-this document and `gba_video_vxpp.md`.
+this document and `gba_video_vxpp.md`. The Nintendo-published Pokemon carts use
+literal **`FVMV`** headers and a separate player described in
+`gba_video_fvmv.md`.
 
 Much of the No-Intro "Video" folder is homebrew (Sonic Boom, Super Mario
 World episodes, Dinosaur Office, Eek! The Cat, Legend of Lofi, Night Trap) —
