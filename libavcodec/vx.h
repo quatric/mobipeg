@@ -54,4 +54,11 @@ int ff_vx_decode_gba_vframe(AVCodecContext *avctx, GetBitContext *gb,
                             int width, int height, const uint16_t qtab[3],
                             VXPic *dst, const VXPic refs[3]);
 
+/* Decode one VX++ GBA frame using the cartridge-resident coefficient tables. */
+int ff_vx_decode_gba_vxpp_vframe(AVCodecContext *avctx, GetBitContext *gb,
+                                 int width, int height,
+                                 const uint16_t qtab[3], VXPic *dst,
+                                 const VXPic refs[3], const uint8_t *vlc,
+                                 const uint8_t *value, const uint8_t *run);
+
 #endif /* AVCODEC_VX_H */

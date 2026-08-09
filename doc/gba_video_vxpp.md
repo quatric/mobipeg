@@ -1708,15 +1708,41 @@ The demuxer also exposes the video as `gba_vx`, one packet per seek-table interv
 honest packet boundaries: each packet may contain hundreds of frames, since individual frame sizes are
 not recorded. `libavcodec/gba_vx.h` defines a 16-byte prefix carrying the leading bit skip, valid bit
 count and frame count. The payload is byte-swapped per little-endian halfword into ordinary MSB-first
-bit order, so the future decoder can use FFmpeg's normal bit reader after the recorded skip. Starting
+bit order, so the decoder can use FFmpeg's normal bit reader after the recorded skip. Starting
 the Python decoder with fresh state at seek frames 325 and 612 reproduced the continuous decode
 byte-for-byte for the first five frames at each boundary, confirming that these packets are genuine
 independently decodable key segments. Dumping and independently parsing the native packets confirms
-their prefix fields and byte extents against all **353/353** container intervals. The native `gba_vx`
-decoder itself remains to be ported. `tools/gba_video/vx_native_packet_validate.py` is the repeatable
-native packet gate.
+their prefix fields and byte extents against all **353/353** container intervals.
+`tools/gba_video/vx_native_packet_validate.py` is the repeatable native packet gate.
 
 ```
 ./ffmpeg -resource 2 -i "$ROM" -map 0:a:0 -c:a pcm_s16le stream02-native.wav
 ./ffmpeg -ss 1200 -resource 0 -i "$ROM" -map 0:a:0 -t 1 seek.wav
 ```
+
+## 25. Native VX++ video decoder
+
+`libavcodec/gbavxdec.c` now decodes `VX++` as well as `VXGB`. For VX++, the ROM demuxer copies the
+global coefficient data at ROM `0x9ae4` into video extradata: 4096 little-endian 16-bit VLC cells,
+then the 128-byte value-offset and 128-byte run-offset escape tables. Each `GVX1` packet supplies one
+independent seek segment. The receive-frame decoder skips the packet's leading bits, reads its
+`ue(v)` quantizer, emits the declared number of frames, consumes one marker between consecutive
+frames and verifies that the final bit position equals the packet prefix.
+
+The last video region is the sole exception: it has no following seek entry and
+is rounded up to the cartridge's `0x200`-byte alignment. The decoder accepts at
+most 4095 trailing bits there, and only when every one is zero.
+
+Prediction uses the hardware's contiguous four-slot arena: each slot is `0xa000` bytes of luma plus
+`0x5000` bytes of interleaved chroma at pitch `0x100`. This is observable behavior, not just an
+allocation detail, because legal full-pel motion vectors can read outside the visible image and
+across plane or slot boundaries. Motion-vector predictor entries are stored as the cartridge's
+signed-byte pair packed into one halfword.
+
+The proprietary coefficient decoder implements the direct lookup and all three escape forms. VX++
+also requires a full-range unsigned Exp-Golomb read for its 64-entry coded-block permutation;
+FFmpeg's 0..31 helper truncates real index 58 to 32 and desynchronizes the next macroblock.
+
+On the 240x160 Rev 6 Shrek stream, native RGB output matches the Python hardware model byte-for-byte
+for 330 consecutive frames, including independent segment starts at frames 155 and 318. The same
+arena changes retain a byte-exact 160-frame VXGB regression across its first seek boundary.

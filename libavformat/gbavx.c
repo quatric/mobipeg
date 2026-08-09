@@ -64,6 +64,9 @@
 
 #define VX_HEADER_SIZE 0x38
 
+/* VX++ copies one global coefficient codebook out of cartridge ROM. */
+#define VXPP_CODEBOOK_OFFSET 0x9ae4
+
 /* 3*64*8 int16 codebooks, 8 uint16 scale modifiers, 8 int32 lpc bases and one
  * uint32 initial scale - AudioExtraData in libavcodec/vx_audio.c. */
 #define VX_AUDIO_EXTRADATA_SIZE (3*64*8*2 + 8*2 + 8*4 + 4)
@@ -350,6 +353,7 @@ static int gbavx_read_header(AVFormatContext *avctx)
 
     {
         AVStream *vst = avformat_new_stream(avctx, NULL);
+        int extra_size;
 
         if (!vst)
             return AVERROR(ENOMEM);
@@ -357,11 +361,21 @@ static int gbavx_read_header(AVFormatContext *avctx)
         vst->codecpar->codec_id   = AV_CODEC_ID_GBA_VX;
         vst->codecpar->width      = best_st.width;
         vst->codecpar->height     = best_st.height;
-        ret = ff_alloc_extradata(vst->codecpar, GBA_VX_EXTRADATA_SIZE);
+        extra_size = best_st.magic == GBA_VX_MAGIC_VXPP ?
+                     GBA_VX_VXPP_EXTRADATA_SIZE : GBA_VX_EXTRADATA_SIZE;
+
+        ret = ff_alloc_extradata(vst->codecpar, extra_size);
         if (ret < 0)
             return ret;
         AV_WL32(vst->codecpar->extradata, best_st.magic);
         AV_WL32(vst->codecpar->extradata + 4, best_st.quantizer);
+        if (best_st.magic == GBA_VX_MAGIC_VXPP) {
+            if (VXPP_CODEBOOK_OFFSET + GBA_VX_VLC_BLOB_SIZE > filesize ||
+                avio_seek(pb, VXPP_CODEBOOK_OFFSET, SEEK_SET) < 0 ||
+                avio_read(pb, vst->codecpar->extradata + GBA_VX_EXTRADATA_SIZE,
+                          GBA_VX_VLC_BLOB_SIZE) != GBA_VX_VLC_BLOB_SIZE)
+                return AVERROR_INVALIDDATA;
+        }
         s->video_idx = vst->index;
         avpriv_set_pts_info(vst, 64, 1, VX_FRAMES_PER_SECOND);
         vst->avg_frame_rate = (AVRational) { VX_FRAMES_PER_SECOND, 1 };
