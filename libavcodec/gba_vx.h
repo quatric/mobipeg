@@ -26,9 +26,20 @@
 #define GBA_VX_MAGIC_VXPP MKTAG('V', 'X', '+', '+')
 #define GBA_VX_MAGIC_VXGB MKTAG('V', 'X', 'G', 'B')
 
+#define GBA_VX_VLC_TABLE_SIZE  8192
+#define GBA_VX_VALUE_TABLE_SIZE 128
+#define GBA_VX_RUN_TABLE_SIZE   128
+#define GBA_VX_VLC_BLOB_SIZE (GBA_VX_VLC_TABLE_SIZE + \
+                              GBA_VX_VALUE_TABLE_SIZE + \
+                              GBA_VX_RUN_TABLE_SIZE)
+#define GBA_VX_VXPP_EXTRADATA_SIZE (GBA_VX_EXTRADATA_SIZE + \
+                                    GBA_VX_VLC_BLOB_SIZE)
+
 /* Extradata layout:
  *   +0  u32 source magic ('VX++' or 'VXGB')
  *   +4  u32 stream quantizer
+ *   +8  VX++ only: 4096 little-endian VLC cells, then the 128-byte
+ *       value-offset and 128-byte run-offset escape tables
  */
 
 /* Header layout:
