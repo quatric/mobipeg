@@ -301,6 +301,7 @@ External library support:
   --enable-libvvenc        enable H.266/VVC encoding via vvenc [no]
   --enable-libwebp         enable WebP encoding via libwebp [no]
   --enable-libx264         enable H.264 encoding via x264 [no]
+  --enable-libunicorn      enable FVMV decoding via Unicorn [no]
   --enable-libx265         enable HEVC encoding via x265 [no]
   --enable-libxeve         enable EVC encoding via libxeve [no]
   --enable-libxeveb        enable EVC encoding via libxeve (Base profile) [no]
@@ -2007,6 +2008,7 @@ EXTERNAL_LIBRARY_GPL_LIST="
     librubberband
     libvidstab
     libx264
+    libunicorn
     libx265
     libxavs
     libxavs2
@@ -3889,6 +3891,8 @@ libx262_encoder_deps="libx262"
 libx264_encoder_deps="libx264"
 libx264_encoder_select="atsc_a53 golomb"
 mobiclip_encoder_deps="libx264"
+fvmv_decoder_deps="libunicorn"
+fvmv_audio_decoder_deps="libunicorn"
 libx264rgb_encoder_deps="libx264"
 libx264rgb_encoder_select="libx264_encoder"
 libx265_encoder_deps="libx265"
@@ -7484,6 +7488,7 @@ enabled libx264           && require_pkg_config libx264 x264 "stdint.h x264.h" x
                              require_cpp_condition libx264 x264.h "X264_BUILD >= 158"; } &&
                              check_cpp_condition libx264_hdr10 x264.h "X264_BUILD >= 163" &&
                              check_cpp_condition libx262 x264.h "X264_MPEG2"
+enabled libunicorn        && require libunicorn unicorn/unicorn.h uc_open -lunicorn
 enabled libx265           && require_pkg_config libx265 x265 x265.h x265_api_get &&
                              require_cpp_condition libx265 x265.h "X265_BUILD >= 89"
 enabled libxavs           && require libxavs "stdint.h xavs.h" xavs_encoder_encode "-lxavs $pthreads_extralibs $libm_extralibs"
