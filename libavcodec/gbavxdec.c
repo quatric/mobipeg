@@ -34,46 +34,54 @@
 #include "codec_internal.h"
 #include "decode.h"
 #include "gba_vx.h"
+#include "golomb.h"
 #include "vx.h"
 
 typedef struct GBAVXContext {
     AVPacket *packet;
-    AVFrame *pic[4];
+    VXPic pic[4];
+    uint8_t *arena;
     GetBitContext gb;
     uint16_t qtab[3];
     int cur;
     int nb_frames;
     int next_frame;
     int valid_bits;
+    int vxpp;
+    const uint8_t *vxpp_vlc;
+    const uint8_t *vxpp_value;
+    const uint8_t *vxpp_run;
     int64_t segment_pts;
 } GBAVXContext;
 
-static int ensure_arena(AVCodecContext *avctx, GBAVXContext *s)
+#define GBA_STRIDE       0x100
+#define GBA_LUMA_ALLOC   0xA000
+#define GBA_CHROMA_ALLOC 0x5000
+#define GBA_FRAME_SLOT   (GBA_LUMA_ALLOC + GBA_CHROMA_ALLOC)
+#define GBA_ARENA_MARGIN (160 * GBA_STRIDE)
+#define GBA_ARENA_SIZE   (2 * GBA_ARENA_MARGIN + 4 * GBA_FRAME_SLOT)
+
+static int ensure_arena(GBAVXContext *s)
 {
-    int ret;
+    if (!s->arena) {
+        s->arena = av_malloc(GBA_ARENA_SIZE);
+        if (!s->arena)
+            return AVERROR(ENOMEM);
 
-    for (int i = 0; i < 4; i++) {
-        AVFrame *frame = s->pic[i];
+        for (int i = 0; i < 4; i++) {
+            uint8_t *base = s->arena + GBA_ARENA_MARGIN + i * GBA_FRAME_SLOT;
 
-        if (!frame->data[0]) {
-            frame->format = AV_PIX_FMT_YUV420P;
-            frame->width  = avctx->width;
-            frame->height = avctx->height;
-            if ((ret = av_frame_get_buffer(frame, 0)) < 0)
-                return ret;
-        }
-
-        /* Each seek segment starts with the cartridge's four 0x80-filled
-         * reconstruction slots. Subsequent frames reuse the ring verbatim. */
-        for (int p = 0; p < 3; p++) {
-            int width  = p ? avctx->width  / 2 : avctx->width;
-            int height = p ? avctx->height / 2 : avctx->height;
-
-            for (int y = 0; y < height; y++)
-                memset(frame->data[p] + (ptrdiff_t)y * frame->linesize[p],
-                       0x80, width);
+            s->pic[i].data[0] = base;
+            s->pic[i].data[1] = base + GBA_LUMA_ALLOC;
+            s->pic[i].data[2] = base + GBA_LUMA_ALLOC + 1;
+            for (int p = 0; p < 3; p++)
+                s->pic[i].linesize[p] = GBA_STRIDE;
         }
     }
+
+    /* The hardware permits motion reads to cross plane and frame-slot
+     * boundaries, so preserve its one contiguous allocation and fixed pitch. */
+    memset(s->arena, 0x80, GBA_ARENA_SIZE);
     return 0;
 }
 
@@ -82,6 +90,24 @@ static void discard_segment(GBAVXContext *s)
     av_packet_unref(s->packet);
     s->nb_frames = s->next_frame = 0;
     s->valid_bits = 0;
+}
+
+static int consume_tail_padding(GBAVXContext *s)
+{
+    int remaining = s->valid_bits - get_bits_count(&s->gb);
+
+    /* The final video region is rounded up to the cartridge's 0x200-byte
+     * alignment. It has no following seek offset to identify the exact end. */
+    if (remaining <= 0 || remaining > 4095)
+        return AVERROR_INVALIDDATA;
+    while (remaining) {
+        int bits = FFMIN(remaining, 32);
+
+        if (get_bits_long(&s->gb, bits))
+            return AVERROR_INVALIDDATA;
+        remaining -= bits;
+    }
+    return 0;
 }
 
 static int load_segment(AVCodecContext *avctx, GBAVXContext *s)
@@ -113,7 +139,14 @@ static int load_segment(AVCodecContext *avctx, GBAVXContext *s)
         goto fail;
     skip_bits(&s->gb, leading_bits);
 
-    if ((ret = ensure_arena(avctx, s)) < 0)
+    if (s->vxpp) {
+        int quantizer = get_ue_golomb_31(&s->gb);
+
+        if (ff_vx_calc_qtab(quantizer, s->qtab) < 0)
+            goto invalid;
+    }
+
+    if ((ret = ensure_arena(s)) < 0)
         goto fail;
     s->cur         = 0;
     s->next_frame  = 0;
@@ -127,8 +160,8 @@ fail:
     return ret;
 }
 
-/* VX stores a bit-shift YCoCg-style approximation, not standard YCbCr. */
-static void yuv_to_rgb24(AVCodecContext *avctx, const AVFrame *yuv, AVFrame *rgb)
+/* The cartridge uses this integer approximation of YCbCr-to-RGB. */
+static void yuv_to_rgb24(AVCodecContext *avctx, const VXPic *yuv, AVFrame *rgb)
 {
     for (int y = 0; y < avctx->height; y++) {
         const uint8_t *ly = yuv->data[0] + (ptrdiff_t)y * yuv->linesize[0];
@@ -138,8 +171,8 @@ static void yuv_to_rgb24(AVCodecContext *avctx, const AVFrame *yuv, AVFrame *rgb
 
         for (int x = 0; x < avctx->width; x++) {
             int luma = ly[x];
-            int u = lu[x >> 1] - 128;
-            int v = lv[x >> 1] - 128;
+            int u = lu[x & ~1] - 128;
+            int v = lv[x & ~1] - 128;
 
             out[3 * x    ] = av_clip_uint8(luma + 2 * v);
             out[3 * x + 1] = av_clip_uint8(luma - (u >> 1) - v);
@@ -161,60 +194,61 @@ static av_cold int gbavx_init(AVCodecContext *avctx)
 
     magic     = AV_RL32(avctx->extradata);
     quantizer = AV_RL32(avctx->extradata + 4);
-    if (magic != GBA_VX_MAGIC_VXGB) {
-        av_log(avctx, AV_LOG_ERROR,
-               "native decoding is currently implemented for VXGB, not %c%c%c%c\n",
-               magic, magic >> 8, magic >> 16, magic >> 24);
-        return AVERROR_PATCHWELCOME;
-    }
-    if (ff_vx_calc_qtab(quantizer, s->qtab) < 0)
+    if (magic == GBA_VX_MAGIC_VXGB) {
+        if (ff_vx_calc_qtab(quantizer, s->qtab) < 0)
+            return AVERROR_INVALIDDATA;
+    } else if (magic == GBA_VX_MAGIC_VXPP &&
+               avctx->extradata_size >= GBA_VX_VXPP_EXTRADATA_SIZE) {
+        s->vxpp       = 1;
+        s->vxpp_vlc   = avctx->extradata + GBA_VX_EXTRADATA_SIZE;
+        s->vxpp_value = s->vxpp_vlc + GBA_VX_VLC_TABLE_SIZE;
+        s->vxpp_run   = s->vxpp_value + GBA_VX_VALUE_TABLE_SIZE;
+    } else {
         return AVERROR_INVALIDDATA;
+    }
 
     s->packet = av_packet_alloc();
     if (!s->packet)
         return AVERROR(ENOMEM);
-    for (int i = 0; i < 4; i++) {
-        s->pic[i] = av_frame_alloc();
-        if (!s->pic[i])
-            return AVERROR(ENOMEM);
-    }
     return 0;
 }
 
 static int gbavx_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 {
     GBAVXContext *s = avctx->priv_data;
-    AVFrame *dst_frame;
+    VXPic *dst_frame;
     VXPic dst = { { 0 } }, refs[3] = { { { 0 } } };
     int ret;
 
     if (s->next_frame >= s->nb_frames && (ret = load_segment(avctx, s)) < 0)
         return ret;
 
-    dst_frame = s->pic[s->cur];
-    for (int p = 0; p < 3; p++) {
-        dst.data[p]     = dst_frame->data[p];
-        dst.linesize[p] = dst_frame->linesize[p];
-    }
+    dst_frame = &s->pic[s->cur];
+    dst = *dst_frame;
     for (int i = 0; i < 3; i++) {
-        AVFrame *ref = s->pic[((s->cur - 1 - i) % 4 + 4) % 4];
+        VXPic *ref = &s->pic[((s->cur - 1 - i) % 4 + 4) % 4];
 
-        for (int p = 0; p < 3; p++) {
-            refs[i].data[p]     = ref->data[p];
-            refs[i].linesize[p] = ref->linesize[p];
-        }
+        refs[i] = *ref;
     }
 
     /* Allocate the public frame before consuming the bitstream. If allocation
      * fails, receive_frame can be retried without advancing decoder state. */
     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
         return ret;
-    ret = ff_vx_decode_gba_vframe(avctx, &s->gb, avctx->width, avctx->height,
-                                  s->qtab, &dst, refs);
+    if (s->vxpp)
+        ret = ff_vx_decode_gba_vxpp_vframe(avctx, &s->gb, avctx->width,
+                                           avctx->height, s->qtab, &dst, refs,
+                                           s->vxpp_vlc, s->vxpp_value,
+                                           s->vxpp_run);
+    else
+        ret = ff_vx_decode_gba_vframe(avctx, &s->gb, avctx->width,
+                                      avctx->height, s->qtab, &dst, refs);
     if (ret < 0) {
         discard_segment(s);
         return ret;
     }
+    av_log(avctx, AV_LOG_TRACE, "frame %d ends at segment bit %d\n",
+           s->next_frame, get_bits_count(&s->gb));
     yuv_to_rgb24(avctx, dst_frame, frame);
 
     if (s->segment_pts != AV_NOPTS_VALUE)
@@ -226,8 +260,11 @@ static int gbavx_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 
     s->cur = (s->cur + 1) % 4;
     s->next_frame++;
+    if (s->vxpp && s->next_frame < s->nb_frames)
+        skip_bits1(&s->gb); /* inter-frame marker */
     if (s->next_frame == s->nb_frames) {
-        if (get_bits_count(&s->gb) != s->valid_bits) {
+        if (get_bits_count(&s->gb) != s->valid_bits &&
+            consume_tail_padding(s) < 0) {
             av_log(avctx, AV_LOG_ERROR,
                    "seek segment consumed %d bits, expected %d\n",
                    get_bits_count(&s->gb), s->valid_bits);
@@ -251,14 +288,13 @@ static av_cold int gbavx_close(AVCodecContext *avctx)
     GBAVXContext *s = avctx->priv_data;
 
     av_packet_free(&s->packet);
-    for (int i = 0; i < 4; i++)
-        av_frame_free(&s->pic[i]);
+    av_freep(&s->arena);
     return 0;
 }
 
 const FFCodec ff_gba_vx_decoder = {
     .p.name         = "gba_vx",
-    CODEC_LONG_NAME("ActImagine GBA VXGB Video"),
+    CODEC_LONG_NAME("ActImagine GBA VX Video"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_GBA_VX,
     .priv_data_size = sizeof(GBAVXContext),

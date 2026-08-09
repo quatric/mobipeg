@@ -95,15 +95,19 @@ Everything below was read out of the decoder image, not guessed.
   `libavcodec/gba_vx.h`. All 353/353 native packet extents match the container table. Fresh Python
   decoding at seek frames 325 and 612 matches continuous decoding for every tested frame. There are
   deliberately no fake per-frame packet boundaries.
+- Native video decoding is complete for both `VX++` and `VXGB`. `libavformat/gbavx.c` copies the
+  cartridge's global VX++ coefficient VLC and escape tables into codec extradata, and
+  `libavcodec/gbavxdec.c` reads each segment quantizer, retains the exact four-slot GBA frame arena,
+  consumes the inter-frame markers and emits every frame in the packet. The proprietary normal VLC
+  path plus all three escapes are implemented in the shared `vx.c` core. On the Rev 6 240x160 Shrek
+  stream, 330 consecutive native frames are byte-exact after RGB conversion against the Python
+  hardware model, crossing seek boundaries at frames 155 and 318. The 160-frame VXGB regression is
+  still byte-exact as well. A complete 37,837-frame native decode consumes all 195 segments; the
+  final region's otherwise unindexed 3,821-bit suffix is verified as zero cartridge alignment.
 
-## What is left
+## Optional coverage left
 
-1. **Native `VX++` video decoder.** The ROM demuxer, segment packet contract and native audio path
-   are done. Port the hardware-exact Python VX++ video reference into `libavcodec`; one decoder packet is a
-   complete self-contained seek segment and may emit many frames. The decoder should validate the
-   `GVX1` prefix, skip the recorded leading bits, read the per-segment quantiser and emit the prefix's
-   frame count while retaining its four-slot reference arena within the packet.
-2. **The earlier `VXGB` GBA revision is native.** See `gba_video_vxgb.md`. The Rev 5 decoder is ROM
+1. **Wider direct `VXGB` hardware capture.** See `gba_video_vxgb.md`. The Rev 5 decoder is ROM
    `0xb548` → IWRAM `0x03000000`; all sixteen recursive dispatchers map to VX++, while residuals use
    standard H.264-style CAVLC rather than VX++'s ROM coefficient codebook. `libavcodec/gbavxdec.c`
    now emits multiple frames per `GVX1` seek packet and shares parameterized prediction/CAVLC code
@@ -111,7 +115,7 @@ Everything below was read out of the decoder image, not guessed.
    sample match the hardware-proven reference after RGB conversion, and a 160-frame comparison stays
    exact across the first seek boundary at frame 155. Wider direct mGBA busy-frame/seek captures are
    the only optional coverage still missing for this revision.
-3. **Optional audio hardware capture.** Framing is exact and the codec core was already validated on
+2. **Optional audio hardware capture.** Framing is exact and the codec core was already validated on
    DS/SX data, but dumping GBA PCM would provide the same byte-for-byte final check used for video.
 
 ## Traps worth remembering
