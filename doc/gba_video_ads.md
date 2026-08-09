@@ -38,7 +38,7 @@ Retail carts encountered so far split into five lineages or revisions:
 | **Hydrogen** | 32 MB | Majesco derivative using Inflate — this document |
 | **VXGB** | 64 MB | Earlier ActImagine GBA revision — native, hardware-exact decoder |
 | **VX++** | 64 MB | ActImagine GBA revision — native, hardware-exact decoder; see `gba_video_vxpp.md` |
-| **FVMV** | 32 MB | Nintendo / Pokemon stack — complete offline decoder; see `gba_video_fvmv.md` |
+| **FVMV** | 32 MB | Nintendo / Pokemon stack — native FFmpeg demux/decode via the cartridge ARM image; see `gba_video_fvmv.md` |
 
 `VXDS` belongs to the later DS container and is not a reliable classifier for
 these cartridges. Dragon Ball GT has an `SFCD` archive at offset 3720 (0xE88);
