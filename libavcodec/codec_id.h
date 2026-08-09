@@ -333,6 +333,7 @@ enum AVCodecID {
     AV_CODEC_ID_ADS_GBA,
     AV_CODEC_ID_ODH,
     AV_CODEC_ID_GBA_VX,
+    AV_CODEC_ID_FVMV,
 
     /* various PCM "codecs" */
     AV_CODEC_ID_FIRST_AUDIO = 0x10000,     ///< A dummy id pointing at the start of audio codecs
@@ -578,6 +579,7 @@ enum AVCodecID {
     /* Custom audio codecs */
     AV_CODEC_ID_VX_AUDIO,
     AV_CODEC_ID_ADS_GBA_AUDIO,
+    AV_CODEC_ID_FVMV_AUDIO,
 
     /* subtitle codecs */
     AV_CODEC_ID_FIRST_SUBTITLE = 0x17000,          ///< A dummy ID pointing at the start of subtitle codecs.
