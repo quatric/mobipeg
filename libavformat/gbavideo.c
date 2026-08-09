@@ -71,6 +71,7 @@ typedef struct GBAVideoDemuxContext {
     const char *resource;       /* SFCD member to play, NULL = the largest */
     int64_t best_size;
     int inflate;                /* Hydrogen carts compress with Inflate */
+    int flat_audio_context;     /* Hydrogen audio sends a flat context table */
     int size_unit;              /* resource sizes: 4 for ADS, 1 for Hydrogen */
     int count_mask;             /* resource count: 0xff for ADS, 0xf for Hydrogen */
 
@@ -185,6 +186,22 @@ static int parse_video_resource(AVFormatContext *avctx, int64_t off,
     s->chunk_pos = (pos + 3) & ~3;
     s->chunk_end = off + nbytes - 4;    /* trailing uint32 terminator */
 
+    /* Noah's Final Threat is a transitional Hydrogen prototype: it uses the
+     * byte-sized Hydrogen container and audio syntax, but retains the older
+     * LZMA video blobs. Their second prefix word is the LZMA parameter word;
+     * the varying 0x1c00 field selects the dictionary size. */
+    if (s->inflate && s->chunk_pos + 16 <= s->chunk_end) {
+        uint32_t params;
+
+        avio_seek(pb, s->chunk_pos + 12, SEEK_SET);
+        params = avio_rl32(pb);
+        if ((params & 0xFFFFE3FF) == 0x00010002) {
+            av_log(avctx, AV_LOG_VERBOSE,
+                   "Hydrogen container with LZMA video blobs\n");
+            s->inflate = 0;
+        }
+    }
+
     st = avformat_new_stream(avctx, NULL);
     if (!st)
         return AVERROR(ENOMEM);
@@ -236,7 +253,7 @@ static int parse_audio_resource(AVFormatContext *avctx, int64_t off,
     st->codecpar->codec_id    = AV_CODEC_ID_ADS_GBA_AUDIO;
     if (ff_alloc_extradata(st->codecpar, 1) < 0)
         return AVERROR(ENOMEM);
-    st->codecpar->extradata[0] = s->inflate;    /* context-table coding */
+    st->codecpar->extradata[0] = s->flat_audio_context;
     st->codecpar->sample_rate = s->sample_rate;
     st->codecpar->ch_layout   = (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
     s->audio_idx              = st->index;
@@ -542,8 +559,9 @@ static int gbavideo_scan_rom(AVFormatContext *avctx)
     if (size <= 0)
         return AVERROR_INVALIDDATA;
 
-    s->inflate    = 1;
-    s->size_unit  = 1;
+    s->inflate = 1;
+    s->flat_audio_context = 1;
+    s->size_unit = 1;
     s->count_mask = 0xF;      /* the game's own walker, at 0x08005c82 */
 
     while (pos + 12 <= size) {
@@ -592,6 +610,9 @@ static int gbavideo_scan_rom(AVFormatContext *avctx)
 
 static int gbavideo_rom_probe(const AVProbeData *p)
 {
+    static const char hydrogen_marker[] = "Hydrogen Library";
+    int hydrogen = 0;
+
     /* Every GBA cartridge header carries a fixed 0x96 at 0xb2; requiring the
      * SFCD magic as well keeps this off non-ADS carts. */
     if (p->buf_size < 0xc0 || p->buf[0xb2] != 0x96)
@@ -601,9 +622,20 @@ static int gbavideo_rom_probe(const AVProbeData *p)
         if (AV_RB32(p->buf + i) == MKBETAG('S', 'F', 'C', 'D'))
             return AVPROBE_SCORE_MAX;
 
-    /* A Hydrogen-era cart has no archive to key off, so look for the maker
-     * code Majesco used; the scan in read_header is the real test. */
-    if (!memcmp(p->buf + 0xb0, "5G", 2)) {
+    /* Retail Hydrogen carts use maker code 5G. Two known prototypes instead
+     * use 01 and leave the title/code fields blank, but retain the SDK's
+     * source-path marker near the beginning of the player. */
+    for (int i = 0; i + sizeof(hydrogen_marker) - 1 <= p->buf_size; i++)
+        if (!memcmp(p->buf + i, hydrogen_marker,
+                    sizeof(hydrogen_marker) - 1)) {
+            hydrogen = 1;
+            break;
+        }
+
+    /* A Hydrogen-era cart has no archive to key off, so look for either the
+     * retail maker code or the player marker; read_header performs the strong
+     * .mmstr arithmetic validation before accepting the input. */
+    if (!memcmp(p->buf + 0xb0, "5G", 2) || hydrogen) {
         /* Not every Majesco cart is ours: Shrek + Shark Tale carries the same
          * maker code but is an ActImagine VX++ one, which gbavx.c takes. Its
          * first stream sits past 128 KB, so stay below AVPROBE_SCORE_RETRY
