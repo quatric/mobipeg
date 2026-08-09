@@ -30,12 +30,14 @@ unpacks a ROM for inspection, `ads_audio.py` is the ported audio decode loop,
 
 ## Which GBA Video is which
 
-Retail carts encountered so far split into five lineages or revisions:
+Retail carts encountered so far split into five lineages; a newly preserved
+prototype adds one hybrid revision:
 
 | Lineage | Size | Codec |
 |---------|------|-------|
 | **ADS** | 32 MB | Majesco in-house stack using LZMA — this document |
 | **Hydrogen** | 32 MB | Majesco derivative using Inflate — this document |
+| **Hydrogen/LZMA** | prototype | Transitional Hydrogen container with LZMA video blobs — this document |
 | **VXGB** | 64 MB | Earlier ActImagine GBA revision — native, hardware-exact decoder |
 | **VX++** | 64 MB | ActImagine GBA revision — native, hardware-exact decoder; see `gba_video_vxpp.md` |
 | **FVMV** | 32 MB | Nintendo / Pokemon stack — native FFmpeg demux/decode via the cartridge ARM image; see `gba_video_fvmv.md` |
@@ -707,6 +709,26 @@ plain `uint32` size instead of a zlib header. `libavcodec/majesco.c` implements
 this and is verified against every chunk in the cart: 187 codebooks and 187
 index planes across nine streams decompress to their declared sizes with no
 failures. The fourth block type is never used by any of them.
+
+### Prototype revisions discovered in the 2026 archive update
+
+An exhaustive scan of all 47 official and prototype GBA Video dumps in the
+No-Intro Video directory found two newly catalogued Hydrogen prototypes whose
+GBA title/code fields are blank and whose maker code is `01`, not the retail
+`5G`:
+
+| prototype | SHA-256 | resources | video compression |
+|---|---|---:|---|
+| Sonic X Volume 2 | `b935d61ed3b8e699677dbbb2b3ba5ae9282ecd0696517b3afa1b4ed86068c1fe` | 3 | Hydrogen Inflate |
+| Yu-Gi-Oh!: Noah's Final Threat | `2ead81d021ac12b091a3d6e5db54139943a1165fcac23011a2bc4d6842d60031` | 4 | ADS-style LZMA |
+
+Both retain the `Hydrogen Library` source-path marker, which the ROM probe now
+uses in addition to the retail maker code.  Noah's Final Threat is a genuine
+hybrid revision: resource sizes and audio context tables use Hydrogen syntax,
+while each video blob opens with the older 8-byte LZMA size/parameter prefix.
+The demuxer detects video compression from that prefix without changing the
+audio syntax.  All seven resources decode end to end with `-xerror`; retail
+Dora (Inflate) and Dragon Ball GT (SFCD/LZMA) remain clean regressions.
 
 ### Container
 
