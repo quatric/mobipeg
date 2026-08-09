@@ -2045,6 +2045,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
+        .id        = AV_CODEC_ID_FVMV,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "fvmv",
+        .long_name = NULL_IF_CONFIG_SMALL("Nintendo Pokemon GBA FVMV Video"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "pcm_s16le",
@@ -3649,6 +3656,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "ads_gba_audio",
         .long_name = NULL_IF_CONFIG_SMALL("ADS-era GBA Video audio (Majesco)"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_FVMV_AUDIO,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "fvmv_audio",
+        .long_name = NULL_IF_CONFIG_SMALL("Nintendo Pokemon GBA FVMV audio"),
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
