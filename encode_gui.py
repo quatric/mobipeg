@@ -11,9 +11,10 @@ ENCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode
 # Grouped so the file dialog's type menu is readable; "All supported" first so
 # the default view still shows everything decodable.
 DECODE_FILETYPES = [
-    ("All supported", "*.mo *.moflex *.mods *.vx *.thp *.rvid *.h4m *.ty *.ty+ *.tmf *.ppm *.kwz"),
+    ("All supported", "*.mo *.moflex *.mods *.vx *.thp *.rvid *.h4m *.ty *.ty+ *.tmf *.ppm *.kwz *.gba"),
     ("Mobiclip", "*.mo *.moflex *.mods"),
     ("ActImagine VX", "*.vx"),
+    ("GBA Video cartridges", "*.gba"),
     ("THP", "*.thp"),
     ("RocketVideo", "*.rvid"),
     ("HVQM4", "*.h4m"),
@@ -21,6 +22,14 @@ DECODE_FILETYPES = [
     ("Flipnote", "*.ppm *.kwz"),
     ("All files", "*.*"),
 ]
+
+DECODE_CODEC_FAMILIES = (
+    "GBA Video cartridges (.gba): Majesco ADS/LZMA · Hydrogen/Inflate · "
+    "Hydrogen/LZMA prototypes · ActImagine VXGB · VX++ · Nintendo FVMV\n"
+    "MobiClip: Wii .mo · Nintendo 3DS .moflex · Nintendo DS .mods\n"
+    "Other: ActImagine DS .vx · THP · RocketVideo .rvid · HVQM4 · "
+    "TiVo TyStream · Flipnote"
+)
 
 class EncodeGUI(tk.Tk):
     def __init__(self):
@@ -336,30 +345,38 @@ class EncodeGUI(tk.Tk):
         hint = ttk.Label(self.decode_frame, foreground="grey", justify="left",
                          text=("Mobiclip: .mo (Wii)  ·  .moflex (3DS)  ·  .mods (DS)\n"
                                "Other: .vx  ·  .thp  ·  .rvid  ·  .h4m  ·  .ty/.ty+/.tmf\n"
-                               "Flipnote: .ppm  ·  .kwz          (plus any format ffmpeg reads)"))
+                               "Flipnote: .ppm  ·  .kwz  ·  GBA Video: .gba\n"
+                               "(plus any format ffmpeg reads)"))
         hint.grid(row=1, column=1, sticky="w", padx=5, pady=(0, 6))
+
+        codecs = ttk.LabelFrame(self.decode_frame, text="Included decoder families",
+                                padding=(8, 5))
+        codecs.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5,
+                    pady=(0, 6))
+        ttk.Label(codecs, text=DECODE_CODEC_FAMILIES, justify="left",
+                  wraplength=610).pack(anchor="w")
 
         # Output file: directory + filename in one field ("Save As..." picks
         # both at once). For a stereoscopic input with "Both" eyes, the eye
         # name is appended to this same location (name_left.mp4 / name_right.mp4)
         # -- there's no separate output-directory field, since it would just be
         # redundant with this path's dirname.
-        ttk.Label(self.decode_frame, text="Output File:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="Output File:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
         self.dec_output_var = tk.StringVar(value="")
-        ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=2, column=2, padx=5, pady=5)
+        ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=3, column=2, padx=5, pady=5)
 
         # A stereoscopic input is always detected and split into separate
         # left/right files automatically -- no eye picker, no layout override.
         # This note just says whether that happened.
         self.dec_eyes_note = ttk.Label(self.decode_frame, text="", foreground="grey")
-        self.dec_eyes_note.grid(row=3, column=1, sticky="w", padx=5)
+        self.dec_eyes_note.grid(row=4, column=1, sticky="w", padx=5)
 
         # Buttons. Play is the no-output-file path: it decodes straight to a
         # window, so it's the quick way to check a file before committing to a
         # full decode.
         btns = ttk.Frame(self.decode_frame)
-        btns.grid(row=4, column=1, pady=15, sticky="w")
+        btns.grid(row=5, column=1, pady=15, sticky="w")
         self.dec_play_btn = ttk.Button(btns, text="▶ Play", command=self.run_play)
         self.dec_play_btn.grid(row=0, column=0, padx=(0, 10))
         self.dec_run_btn = ttk.Button(btns, text="▶ Run Decoding", command=self.run_decoding)
