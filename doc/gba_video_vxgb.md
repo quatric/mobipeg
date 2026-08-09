@@ -138,12 +138,16 @@ Native output is exact against the hardware-proven Python reference for all
 first independently decodable boundary at frame 155: all 18,432,000 RGB bytes
 match, and both sides consume the seek table's bit offset exactly. The decoder
 emits RGB24 using the cartridge transform (`R=Y+2Cr`, `G=Y-Cr-Cb/2`,
-`B=Y+2Cb`). `VX++` is explicitly rejected until its separate quantizer and VLC
-rules are ported.
+`B=Y+2Cb`). The same wrapper now also accepts `VX++`, whose per-segment
+quantizer and proprietary coefficient tables select a separate residual path
+in the shared core.
 
 ## Remaining work
 
 Extending direct mGBA frame-buffer captures to busy frames and a seek boundary
 would provide the same broad hardware coverage already recorded for VX++.
-Native `VX++` decoding remains separate work; its demuxing, packet framing and
-audio are already complete.
+Native video, audio, demuxing and packet framing are complete for both GBA VX
+revisions.
+As with VX++, the last video region has no following seek offset; the decoder
+accepts only a bounded all-zero suffix up to the cartridge's `0x200`-byte
+alignment.
