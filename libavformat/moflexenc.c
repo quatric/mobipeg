@@ -50,9 +50,9 @@
 /* Block size is carried in the 4C32 sync header as BE16(block_size - 1), so it is
  * per-file rather than a constant.  Every block (including the final one) is
  * zero-padded out to this boundary, matching retail's fixed-size framing;
- * -mo_block lets it be overridden (e.g. 4096 to match retail's fixed-size
- * framing) but defaults to the 3DS SDK encoder's value. */
-#define MOFLEX_BLOCK_DEFAULT 2048
+ * -mo_block lets it be overridden (e.g. 2048 to match the 3DS SDK encoder's
+ * output byte-for-byte) but defaults to the retail value. */
+#define MOFLEX_BLOCK_DEFAULT 4096
 #define SEEK_ENTRY_SZ  24
 #define SYNC_INTERVAL  1000000   /* µs between sync points (~1/sec)        */
 
