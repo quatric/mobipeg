@@ -153,6 +153,25 @@ static int dsp_read_header(AVFormatContext *s)
     return 0;
 }
 
+/* The decoder derives its sample count from the packet size, and a packet
+ * always holds whole 14-sample frames, so the final one runs up to 13 samples
+ * past the end of the stream. Tell the decoder to discard the overshoot
+ * rather than letting it reach the output. */
+static int dsp_trim_packet(AVPacket *pkt, int64_t produced, int64_t wanted)
+{
+    uint8_t *side;
+
+    if (produced <= wanted)
+        return 0;
+    side = av_packet_new_side_data(pkt, AV_PKT_DATA_SKIP_SAMPLES, 10);
+    if (!side)
+        return AVERROR(ENOMEM);
+    AV_WL32(side,     0);                       /* nothing to skip at the start */
+    AV_WL32(side + 4, produced - wanted);
+    side[8] = side[9] = 0;
+    return 0;
+}
+
 static int dsp_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     DSPDemuxContext *c = s->priv_data;
@@ -189,7 +208,9 @@ static int dsp_read_packet(AVFormatContext *s, AVPacket *pkt)
     pkt->duration     = want;
     c->samples_left  -= want;
 
-    return 0;
+    return dsp_trim_packet(pkt,
+                           (int64_t)per_ch / FF_DSP_ADPCM_BYTES_PER_FRAME *
+                           FF_DSP_ADPCM_SAMPLES_PER_FRAME, want);
 }
 
 const FFInputFormat ff_dsp_demuxer = {
