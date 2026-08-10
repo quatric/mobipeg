@@ -298,6 +298,21 @@ cd .. && PKG_CONFIG_PATH="$PWD/x264-install/lib/pkgconfig" \
 
 Confirm with `ffmpeg -encoders | grep mobiclip`.
 
+## Testing
+
+The FFmpeg format and codec work is covered by FATE. The tests for the
+Nintendo formats above synthesise their own input, so they need no external
+sample suite:
+
+    make fate SAMPLES=
+
+`gui_smoke.py` exercises `encode_gui.py` headlessly -- it walks every format
+through the real widget tree and checks that the GUI's tables still agree
+with `encode.py`'s, which is otherwise only visible in front of a user:
+
+    xvfb-run -a python3 gui_smoke.py            # assert
+    xvfb-run -a python3 gui_smoke.py --dump     # and print the tab layout
+
 ## Documentation
 
 For full technical documentation of the MobiClip formats (video/audio codecs,
