@@ -5,6 +5,7 @@ import subprocess
 import glob
 import argparse
 import math
+import shlex
 import struct
 
 # The mobiclip libx264 wrapper hard-caps the keyframe interval at 90 frames
@@ -327,6 +328,7 @@ def main():
     parser.add_argument("--buffer-size", dest="buffer_size", default="", help="MobiClip: rate-control buffer size, e.g. 400k (retail 'BufferSize'). Bounds how far the bitrate may drift locally.")
     parser.add_argument("--me", dest="me_method", default="", choices=["dia", "hex", "umh", "esa"], help="MobiClip: motion search method (retail 'MeMethod'). Default is the preset's (hex).")
     parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
+    parser.add_argument("--ffmpeg-args", dest="ffmpeg_args", default="", help="Extra parameters appended verbatim to the ffmpeg command line, just before the output file. Parsed like a shell word list, so quoting works: --ffmpeg-args '-t 5 -af volume=0.5'. Because ffmpeg lets the last occurrence of an option win, these override the format preset. Applies to encode, decode and play; internal analysis passes (the mods keyframe probe and --roundtrip validation) are left alone.")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
     parser.add_argument("-o", "--output", dest="output", default="", help="Output filename (decode mode). Default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4.")
     parser.add_argument("--stereo", dest="stereo", default="auto", choices=["auto", "none", "frameseq", "frameseq-r", "tb", "tb-r", "sbs", "sbs-r"], help="Decode/play mode: force the stereoscopic layout instead of reading it from the file. Use this when a 3D file carries no layout descriptor (nothing to detect) so --eyes still splits it. The '-r' variants mean the right eye is stored first. 'none' treats the input as 2D.")
@@ -334,7 +336,15 @@ def main():
 
     parsed = parser.parse_args()
     OUTDIR = parsed.outdir
-    
+
+    # Escape hatch for anything the presets below don't expose.  shlex keeps
+    # quoted filter graphs in one piece; ffmpeg resolves duplicates by taking
+    # the last one, and these go last, so the user always wins.
+    try:
+        extra_args = shlex.split(parsed.ffmpeg_args)
+    except ValueError as e:
+        parser.error(f"--ffmpeg-args is not a valid command line: {e}")
+
     fmt = parsed.fmt
     audio = parsed.audio
     input_file = parsed.input_file
@@ -513,6 +523,7 @@ def main():
                "-window_title", os.path.basename(inp)] + ifmt + ["-i", inp]
         if vf:
             cmd += ["-vf", ",".join(vf)]
+        cmd += extra_args
         sys.exit(subprocess.run(cmd).returncode)
 
     if mode == "decode":
@@ -566,14 +577,14 @@ def main():
                 # Each eye is a whole movie, so give it the soundtrack too.
                 # '0:a?' keeps the mapping optional for a video-only source.
                 cmd += ["-map", f"[{name}]", "-map", "0:a?",
-                        "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", o]
+                        "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac"] + extra_args + [o]
             if not run_cmd(cmd, check=True):
                 # Fall back to video-only: some sources carry audio we can
                 # demux but not decode, and half a movie beats none.
                 cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + \
                     ["-i", inp, "-filter_complex", fc]
                 for name, o in zip(labels, outs):
-                    cmd += ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3", o]
+                    cmd += ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3"] + extra_args + [o]
                 run_cmd(cmd) or sys.exit(1)
             print("\ndecode complete:")
             run_cmd(["ls", "-la"] + outs)
@@ -584,8 +595,8 @@ def main():
             print(f"   (stereoscopic {kind} input kept packed; --eyes both splits it)")
         print(f">> decoding  {inp}  ->  {watch}")
         dec_vf = ["-vf", YCGCO_INV_VF] if ycgco else []
-        cmd1 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
-        cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", watch]
+        cmd1 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac"] + extra_args + [watch]
+        cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3"] + extra_args + [watch]
         run_ffenc_fallback(cmd1, cmd2)
         print("\ndecode complete:")
         run_cmd(["ls", "-la", watch])
@@ -625,7 +636,7 @@ def main():
             aud_opts = ["-an"]
         else:
             aud_opts = ["-map", "0:a:0?", "-mo_audio", audio]
-        cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + input_fmt(inp2) + ["-i", inp2, "-filter_complex", filter_str, "-map", "[v]"] + aud_opts + ["-c:v", cvc, "-mo_layout", str(layout)] + kf_opts + [container]
+        cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + input_fmt(inp2) + ["-i", inp2, "-filter_complex", filter_str, "-map", "[v]"] + aud_opts + ["-c:v", cvc, "-mo_layout", str(layout)] + kf_opts + extra_args + [container]
         run_cmd(cmd) or sys.exit(1)
         
         if roundtrip:
@@ -816,16 +827,16 @@ def main():
         # so the file has to be named through -x264-params.
         statfile = mobi_passlog or (container + ".pass")
         print(f">> pass 1/2  analysis  ->  {statfile}")
-        run_cmd(base + ["-pass", "1", "-x264-params", f"stats={statfile}", container]) or sys.exit(1)
+        run_cmd(base + ["-pass", "1", "-x264-params", f"stats={statfile}"] + extra_args + [container]) or sys.exit(1)
         print(">> pass 2/2  encode")
-        run_cmd(base + ["-pass", "2", "-x264-params", f"stats={statfile}", container]) or sys.exit(1)
+        run_cmd(base + ["-pass", "2", "-x264-params", f"stats={statfile}"] + extra_args + [container]) or sys.exit(1)
         for leftover in (statfile, statfile + ".mbtree", statfile + ".temp"):
             try:
                 os.remove(leftover)
             except OSError:
                 pass
     else:
-        run_cmd(base + [container]) or sys.exit(1)
+        run_cmd(base + extra_args + [container]) or sys.exit(1)
     
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
