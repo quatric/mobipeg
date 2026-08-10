@@ -311,6 +311,16 @@ class EncodeGUI(tk.Tk):
         self.enc_mobi_intra_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.enc_adv_frame, text="MOBI_INTRA_ONLY (Force Keyframes Only)", variable=self.enc_mobi_intra_var).grid(row=4, column=1, sticky="w", padx=5, pady=2)
 
+        # Extra ffmpeg parameters. Always visible: it's the escape hatch for
+        # every option this tab doesn't have a widget for, and it goes on the
+        # ffmpeg command line last, so it overrides the format preset.
+        ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(row=19, column=0, sticky="e", padx=5, pady=5)
+        self.enc_ffargs_var = tk.StringVar(value="")
+        ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(row=19, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Label(self.encode_frame, foreground="grey",
+                  text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)"
+                  ).grid(row=19, column=2, sticky="w", padx=5)
+
         # Run Button
         self.enc_run_btn = ttk.Button(self.encode_frame, text="▶ Run Encoding", command=self.run_encoding)
         self.enc_run_btn.grid(row=20, column=1, pady=15)
@@ -421,8 +431,15 @@ class EncodeGUI(tk.Tk):
         # Buttons. Play is the no-output-file path: it decodes straight to a
         # window, so it's the quick way to check a file before committing to a
         # full decode.
+        ttk.Label(self.decode_frame, text="Extra FFmpeg parameters:").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+        self.dec_ffargs_var = tk.StringVar(value="")
+        ttk.Entry(self.decode_frame, textvariable=self.dec_ffargs_var).grid(row=5, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Label(self.decode_frame, foreground="grey",
+                  text="passed to ffmpeg verbatim, after the settings above (applies to Play too)"
+                  ).grid(row=5, column=2, sticky="w", padx=5)
+
         btns = ttk.Frame(self.decode_frame)
-        btns.grid(row=5, column=1, pady=15, sticky="w")
+        btns.grid(row=6, column=1, pady=15, sticky="w")
         self.dec_play_btn = ttk.Button(btns, text="▶ Play", command=self.run_play)
         self.dec_play_btn.grid(row=0, column=0, padx=(0, 10))
         self.dec_run_btn = ttk.Button(btns, text="▶ Run Decoding", command=self.run_decoding)
@@ -636,7 +653,19 @@ class EncodeGUI(tk.Tk):
             if self.enc_rvid_nodither_var.get():
                 cmd.append("--rvid-no-dither")
 
+        self.add_ffargs(cmd, self.enc_ffargs_var)
+
         self.execute_cmd(cmd, self.enc_run_btn)
+
+    @staticmethod
+    def add_ffargs(cmd, var):
+        """Append the tab's extra-parameters field, if it has anything in it.
+
+        encode.py splits the string itself (shlex), so it travels as one argv
+        entry and quoted filter graphs survive the trip."""
+        extra = var.get().strip()
+        if extra:
+            cmd.extend(["--ffmpeg-args", extra])
 
     def run_play(self):
         """Play the selected file in a window without writing an output file."""
@@ -651,6 +680,7 @@ class EncodeGUI(tk.Tk):
 
         cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
         cmd.extend(["play", inp])
+        self.add_ffargs(cmd, self.dec_ffargs_var)
 
         self.execute_cmd(cmd, self.dec_play_btn)
 
@@ -671,6 +701,7 @@ class EncodeGUI(tk.Tk):
         outfile = self.dec_output_var.get().strip()
         if outfile:
             cmd.extend(["-o", outfile])
+        self.add_ffargs(cmd, self.dec_ffargs_var)
 
         self.execute_cmd(cmd, self.dec_run_btn)
 
