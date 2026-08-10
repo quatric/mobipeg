@@ -7,12 +7,39 @@ import argparse
 import math
 import shlex
 import struct
+from fractions import Fraction
 
 # The mobiclip libx264 wrapper hard-caps the keyframe interval at 90 frames
 # (~3s @ 30fps), matching retail Wii .mo cadence — see libavcodec/libx264.c.
 # We never space keyframes coarser than this, so the .mo keeps periodic
 # keyframes the way the Nintendo SDK expects.
 MOBICLIP_KEYINT_MAX = 90
+
+# Audio-only containers. Every one of these carries GameCube/Wii-family
+# DSP-ADPCM except btsnd, which is raw big-endian PCM, and ast, which can do
+# either. They share a code path that skips everything video-shaped.
+AUDIO_FORMATS = ("dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd")
+
+# Audio codec each one is written with, keyed by the GUI's "audio" argument.
+# "adpcm" means the format's native ADPCM; "pcm" its uncompressed form.
+AUDIO_FORMAT_CODECS = {
+    "dsp":   {"adpcm": ["-c:a", "adpcm_thp"]},
+    "brstm": {"adpcm": ["-c:a", "adpcm_thp"], "pcm": ["-c:a", "pcm_s16be_planar"]},
+    "bfstm": {"adpcm": ["-c:a", "adpcm_thp"], "pcm": ["-c:a", "pcm_s16be_planar"]},
+    "bcstm": {"adpcm": ["-c:a", "adpcm_thp"], "pcm": ["-c:a", "pcm_s16be_planar"]},
+    "bns":   {"adpcm": ["-c:a", "adpcm_thp"]},
+    # AST's ADPCM is AFC, a different DSP-ADPCM flavour with a fixed
+    # predictor table -- lower quality than adpcm_thp, but what the format
+    # takes.
+    "ast":   {"adpcm": ["-c:a", "adpcm_afc"], "pcm": ["-c:a", "pcm_s16be_planar"]},
+    # The Wii U boot-sound player has no format negotiation: 48 kHz stereo
+    # big-endian PCM or nothing.
+    "btsnd": {"pcm": ["-c:a", "pcm_s16be", "-ar", "48000", "-ac", "2"]},
+}
+
+# .bcstm is read by the bfstm demuxer (same layout, different magic), so it
+# has a muxer of its own but no demuxer to name on the way back in.
+AUDIO_FORMAT_DEMUXERS = {"bcstm": "bfstm"}
 
 # Config
 if getattr(sys, 'frozen', False):
@@ -447,8 +474,18 @@ def main():
         # encoder + muxer (LZ10 compression lives in libavcodec/rvid.c); no
         # external helper. DS screen is 256x192; source is packed to rgb24.
         mode, dmx, scale, moaud, cvc = "vid", "rvid", "256:192", 0, "rvid"
+    elif fmt == "dpg":
+        # Nintendo DS DPG (MoonShell): MPEG-1 video + MP2 audio in separate
+        # regions of the file. DS screen is 256x192.
+        mode, dmx, scale, moaud, cvc = "vid", "dpg", "256:192", 0, "mpeg1video"
+    elif fmt in AUDIO_FORMATS:
+        # Audio-only containers: no video stream, so none of the scaling,
+        # keyframe or frame-rate machinery below applies.
+        mode, dmx, scale, moaud, cvc = "aud", fmt, "", 0, ""
     else:
-        print(f"unknown format '{fmt}' (play|decode|mo|moflex|moflex3d|mods|vx|thp|rvid)")
+        print(f"unknown format '{fmt}' "
+              f"(play|decode|mo|moflex|moflex3d|mods|vx|thp|rvid|dpg|"
+              f"{'|'.join(AUDIO_FORMATS)})")
         sys.exit(2)
 
 
@@ -659,6 +696,50 @@ def main():
 
         sys.exit(0)
 
+    if mode == "aud":
+        inp = input_file
+        if not inp or not os.path.isfile(inp):
+            print(f"input not found: {inp or '(none)'}")
+            sys.exit(2)
+
+        codecs = AUDIO_FORMAT_CODECS[fmt]
+        choice = audio if audio in codecs else next(iter(codecs))
+        if audio not in codecs:
+            print(f"   ({fmt} has no '{audio}' audio; using '{choice}')")
+
+        container = f"{OUTDIR}/roundtrip_{fmt}_{choice}.{fmt}"
+        watch     = f"{OUTDIR}/roundtrip_{fmt}_{choice}.wav"
+
+        enc_opts = ["-vn"] + list(codecs[choice])
+        # -ar after the codec so it overrides a rate the format pins itself.
+        if audio_rate > 0:
+            enc_opts.extend(["-ar", str(audio_rate)])
+
+        print(f">> encoding  {inp}  ->  {container}")
+        cmd = ([FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp]
+               + enc_opts + extra_args + [container])
+        run_cmd(cmd) or sys.exit(1)
+
+        if roundtrip:
+            print(f">> decoding  {container}  ->  {watch}")
+            run_cmd([FFENC, "-nostdin", "-y", "-loglevel", "error",
+                     "-f", AUDIO_FORMAT_DEMUXERS.get(fmt, fmt), "-i", container,
+                     "-c:a", "pcm_s16le", watch]) or sys.exit(1)
+            print("\nround-trip complete:")
+            run_cmd(["ls", "-la", container, watch])
+        else:
+            print("\nencode complete:")
+            run_cmd(["ls", "-la", container])
+        print()
+
+        p = subprocess.run([FFENC, "-hide_banner", "-f",
+                            AUDIO_FORMAT_DEMUXERS.get(fmt, fmt), "-i", container],
+                           stderr=subprocess.PIPE, text=True)
+        for line in p.stderr.splitlines():
+            if "Stream" in line or "Duration" in line:
+                print("  " + line)
+        sys.exit(0)
+
     # Video round-trip (2D)
     inp = input_file or "stupi.mp4"
     if not os.path.isfile(inp):
@@ -749,6 +830,20 @@ def main():
             # a 48000 Hz stream plays ~0.67x = low-pitched, slow, and choppy.
             # Resample to 32000 unless the user forces a rate.
             enc_opts.extend(["-ar", str(audio_rate if audio_rate > 0 else 32000)])
+    elif fmt == "dpg":
+        # MoonShell plays these at 15 fps, which is not one of the frame rates
+        # MPEG-1 permits, so the encoder needs -strict -1 to accept it.
+        enc_opts.extend(["-strict", "-1"])
+        enc_opts.extend(["-b:v", mobi_bitrate or "300k"])
+        # One GOP per second: the seek index only holds GOP starts, so a
+        # coarser spacing is what makes seeking feel unresponsive on hardware.
+        dpg_fps = float(Fraction(fps_ovr)) if fps_ovr else 15.0
+        enc_opts.extend(["-g", str(max(1, int(round(dpg_fps))))])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "mp2", "-b:a", "128k"])
+            enc_opts.extend(["-ar", str(audio_rate if audio_rate > 0 else 32000)])
     elif fmt == "rvid":
         # RocketVideo: 16bpp (RGB555/565) frames, optional Nintendo LZ10, encoded
         # entirely by ffmpeg's rvid encoder. The encoder consumes rgb24 and packs
@@ -776,6 +871,10 @@ def main():
         fps_filter = f"fps={fps_ovr}"
     elif fmt == "mo":
         fps_filter = "fps=30000/1001"
+    elif fmt == "dpg":
+        # The DS decodes MPEG-1 in software; 15 fps is what MoonShell's own
+        # encoders target and what the hardware keeps up with.
+        fps_filter = "fps=15"
         
     filters = []
     if scale:

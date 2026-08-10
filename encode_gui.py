@@ -21,7 +21,16 @@ DECODER_FAMILIES = [
     ("TiVo TyStream", "*.ty *.ty+ *.tmf"),
     ("Flipnote", "*.ppm *.kwz"),
     ("Wii Picture", "*.odh"),
+    ("DS DPG video", "*.dpg"),
+    ("Nintendo DSP-ADPCM", "*.dsp"),
+    ("Nintendo streams", "*.brstm *.bfstm *.bcstm"),
+    ("Wii BNS / AST", "*.bns *.ast"),
+    ("Wii U boot sound", "*.btsnd"),
 ]
+
+# Formats with no video stream. The Encode tab hides every video-only control
+# for these, and encode.py decodes them to .wav rather than .mp4.
+AUDIO_ONLY_FORMATS = {"dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd"}
 
 # How many family cells sit side by side in the expandable grid.
 DECODER_GRID_COLUMNS = 3
@@ -134,7 +143,15 @@ class EncodeGUI(tk.Tk):
             "DS Mobiclip .mods": "mods",
             "DS ActImagine .vx": "vx",
             "GameCube/Wii THP .thp": "thp",
-            "DS RocketVideo .rvid": "rvid"
+            "DS RocketVideo .rvid": "rvid",
+            "DS MoonShell .dpg": "dpg",
+            "Nintendo DSP-ADPCM .dsp": "dsp",
+            "Wii stream .brstm": "brstm",
+            "Wii U stream .bfstm": "bfstm",
+            "3DS stream .bcstm": "bcstm",
+            "Wii banner sound .bns": "bns",
+            "Wii stream .ast": "ast",
+            "Wii U boot sound .btsnd": "btsnd",
         }
         # Audio codecs each format actually supports (see encode.py):
         #  - vorbis is Wii (.mo) only
@@ -149,6 +166,16 @@ class EncodeGUI(tk.Tk):
             "vx":       ["codebook", "none"],
             "thp":      ["adpcm", "none"],
             "rvid":     ["pcm", "none"],
+            "dpg":      ["mp2", "none"],
+            # Audio-only formats: the choice is which of the container's own
+            # codecs to write, so "none" is not on offer.
+            "dsp":      ["adpcm"],
+            "brstm":    ["adpcm", "pcm"],
+            "bfstm":    ["adpcm", "pcm"],
+            "bcstm":    ["adpcm", "pcm"],
+            "bns":      ["adpcm"],
+            "ast":      ["adpcm", "pcm"],
+            "btsnd":    ["pcm"],
         }
         self.enc_fmt_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_fmt_var, values=list(self.formats_map.keys()), state="readonly", width=25)
         self.enc_fmt_cb.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
@@ -189,9 +216,11 @@ class EncodeGUI(tk.Tk):
         ttk.Button(self.encode_frame, text="Browse...", command=lambda: self.browse_dir(self.enc_outdir_var)).grid(row=5, column=2, padx=5, pady=5)
         
         # Row 6: Scale
-        ttk.Label(self.encode_frame, text="Scale (e.g. 384x288):").grid(row=6, column=0, sticky="e", padx=5, pady=5)
+        self.enc_scale_label = ttk.Label(self.encode_frame, text="Scale (e.g. 384x288):")
+        self.enc_scale_label.grid(row=6, column=0, sticky="e", padx=5, pady=5)
         self.enc_scale_var = tk.StringVar()
-        ttk.Entry(self.encode_frame, textvariable=self.enc_scale_var).grid(row=6, column=1, sticky="ew", padx=5, pady=5)
+        self.enc_scale_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_scale_var)
+        self.enc_scale_entry.grid(row=6, column=1, sticky="ew", padx=5, pady=5)
 
         # Row 7: Keyframes
         self.enc_keyframes_label = ttk.Label(self.encode_frame, text="Keyframes (0=auto):")
@@ -333,7 +362,12 @@ class EncodeGUI(tk.Tk):
             ({"moflex3d"}, (self.enc_layout_label, self.enc_layout_entry)),
             ({"mo", "moflex", "moflex3d", "vx"}, (self.enc_keyframes_label, self.enc_keyframes_entry)),
             ({"vx", "mo", "moflex", "moflex3d", "mods", "thp"}, (self.enc_quant_label, self.enc_quant_entry)),
-            ({"vx", "mods", "thp", "rvid"}, (self.enc_arate_label, self.enc_arate_entry)),
+            ({"vx", "mods", "thp", "rvid", "dpg"} | AUDIO_ONLY_FORMATS,
+             (self.enc_arate_label, self.enc_arate_entry)),
+            # Scale and FPS describe a video stream, so they go away entirely
+            # for the audio-only containers.
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "thp", "rvid", "dpg"}, (self.enc_scale_label, self.enc_scale_entry)),
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "thp", "rvid", "dpg"}, (self.enc_fps_label, self.enc_fps_entry)),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),
