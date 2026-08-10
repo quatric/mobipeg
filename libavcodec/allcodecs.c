@@ -655,6 +655,7 @@ extern const FFCodec ff_adpcm_4xm_decoder;
 extern const FFCodec ff_adpcm_adx_encoder;
 extern const FFCodec ff_adpcm_adx_decoder;
 extern const FFCodec ff_adpcm_afc_decoder;
+extern const FFCodec ff_adpcm_afc_encoder;
 extern const FFCodec ff_adpcm_agm_decoder;
 extern const FFCodec ff_adpcm_aica_decoder;
 extern const FFCodec ff_adpcm_argo_decoder;
