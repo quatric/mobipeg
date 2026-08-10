@@ -383,7 +383,14 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
         samples = b->last_block_samples;
         skip    = b->last_block_size - b->last_block_used_bytes;
 
-        if (samples < size * 14 / 8) {
+        /* ADPCM only: 8 bytes carry 14 samples, so a last block holding fewer
+         * samples than its byte count implies also holds trailing frames that
+         * are not part of the stream. PCM has no such slack -- running this on
+         * a PCM stream shrinks the last block to about a fifth of its size and
+         * truncates the file. */
+        if ((par->codec_id == AV_CODEC_ID_ADPCM_THP ||
+             par->codec_id == AV_CODEC_ID_ADPCM_THP_LE) &&
+            samples < size * 14 / 8) {
             uint32_t adjusted_size = samples / 14 * 8;
             if (samples % 14)
                 adjusted_size += (samples % 14 + 1) / 2 + 1;
@@ -434,6 +441,26 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
             }
         }
         pkt->duration = samples;
+    } else if (skip) {
+        /* The last block is padded per channel, so the channels cannot be
+         * read as one run. */
+        uint8_t *dst;
+
+        if (size > INT_MAX / channels)
+            return AVERROR_INVALIDDATA;
+        if ((ret = av_new_packet(pkt, size * channels)) < 0)
+            return ret;
+        dst = pkt->data;
+        for (i = 0; i < channels; i++) {
+            ret = ffio_read_size(s->pb, dst, size);
+            if (ret < 0)
+                return ret;
+            dst += size;
+            avio_skip(s->pb, skip);
+        }
+        pkt->duration = samples;
+        size *= channels;
+        ret   = size;
     } else {
         size *= channels;
         ret = av_get_packet(s->pb, pkt, size);
