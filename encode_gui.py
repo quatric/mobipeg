@@ -8,28 +8,66 @@ import sys
 
 ENCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode.py")
 
-# Grouped so the file dialog's type menu is readable; "All supported" first so
-# the default view still shows everything decodable.
-DECODE_FILETYPES = [
-    ("All supported", "*.mo *.moflex *.mods *.vx *.thp *.rvid *.h4m *.ty *.ty+ *.tmf *.ppm *.kwz *.gba"),
+# One source of truth for what the decoder accepts: (family, extensions).
+# The file dialog's type menu and the expandable format list are both derived
+# from this, so they can't drift apart.
+DECODER_FAMILIES = [
     ("Mobiclip", "*.mo *.moflex *.mods"),
-    ("ActImagine VX", "*.vx"),
     ("GBA Video cartridges", "*.gba"),
+    ("ActImagine VX", "*.vx"),
     ("THP", "*.thp"),
     ("RocketVideo", "*.rvid"),
     ("HVQM4", "*.h4m"),
     ("TiVo TyStream", "*.ty *.ty+ *.tmf"),
     ("Flipnote", "*.ppm *.kwz"),
-    ("All files", "*.*"),
+    ("Wii Picture", "*.odh"),
 ]
 
-DECODE_CODEC_FAMILIES = (
-    "GBA Video cartridges (.gba): Majesco ADS/LZMA · Hydrogen/Inflate · "
-    "Hydrogen/LZMA prototypes · ActImagine VXGB · VX++ · Nintendo FVMV\n"
-    "MobiClip: Wii .mo · Nintendo 3DS .moflex · Nintendo DS .mods\n"
-    "Other: ActImagine DS .vx · THP · RocketVideo .rvid · HVQM4 · "
-    "TiVo TyStream · Flipnote"
+# How many family cells sit side by side in the expandable grid.
+DECODER_GRID_COLUMNS = 3
+
+_ALL_DECODE_EXTS = " ".join(exts for _, exts in DECODER_FAMILIES)
+
+# "All supported" first so the dialog's default view shows everything.
+DECODE_FILETYPES = (
+    [("All supported", _ALL_DECODE_EXTS)]
+    + list(DECODER_FAMILIES)
+    + [("All files", "*.*")]
 )
+
+
+class CollapsibleSection(ttk.Frame):
+    """A disclosure triangle whose body is gridded/ungridded beneath it.
+
+    ttk has no built-in disclosure widget, and the format list is long enough
+    that showing it unconditionally crowds out the actual controls -- but
+    short enough that hiding it behind a dialog would be worse.
+    """
+
+    def __init__(self, parent, title, expanded=False):
+        super().__init__(parent)
+        self.columnconfigure(0, weight=1)
+        self._title = title
+        self._expanded = bool(expanded)
+        self._button = ttk.Label(self, cursor="hand2", foreground="grey")
+        self._button.grid(row=0, column=0, sticky="w")
+        self._button.bind("<Button-1>", lambda _e: self.toggle())
+        self.body = ttk.Frame(self)
+        self.body.grid(row=1, column=0, sticky="ew", padx=(16, 0), pady=(3, 0))
+        self._sync()
+
+    def toggle(self):
+        self._expanded = not self._expanded
+        self._sync()
+
+    def _sync(self):
+        arrow = "\u25be" if self._expanded else "\u25b8"   # BLACK DOWN/RIGHT-POINTING SMALL TRIANGLE
+        self._button.configure(text="%s  %s" % (arrow, self._title))
+        if self._expanded:
+            self.body.grid()
+        else:
+            self.body.grid_remove()
+
 
 class EncodeGUI(tk.Tk):
     def __init__(self):
@@ -342,19 +380,27 @@ class EncodeGUI(tk.Tk):
                                                     DECODE_FILETYPES)
                    ).grid(row=0, column=2, padx=5, pady=5)
 
-        hint = ttk.Label(self.decode_frame, foreground="grey", justify="left",
-                         text=("Mobiclip: .mo (Wii)  ·  .moflex (3DS)  ·  .mods (DS)\n"
-                               "Other: .vx  ·  .thp  ·  .rvid  ·  .h4m  ·  .ty/.ty+/.tmf\n"
-                               "Flipnote: .ppm  ·  .kwz  ·  GBA Video: .gba\n"
-                               "(plus any format ffmpeg reads)"))
-        hint.grid(row=1, column=1, sticky="w", padx=5, pady=(0, 6))
-
-        codecs = ttk.LabelFrame(self.decode_frame, text="Included decoder families",
-                                padding=(8, 5))
-        codecs.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5,
-                    pady=(0, 6))
-        ttk.Label(codecs, text=DECODE_CODEC_FAMILIES, justify="left",
-                  wraplength=610).pack(anchor="w")
+        # Collapsed by default: the file dialog's own type filter is what
+        # people actually need day to day, this is just for "does it support
+        # X" questions.
+        formats = CollapsibleSection(self.decode_frame, "Supported formats")
+        formats.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5,
+                     pady=(0, 8))
+        for i, (name, exts) in enumerate(DECODER_FAMILIES):
+            cell = ttk.Frame(formats.body)
+            cell.grid(row=i // DECODER_GRID_COLUMNS,
+                      column=i % DECODER_GRID_COLUMNS,
+                      sticky="nw", padx=(0, 24), pady=(0, 6))
+            ttk.Label(cell, text=name).pack(anchor="w")
+            ttk.Label(cell, foreground="grey",
+                      text="  ".join(e.lstrip("*") for e in exts.split())
+                      ).pack(anchor="w")
+        for col in range(DECODER_GRID_COLUMNS):
+            formats.body.columnconfigure(col, weight=1, uniform="fmt")
+        ttk.Label(formats.body, foreground="grey",
+                  text="(plus any format ffmpeg reads)").grid(
+            row=(len(DECODER_FAMILIES) - 1) // DECODER_GRID_COLUMNS + 1,
+            column=0, columnspan=DECODER_GRID_COLUMNS, sticky="w", pady=(2, 0))
 
         # Output file: directory + filename in one field ("Save As..." picks
         # both at once). For a stereoscopic input with "Both" eyes, the eye
