@@ -165,6 +165,7 @@ OBJS = adler32.o                                                        \
        md5.o                                                            \
        mem.o                                                            \
        murmur3.o                                                        \
+       nintendo_lz.o                                                    \
        opt.o                                                            \
        parseutils.o                                                     \
        pixdesc.o                                                        \
