@@ -425,6 +425,9 @@ class EncodeGUI(tk.Tk):
             # Scale and FPS describe a video stream, so they go away entirely
             # for the audio-only containers.
             ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_scale_label, self.enc_scale_entry)),
+            # --hq only moves video knobs (quantizer, subme, skip), so it has
+            # nothing to do in an audio-only format.
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_hq_chk,)),
             ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_fps_label, self.enc_fps_entry)),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
