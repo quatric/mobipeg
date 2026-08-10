@@ -1576,7 +1576,7 @@ ADPCM_ENCODER(ADPCM_IMA_QT,  adpcm_ima_qt,  sample_fmts_p, 0,                   
 ADPCM_ENCODER(ADPCM_IMA_SSI, adpcm_ima_ssi, sample_fmts,   AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM IMA Simon & Schuster Interactive", MONO_STEREO, AVCLASS)
 ADPCM_ENCODER(ADPCM_IMA_WAV,    adpcm_ima_wav,    sample_fmts_p, 0, "ADPCM IMA WAV",              MONO_STEREO, AVCLASS)
 ADPCM_ENCODER(ADPCM_IMA_MOFLEX, adpcm_ima_moflex, sample_fmts_p, 0, "ADPCM IMA MobiClip MOFLEX", MONO_STEREO)
-ADPCM_ENCODER(ADPCM_THP,        adpcm_thp,        sample_fmts_p, AV_CODEC_CAP_DELAY, "ADPCM Nintendo THP", MONO_STEREO)
+ADPCM_ENCODER(ADPCM_THP,        adpcm_thp,        sample_fmts_p, AV_CODEC_CAP_DELAY | AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM Nintendo THP", MONO_STEREO)
 ADPCM_ENCODER(ADPCM_IMA_WS,  adpcm_ima_ws,  sample_fmts,   AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM IMA Westwood",                     MONO_STEREO, AVCLASS)
 ADPCM_ENCODER(ADPCM_MS,      adpcm_ms,      sample_fmts,   0,                             "ADPCM Microsoft",                        MONO_STEREO, AVCLASS)
 ADPCM_ENCODER(ADPCM_SWF,     adpcm_swf,     sample_fmts,   0,                             "ADPCM Shockwave Flash",                  MONO_STEREO, CODEC_SAMPLERATES(11025, 22050, 44100))
