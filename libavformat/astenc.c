@@ -52,13 +52,11 @@ static int ast_write_header(AVFormatContext *s)
     AVCodecParameters *par = s->streams[0]->codecpar;
     unsigned int codec_tag;
 
-    if (par->codec_id == AV_CODEC_ID_ADPCM_AFC) {
-        av_log(s, AV_LOG_ERROR, "muxing ADPCM AFC is not implemented\n");
-        return AVERROR_PATCHWELCOME;
-    }
-
     codec_tag = ff_codec_get_tag(ff_codec_ast_tags, par->codec_id);
-    if (!codec_tag) {
+    /* ADPCM AFC's tag is 0, so a zero tag only means "not in the table" for
+     * everything else -- checking the tag alone would reject AFC. */
+    if (!codec_tag &&
+        ff_codec_get_id(ff_codec_ast_tags, codec_tag) != par->codec_id) {
         av_log(s, AV_LOG_ERROR, "unsupported codec\n");
         return AVERROR(EINVAL);
     }
@@ -125,7 +123,13 @@ static int ast_write_trailer(AVFormatContext *s)
     ASTMuxContext *ast = s->priv_data;
     AVCodecParameters *par = s->streams[0]->codecpar;
     int64_t file_size = avio_tell(pb);
-    int64_t samples = (file_size - 64 - (32 * s->streams[0]->nb_frames)) / par->block_align; /* PCM_S16BE_PLANAR */
+    int64_t audio = file_size - 64 - (32 * s->streams[0]->nb_frames);
+    /* Sample count from the audio actually written. AFC packs 16 samples into
+     * 9 bytes per channel; PCM_S16BE_PLANAR spends block_align on one sample
+     * across all channels. */
+    int64_t samples = par->codec_id == AV_CODEC_ID_ADPCM_AFC
+                    ? audio / (9 * par->ch_layout.nb_channels) * 16
+                    : audio / par->block_align;
 
     av_log(s, AV_LOG_DEBUG, "total samples: %"PRId64"\n", samples);
 
