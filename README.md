@@ -24,6 +24,31 @@ such as audio, video, subtitles and related metadata.
 | RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
 | HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
 | TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
+| DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
+
+### Audio formats
+
+| Format | Container | Platform | Encode | Decode |
+|--------|-----------|----------|--------|--------|
+| DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
+| BRSTM | `.brstm` | Nintendo Wii | ✅ | ✅ |
+| BFSTM | `.bfstm` | Nintendo Wii U | ✅ | ✅ |
+| BCSTM | `.bcstm` | Nintendo 3DS | ✅ | ✅ |
+| BNS | `.bns` | Nintendo Wii (banner sound) | ✅ | ✅ |
+| AST | `.ast` | GameCube / Wii | ✅ | ✅ |
+| BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
+
+The DSP-ADPCM encoder derives its predictor coefficients over the whole
+stream, the same autocorrelation and Levinson refinement Nintendo's own
+DSPADPCM tool uses, so these land around 80 dB SDR. AST's ADPCM is AFC, a
+variant with a predictor table fixed by the format rather than derived, and
+lands around 65 dB; AST can also be written as uncompressed PCM, as can
+BRSTM, BFSTM and BCSTM. BTSND is always 48 kHz stereo big-endian PCM,
+because its player on the console reads no format fields at all.
+
+BNS files are usually LZ10-compressed, wrapped in an IMD5 header, or both.
+Decoding unwraps whichever combination it finds; `-compress 1` writes the
+compressed form.
 
 Decode-only inputs can be transcoded into any of the encodable formats
 above, or previewed with `encode.py decode <file>`. Series-3 TiVo
