@@ -569,6 +569,17 @@ static av_cold int adpcm_encode_init(AVCodecContext *avctx)
         avctx->block_align = channels * 132;
         ) /* End of CASE */
     
+    CASE(ADPCM_AFC,
+        /* Nintendo AFC: 16 samples per 9-byte frame, per channel, using a
+         * fixed 16-entry predictor table rather than per-stream coefficients.
+         * That is what lets it encode frame by frame, unlike THP below. */
+        if (!avctx->frame_size)
+            avctx->frame_size = FFMAX(16, (s->block_size / 16) * 16);
+        avctx->frame_size  = FFMAX(16, (avctx->frame_size / 16) * 16);
+        avctx->block_align = channels * (avctx->frame_size / 16) * 9;
+        avctx->bits_per_coded_sample = 4;
+        ) /* End of CASE */
+
     CASE(ADPCM_THP,
         /* GameCube-style DSP-ADPCM: 14 samples per 8-byte block, per channel.
          * frame_size must be a multiple of 14. The coefficient table is emitted
@@ -1042,6 +1053,80 @@ static void adpcm_thp_encode_block(const int16_t *samples, int count,
     *hist2 = best_h2;
 }
 
+/* Encode one AFC frame: up to 16 samples of a single channel into 9 bytes.
+ *
+ * AFC is DSP-ADPCM with the predictors fixed by the format instead of derived
+ * from the audio, so there is nothing to search but the 16 table entries and
+ * the scale. The reconstruction below is the ADPCM_AFC decoder's, so what
+ * comes back out is exactly what this measured. */
+static void adpcm_afc_encode_block(const int16_t *samples, int count,
+                                   uint8_t *dst, int *hist1, int *hist2)
+{
+    int best_index = 0, best_shift = 0;
+    int64_t best_err = INT64_MAX;
+    uint8_t best_nib[16] = { 0 };
+    int best_h1 = *hist1, best_h2 = *hist2;
+
+    for (int index = 0; index < 16; index++) {
+        int64_t f1 = afc_coeffs[0][index], f2 = afc_coeffs[1][index];
+        int h1 = *hist1, h2 = *hist2, maxres = 0;
+
+        for (int n = 0; n < count; n++) {
+            int pred = (int)((h1 * f1 + h2 * f2) >> 11);
+            int res  = FFABS(samples[n] - pred);
+            if (res > maxres)
+                maxres = res;
+            h2 = h1; h1 = samples[n];
+        }
+
+        int shift0 = 0;
+        while (shift0 < 15 && (maxres >> shift0) > 7)
+            shift0++;
+
+        for (int sh = shift0; sh <= FFMIN(15, shift0 + 1); sh++) {
+            int lh1 = *hist1, lh2 = *hist2;
+            int64_t err = 0;
+            uint8_t nib[16] = { 0 };
+
+            for (int n = 0; n < count; n++) {
+                int pred = (int)((lh1 * f1 + lh2 * f2) >> 11);
+                int diff = samples[n] - pred;
+                int q    = diff >= 0 ?  ((diff  + (1 << sh) / 2) >> sh)
+                                     : -(((-diff) + (1 << sh) / 2) >> sh);
+                int recon, d;
+                q = av_clip(q, -8, 7);
+                recon = av_clip_int16(pred + q * (1 << sh));
+                d = samples[n] - recon;
+                err += (int64_t)d * d;
+                nib[n] = q & 0x0F;
+                lh2 = lh1; lh1 = recon;
+            }
+
+            if (err < best_err) {
+                best_err   = err;
+                best_index = index;
+                best_shift = sh;
+                best_h1    = lh1;
+                best_h2    = lh2;
+                for (int n = 0; n < count; n++)
+                    best_nib[n] = nib[n];
+            }
+        }
+    }
+
+    /* The AFC header byte is the other way round from THP's: scale high,
+     * predictor index low, and the index spans all 16 entries. */
+    dst[0] = (best_shift << 4) | best_index;
+    for (int n = 0; n < 16; n++) {
+        if (n & 1)
+            dst[1 + n / 2] |= best_nib[n];
+        else
+            dst[1 + n / 2]  = best_nib[n] << 4;
+    }
+    *hist1 = best_h1;
+    *hist2 = best_h2;
+}
+
 /* THP is encoded specially: the whole input is buffered so the DSP-ADPCM
  * predictor coefficients can be derived over the entire channel (they must be
  * constant stream-wide), then everything is emitted as one packet at drain. */
@@ -1135,6 +1220,10 @@ static int adpcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
         avctx->codec_id == AV_CODEC_ID_ADPCM_IMA_APM ||
         avctx->codec_id == AV_CODEC_ID_ADPCM_IMA_WS)
         pkt_size = (frame->nb_samples * channels + 1) / 2;
+    else if (avctx->codec_id == AV_CODEC_ID_ADPCM_AFC)
+        /* As for THP: emit only the frames actually used, so a short final
+         * frame still splits evenly across the channels. */
+        pkt_size = ((frame->nb_samples + 15) / 16) * 9 * channels;
     else if (avctx->codec_id == AV_CODEC_ID_ADPCM_THP)
         /* Emit exactly the bytes used (8 per 14-sample block per channel) so a
          * partial final frame doesn't leave the muxer to mis-split channels. */
@@ -1421,6 +1510,25 @@ static int adpcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             bytestream_put_byte(&dst, nibble);
         }
         ) /* End of CASE */
+    CASE(ADPCM_AFC,
+        int blocks = (frame->nb_samples + 15) / 16;
+
+        /* Channel-major, like THP: the containers that carry AFC (AST) store
+         * each channel's block in one run. */
+        for (int ch = 0; ch < channels; ch++) {
+            int h1 = c->status[ch].sample1;
+            int h2 = c->status[ch].sample2;
+
+            for (int b = 0; b < blocks; b++) {
+                int count = FFMIN(16, frame->nb_samples - b * 16);
+                adpcm_afc_encode_block(&samples_p[ch][b * 16], count,
+                                       dst + (ch * blocks + b) * 9, &h1, &h2);
+            }
+            c->status[ch].sample1 = h1;
+            c->status[ch].sample2 = h2;
+        }
+        dst += blocks * 9 * channels;
+        ) /* End of CASE */
     CASE(ADPCM_ARGO,
         PutBitContext pb;
         init_put_bits(&pb, dst, pkt_size);
@@ -1568,6 +1676,7 @@ const FFCodec ff_ ## name_ ## _encoder = {                                 \
 #define MONO_STEREO CODEC_CH_LAYOUTS_ARRAY(ch_layouts_mono_stereo)
 #define AVCLASS .p.priv_class = &adpcm_encoder_class
 
+ADPCM_ENCODER(ADPCM_AFC,     adpcm_afc,     sample_fmts_p, AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM Nintendo AFC",                     MONO_STEREO)
 ADPCM_ENCODER(ADPCM_ARGO,    adpcm_argo,    sample_fmts_p, 0,                             "ADPCM Argonaut Games",                   MONO_STEREO)
 ADPCM_ENCODER(ADPCM_IMA_AMV, adpcm_ima_amv, sample_fmts,   0,                             "ADPCM IMA AMV",                          CODEC_CH_LAYOUTS(AV_CHANNEL_LAYOUT_MONO), CODEC_SAMPLERATES(22050), AVCLASS)
 ADPCM_ENCODER(ADPCM_IMA_APM, adpcm_ima_apm, sample_fmts,   AV_CODEC_CAP_SMALL_LAST_FRAME, "ADPCM IMA Ubisoft APM",                  MONO_STEREO, AVCLASS)
