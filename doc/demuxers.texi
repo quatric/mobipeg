@@ -73,6 +73,16 @@ ASTC (Adaptive Scalable Texture Compression) demuxer.
 This demuxer reads the 16-byte @file{.astc} header, hands it to the decoder as
 extradata, and emits the compressed image as a single packet.
 
+@section bpk
+
+Nintendo 3DS Swapdoodle BPK1 note container.
+
+Each BPK1 directory entry is emitted in directory order as one packet. Binary
+sections, including vector SHEET1 data, are exposed as data streams; payloads
+beginning with a JPEG SOI marker are exposed as MJPEG video streams and can be
+decoded by the normal MJPEG decoder. Packet data is the unmodified payload
+range from the BPK1 file, allowing lossless extraction of every section.
+
 @anchor{concat}
 @section concat
 
