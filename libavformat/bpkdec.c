@@ -15,6 +15,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/nintendo_lz.h"
+#include "libavcodec/avcodec.h"
 #include "avformat.h"
 #include "demux.h"
 #include "internal.h"
@@ -35,6 +36,9 @@ typedef struct BPKDemuxContext {
     int data_size;
     unsigned nb_entries;
     unsigned next_entry;
+    int note_stream_index;
+    unsigned next_note_entry;
+    unsigned note_frame_number;
 } BPKDemuxContext;
 
 static int bpk_probe(const AVProbeData *p)
@@ -113,6 +117,28 @@ static av_cold int bpk_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     c->nb_entries = count;
 
+    /* The first stream is the complete archive.  Unlike a standalone
+     * SHEET1 section it gives the Swapdoodle decoder access to the palette,
+     * stationery, badges, icons and sender Mii needed for a real page. */
+    {
+        AVStream *st = avformat_new_stream(s, NULL);
+        if (!st)
+            return AVERROR(ENOMEM);
+        c->note_stream_index = st->index;
+        st->start_time = 0;
+        st->duration = 1;
+        avpriv_set_pts_info(st, 64, 1, 1);
+        st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        st->codecpar->codec_id = AV_CODEC_ID_SWAPDOODLE;
+        st->codecpar->width = st->codecpar->height = 256;
+        st->codecpar->extradata = av_mallocz(file_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (!st->codecpar->extradata)
+            return AVERROR(ENOMEM);
+        memcpy(st->codecpar->extradata, data, file_size);
+        st->codecpar->extradata_size = file_size;
+        av_dict_set(&st->metadata, "title", "Swapdoodle note", 0);
+    }
+
     for (i = 0; i < count; i++) {
         BPKEntry *entry = &c->entries[i];
         const uint8_t *dir = data + BPK_HEADER_SIZE + i * BPK_ENTRY_SIZE;
@@ -144,7 +170,11 @@ static av_cold int bpk_read_header(AVFormatContext *s)
          * in packets while becoming directly decodable by the MJPEG decoder. */
         first[0] = data[entry->offset];
         first[1] = entry->size > 1 ? data[entry->offset + 1] : 0;
-        if (entry->size >= 2 && first[0] == 0xff && first[1] == 0xd8) {
+        if (!strcmp(entry->name, "SHEET1")) {
+            st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+            st->codecpar->codec_id = AV_CODEC_ID_SWAPDOODLE;
+            st->codecpar->width = st->codecpar->height = 256;
+        } else if (entry->size >= 2 && first[0] == 0xff && first[1] == 0xd8) {
             st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
             st->codecpar->codec_id = AV_CODEC_ID_MJPEG;
         } else {
@@ -161,6 +191,19 @@ static int bpk_read_packet(AVFormatContext *s, AVPacket *pkt)
     BPKEntry *entry;
     int ret;
 
+    while (c->next_note_entry < c->nb_entries) {
+        BPKEntry *note = &c->entries[c->next_note_entry++];
+        int ret;
+        if (strcmp(note->name, "SHEET1"))
+            continue;
+        if ((ret = av_new_packet(pkt, note->size)) < 0)
+            return ret;
+        memcpy(pkt->data, c->data + note->offset, note->size);
+        pkt->stream_index = c->note_stream_index;
+        pkt->pts = pkt->dts = c->note_frame_number++;
+        pkt->duration = 1;
+        return 0;
+    }
     if (c->next_entry >= c->nb_entries)
         return AVERROR_EOF;
     entry = &c->entries[c->next_entry++];
