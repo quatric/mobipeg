@@ -599,7 +599,6 @@ jobs:
             --disable-outdev=sdl2 \
             --disable-ffplay \
             --disable-dxva2 \
-            --disable-d3d11va \
             --disable-d3d12va \
             --disable-vdpau \
             --disable-mediacodec \
