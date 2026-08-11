@@ -66,6 +66,16 @@ This demuxer is used to demux ASF files and MMS network streams.
 Do not try to resynchronize by looking for a certain optional start code.
 @end table
 
+@section bpk
+
+Nintendo 3DS Swapdoodle BPK1 note container.
+
+Each BPK1 directory entry is emitted in directory order as one packet. Binary
+sections, including vector SHEET1 data, are exposed as data streams; payloads
+beginning with a JPEG SOI marker are exposed as MJPEG video streams and can be
+decoded by the normal MJPEG decoder. Packet data is the unmodified payload
+range from the BPK1 file, allowing lossless extraction of every section.
+
 @anchor{concat}
 @section concat
 
