@@ -168,14 +168,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-x264-${{ steps.x264-rev.outputs.sha }}
+          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}
+
+      - name: Install foreign-arch codec headers (cross targets)
+        if: matrix.foreign_arch != ''
+        run: |
+          FOREIGN=":${{ matrix.foreign_arch }}"
+          sudo apt-get install -y --no-install-recommends \
+            libopus-dev${FOREIGN} libmp3lame-dev${FOREIGN} libspeex-dev${FOREIGN} \
+            libtheora-dev${FOREIGN} libwebp-dev${FOREIGN} || true
 
       - name: Build libogg + libvorbis
         if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
           mkdir -p "$DEPS"
-          
+
           # libogg
           [ ! -d libogg-1.3.5 ] && curl -fsSL https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz
           cd libogg-1.3.5
@@ -188,12 +196,60 @@ jobs:
           ./configure --prefix="$DEPS" $CROSS --enable-static --disable-shared
           make -j$(nproc) && make install
           cd ..
-          
+
           # libvorbis
           [ ! -d libvorbis-1.3.7 ] && curl -fsSL https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz
           cd libvorbis-1.3.7
           export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig"
           ./configure --prefix="$DEPS" $CROSS --with-ogg-includes="$DEPS/include" --with-ogg-libraries="$DEPS/lib" --enable-static --disable-shared
+          make -j$(nproc) && make install
+          cd ..
+
+      - name: Build extra codec libraries (opus, lame, speex, theora, webp)
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig"
+          CROSS="--host=${{ matrix.triplet }}"
+          if [ "${{ matrix.target }}" = "linux-x86" ]; then
+            export CFLAGS="-m32"
+            export LDFLAGS="-m32"
+          fi
+
+          # libopus
+          curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz | tar -xz
+          cd opus-1.5.2
+          ./configure --prefix="$DEPS" $CROSS --enable-static --disable-shared --disable-doc --disable-extra-programs
+          make -j$(nproc) && make install
+          cd ..
+
+          # libmp3lame
+          curl -fsSL https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | tar -xz
+          cd lame-3.100
+          ./configure --prefix="$DEPS" $CROSS --enable-static --disable-shared --disable-frontend
+          make -j$(nproc) && make install
+          cd ..
+
+          # libspeex
+          curl -fsSL https://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz | tar -xz
+          cd speex-1.2.1
+          ./configure --prefix="$DEPS" $CROSS --enable-static --disable-shared
+          make -j$(nproc) && make install
+          cd ..
+
+          # libtheora (needs libogg from the previous step)
+          curl -fsSL https://downloads.xiph.org/releases/theora/libtheora-1.1.1.tar.gz | tar -xz
+          cd libtheora-1.1.1
+          ./configure --prefix="$DEPS" $CROSS --with-ogg-includes="$DEPS/include" --with-ogg-libraries="$DEPS/lib" \
+            --enable-static --disable-shared --disable-examples --disable-oggtest --disable-vorbistest
+          make -j$(nproc) && make install
+          cd ..
+
+          # libwebp
+          curl -fsSL https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.4.0.tar.gz | tar -xz
+          cd libwebp-1.4.0
+          ./configure --prefix="$DEPS" $CROSS --enable-static --disable-shared \
+            --disable-gl --disable-png --disable-jpeg --disable-tiff --disable-gif --disable-wic
           make -j$(nproc) && make install
           cd ..
 
@@ -236,6 +292,11 @@ jobs:
             --disable-xlib \
             --enable-libx264 \
             --enable-libvorbis \
+            --enable-libopus \
+            --enable-libmp3lame \
+            --enable-libspeex \
+            --enable-libtheora \
+            --enable-libwebp \
             --pkg-config-flags="--static" \
             $CROSS \
             --extra-cflags="-I$DEPS/include ${{ matrix.target_flag }}" \
@@ -346,7 +407,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: deps-${{ matrix.target }}-vorbis1.3.7-x264-${{ steps.x264-rev.outputs.sha }}
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -383,7 +444,7 @@ jobs:
           fi
 
 
-      - name: Build libogg + libvorbis for ${{ matrix.target }}
+      - name: Build codec dependencies for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
@@ -419,6 +480,69 @@ jobs:
             --with-ogg-libraries="$DEPS/lib" \
             --enable-static --disable-shared
           make -j$(nproc) && make install
+          cd ..
+
+          # libopus
+          curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz | tar -xz
+          cd opus-1.5.2
+          [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
+          [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --enable-static --disable-shared --disable-doc --disable-extra-programs
+          make -j$(nproc) && make install
+          cd ..
+
+          # libmp3lame
+          curl -fsSL https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | tar -xz
+          cd lame-3.100
+          [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
+          [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --enable-static --disable-shared --disable-frontend
+          make -j$(nproc) && make install
+          cd ..
+
+          # libspeex
+          curl -fsSL https://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz | tar -xz
+          cd speex-1.2.1
+          [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
+          [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --enable-static --disable-shared
+          make -j$(nproc) && make install
+          cd ..
+
+          # libtheora
+          curl -fsSL https://downloads.xiph.org/releases/theora/libtheora-1.1.1.tar.gz | tar -xz
+          cd libtheora-1.1.1
+          [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
+          [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --with-ogg-includes="$DEPS/include" \
+            --with-ogg-libraries="$DEPS/lib" \
+            --enable-static --disable-shared --disable-examples --disable-oggtest --disable-vorbistest
+          make -j$(nproc) && make install
+          cd ..
+
+          # libwebp
+          curl -fsSL https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.4.0.tar.gz | tar -xz
+          cd libwebp-1.4.0
+          [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
+          [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
+          ./configure \
+            --prefix="$DEPS" \
+            --host=${{ matrix.cross_prefix }} \
+            --enable-static --disable-shared \
+            --disable-gl --disable-png --disable-jpeg --disable-tiff --disable-gif --disable-wic
+          make -j$(nproc) && make install
 
       - name: Create cross pkg-config shim
         run: |
@@ -442,6 +566,11 @@ jobs:
             --enable-gpl \
             --enable-libx264 \
             --enable-libvorbis \
+            --enable-libopus \
+            --enable-libmp3lame \
+            --enable-libspeex \
+            --enable-libtheora \
+            --enable-libwebp \
             --enable-static \
             --disable-shared \
             --disable-doc \
@@ -500,7 +629,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps
-          key: deps-macos-universal-${{ steps.x264-rev.outputs.sha }}
+          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -530,6 +659,41 @@ jobs:
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
             
+            # libopus
+            [ ! -d opus-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz | tar -xz && mv opus-1.5.2 opus-$ARCH
+            cd opus-$ARCH
+            ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared --disable-doc --disable-extra-programs
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+
+            # libmp3lame
+            [ ! -d lame-$ARCH ] && curl -fsSL https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | tar -xz && mv lame-3.100 lame-$ARCH
+            cd lame-$ARCH
+            ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared --disable-frontend
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+
+            # libspeex
+            [ ! -d speex-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz | tar -xz && mv speex-1.2.1 speex-$ARCH
+            cd speex-$ARCH
+            ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+
+            # libtheora
+            [ ! -d libtheora-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/theora/libtheora-1.1.1.tar.gz | tar -xz && mv libtheora-1.1.1 libtheora-$ARCH
+            cd libtheora-$ARCH
+            ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --with-ogg-includes="$PREFIX/include" --with-ogg-libraries="$PREFIX/lib" --enable-static --disable-shared --disable-examples --disable-oggtest --disable-vorbistest
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+
+            # libwebp
+            [ ! -d libwebp-$ARCH ] && curl -fsSL https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.4.0.tar.gz | tar -xz && mv libwebp-1.4.0 libwebp-$ARCH
+            cd libwebp-$ARCH
+            ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared --disable-gl --disable-png --disable-jpeg --disable-tiff --disable-gif --disable-wic
+            make -j$(sysctl -n hw.logicalcpu) && make install
+            cd ..
+
             # x264
             [ ! -d x264-$ARCH ] && git clone --depth=1 https://github.com/quatric/x264.git x264-$ARCH
             cd x264-$ARCH
@@ -561,6 +725,11 @@ jobs:
               --enable-gpl \
               --enable-libx264 \
               --enable-libvorbis \
+              --enable-libopus \
+              --enable-libmp3lame \
+              --enable-libspeex \
+              --enable-libtheora \
+              --enable-libwebp \
               --disable-doc \
               --disable-debug \
               --disable-outdev=sdl2 \
