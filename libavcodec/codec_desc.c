@@ -2059,6 +2059,20 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_INTRA_ONLY,
     },
     {
+        .id        = AV_CODEC_ID_CAIMANS22,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "caimans22",
+        .long_name = NULL_IF_CONFIG_SMALL("Caimans 2.2 GBA Video"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_CAIMANSPRO,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "caimanspro",
+        .long_name = NULL_IF_CONFIG_SMALL("Caimans Pro GBA Video"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "pcm_s16le",
@@ -3670,6 +3684,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "fvmv_audio",
         .long_name = NULL_IF_CONFIG_SMALL("Nintendo Pokemon GBA FVMV audio"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_CAIMANS22_AUDIO,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "caimans22_audio",
+        .long_name = NULL_IF_CONFIG_SMALL("Caimans 2.2 modified IMA ADPCM"),
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {

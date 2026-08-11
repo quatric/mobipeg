@@ -17,10 +17,9 @@ The 89-entry step table is byte-identical to ff_adpcm_step_table.
 Output is signed 8-bit PCM: the routine stores only the high byte of the
 16-bit predictor (`*dst = pred >> 8`), matching the GBA's 8-bit DMA audio.
 
-NOTE: this reproduces the sample-decoding kernel only. Block/packet framing,
-channel count and how the codec state is initialised per stream are still
-unknown, so this cannot yet be pointed at a raw file. It is here to be
-validated against captured state once framing is understood.
+For Caimans 2.2, framing is now known: flat mono ADPCM, 16 bytes to 32
+samples per FIFO block, with predictor/index initialised to zero and carried
+for the whole stream. See ``caimans22_audio.py``.
 """
 
 # Byte-identical to ff_adpcm_step_table; read from IWRAM 0x030004d8.
