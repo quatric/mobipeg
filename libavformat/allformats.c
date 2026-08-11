@@ -310,6 +310,8 @@ extern const FFInputFormat  ff_gbavideo_demuxer;
 extern const FFInputFormat  ff_gbavideo_rom_demuxer;
 extern const FFInputFormat  ff_gbavx_demuxer;
 extern const FFInputFormat  ff_fvmv_demuxer;
+extern const FFInputFormat  ff_caimans22_demuxer;
+extern const FFInputFormat  ff_caimanspro_demuxer;
 extern const FFInputFormat  ff_rvid_demuxer;
 extern const FFInputFormat  ff_fv_demuxer;
 extern const FFOutputFormat ff_fv_muxer;
