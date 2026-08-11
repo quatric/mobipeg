@@ -11,6 +11,44 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
+  # Patch files — plain `git diff` of this fork (and its x264 fork) against
+  # real upstream, for anyone who wants the mobiclip changes as a patch
+  # instead of a full clone.
+  # ─────────────────────────────────────────────────────────────────────────
+  generate-patches:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Diff mobipeg against upstream FFmpeg
+        run: |
+          git remote add upstream https://github.com/FFmpeg/FFmpeg.git
+          git fetch upstream master --quiet
+          base=$(git merge-base HEAD upstream/master)
+          git diff --no-color "$base" HEAD > mobipeg.patch
+          echo "mobipeg.patch: $(wc -l < mobipeg.patch) lines"
+
+      - name: Clone x264 fork and diff against upstream x264
+        run: |
+          git clone https://github.com/quatric/x264.git x264-src
+          cd x264-src
+          git remote add upstream https://code.videolan.org/videolan/x264.git
+          git fetch upstream master --quiet
+          base=$(git merge-base HEAD upstream/master)
+          git diff --no-color "$base" HEAD > ../x264.patch
+          echo "x264.patch: $(wc -l < ../x264.patch) lines"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patches
+          path: |
+            mobipeg.patch
+            x264.patch
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Linux — native x86_64, native 32-bit x86, cross arm64 and armhf
   # ─────────────────────────────────────────────────────────────────────────
   build-linux:
