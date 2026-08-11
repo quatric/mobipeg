@@ -4,7 +4,11 @@
 a = Analysis(
     ['encode_gui.py'],
     pathex=[],
-    binaries=[],
+    binaries=[
+        ('ffmpeg', '.'),
+        ('ffprobe', '.'),
+        ('ffplay', '.'),
+    ],
     datas=[('logo.png', '.')],
     hiddenimports=['encode'],
     hookspath=[],
