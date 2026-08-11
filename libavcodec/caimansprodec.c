@@ -82,10 +82,13 @@ static int parse_header(CaimansProContext *s, GetBitContext *gb,
     if (ptype > 1)
         return AVERROR_INVALIDDATA;
     *intra = !ptype;
+    av_log(NULL, AV_LOG_DEBUG, "parse_header: start=0x%02x ptype=%d intra=%d\n", start, ptype, *intra);
     if (!ptype) {
         if (start == 0x50 || start == 0x60) {
-            if (get_bits_left(gb) < 16) return AVERROR_INVALIDDATA;
-            skip_bits(gb, 16);
+            if ((ret = iwram_le16(s, SIZE_TABLE + fmt * 4, &v)) < 0) return ret;
+            *width = v;
+            if ((ret = iwram_le16(s, SIZE_TABLE + fmt * 4 + 2, &v)) < 0) return ret;
+            *height = v;
         }
         if ((start ^ 0x10) > 0x4f) {
             if (get_bits_left(gb) < 8) return AVERROR_INVALIDDATA;
@@ -116,17 +119,30 @@ static int parse_header(CaimansProContext *s, GetBitContext *gb,
     if (get_bits_left(gb) < 1) return AVERROR_INVALIDDATA;
     if (get_bits1(gb)) {
         if (get_bits_left(gb) < 4) return AVERROR_INVALIDDATA;
-        skip_bits(gb, 2);
+        // Consume two bits as per reference
+        get_bits1(gb);
+        get_bits1(gb);
+        // Verify next two bits are zero
         if (show_bits(gb, 2)) return AVERROR_PATCHWELCOME;
         skip_bits(gb, 2);
     }
     if (get_bits_left(gb) < 1) return AVERROR_INVALIDDATA;
     if (get_bits1(gb)) {
         if (get_bits_left(gb) < 6) return AVERROR_INVALIDDATA;
-        skip_bits(gb, 6);
-        do {
-            n = get_bits_left(gb) < 8 ? 0 : get_bits(gb, 8);
-        } while (n & 1);
+        // Consume extra bit
+        get_bits1(gb);
+        // Skip 4 bits
+        skip_bits(gb, 4);
+        // Consume another bit
+        get_bits1(gb);
+        int n = 2;
+        while (1) {
+            if (get_bits_left(gb) < n) return AVERROR_INVALIDDATA;
+            skip_bits(gb, n);
+            n = 8;
+            if (get_bits_left(gb) < 1) break;
+            if (get_bits1(gb) != 1) break;
+        }
     }
     return 0;
 }
@@ -151,14 +167,14 @@ static int table_s16(CaimansProContext *s, unsigned addr)
 
 static int read_mode(CaimansProContext *s, GetBitContext *gb, int intra, int level)
 {
-    unsigned base = intra ? 0x030015c0 : 0x03001a40;
-    unsigned lbase = intra ? 0x030012c0 : 0x030018c0;
+    unsigned value_base = intra ? 0x030015c0 : 0x03001a40;
+    unsigned length_base = intra ? 0x030012c0 : 0x030018c0;
     int peek = intra ? 7 : 6, stride = intra ? 0x80 : 0x40;
-    int idx, value, len;
+    int idx;
     if (get_bits_left(gb) < peek) return AVERROR_INVALIDDATA;
     idx = show_bits(gb, peek);
-    value = table_s8(s, base + level * stride + idx);
-    len = table_u8(s, lbase + level * stride + idx);
+    int value = table_s8(s, value_base + level * stride + idx);
+    int len = table_u8(s, length_base + level * stride + idx);
     if (value < -1 || len < 1 || len > peek) return AVERROR_INVALIDDATA;
     skip_bits(gb, len);
     return value;
@@ -369,17 +385,41 @@ static int pro_init(AVCodecContext *avctx)
     return 0;
 }
 
+static void descramble(uint8_t *data)
+{
+    // The non-0x20 start-code obfuscation: 8 words at +4, first 4 rewritten.
+    // w[i] = rot16(w[i]) ^ w[7 - i], for i in 0..3.
+    uint32_t *words = (uint32_t *)(data + 4);
+    for (int i = 0; i < 4; i++) {
+        uint32_t v = words[i];
+        uint32_t mixed = ((v >> 16) | (v << 16)) ^ words[7 - i];
+        words[i] = mixed;
+    }
+}
+
 static int pro_decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket *pkt)
 {
     CaimansProContext *s = avctx->priv_data;
     GetBitContext gb;
     int intra, w, h, lw, lh, cw, ch, ret, used;
-    if (pkt->size < 8) return AVERROR_INVALIDDATA;
-    if ((ret = init_get_bits8(&gb, pkt->data, pkt->size)) < 0 ||
-        (ret = parse_header(s, &gb, &intra, &w, &h)) < 0) return ret;
-    if (w <= 0 || w > 240 || h <= 0 || h > 160) return AVERROR_INVALIDDATA;
+    if (pkt->size < 36) { av_log(NULL, AV_LOG_ERROR, "failed at %d\n", __LINE__); return AVERROR_INVALIDDATA; }
+
+    // Initialize bit reader
+    if ((ret = init_get_bits8(&gb, pkt->data, pkt->size)) < 0) return ret;
+
+    // Peek start code without consuming bits
+    unsigned start_peek = show_bits(&gb, 22);
+    if (start_peek != 0x20) {
+        // Apply descrambling to packet data
+        descramble(pkt->data);
+        // Reinitialize bit reader after descrambling
+        if ((ret = init_get_bits8(&gb, pkt->data, pkt->size)) < 0) return ret;
+    }
+
+    if ((ret = parse_header(s, &gb, &intra, &w, &h)) < 0) return ret;
+    if (w <= 0 || w > 240 || h <= 0 || h > 160) { av_log(NULL, AV_LOG_ERROR, "failed at %d\n", __LINE__); return AVERROR_INVALIDDATA; }
     lw = FFALIGN(w, 16); lh = FFALIGN(h, 16); cw = FFALIGN((w + 3) >> 2, 16); ch = FFALIGN((h + 3) >> 2, 16);
-    if (0xa200 + cw * ch > (int)sizeof(s->current)) return AVERROR_INVALIDDATA;
+    if (0xa200 + cw * ch > (int)sizeof(s->current)) { av_log(NULL, AV_LOG_ERROR, "failed at %d\n", __LINE__); return AVERROR_INVALIDDATA; }
     if (intra) {
         memset(s->current, 0, sizeof(s->current));
         for (int off = 0, p = 0; p < 3; p++, off = p ? (p == 1 ? 0x9600 : 0xa200) : 0) {
