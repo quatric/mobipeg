@@ -147,7 +147,15 @@ def mc_full(src, dst, sx, sy, soff, dx, dy, doff, stride, w, h):
     for row in range(h):
         so = soff + (sy + row) * stride + sx
         do = doff + (dy + row) * stride + dx
-        dst[do:do + w] = src[so:so + w]
+        if w == 8 and so & 3:
+            # FUN_030041b8's unaligned 8-byte path has a real byte-load
+            # typo: it fetches +5 twice for the second 32-bit word.  The
+            # player therefore writes {0,1,2,3,4,5,5,7}, not a true copy.
+            dst[do:do + 6] = src[so:so + 6]
+            dst[do + 6] = src[so + 5]
+            dst[do + 7] = src[so + 7]
+        else:
+            dst[do:do + w] = src[so:so + w]
 
 
 def mc_horiz(src, dst, sx, sy, soff, dx, dy, doff, stride, w, h):
@@ -205,16 +213,22 @@ class InterDecoder:
         self.img = img or Images()
         self.block = BlockDecoder(self.img)
         self.mvt = MVTables(self.img)
+        self.trace = None          # optional RE hook; no decode-path effect
 
     def decode_plane(self, br, cur, ref, offset, stride, w, h):
         cache = MVCache()
         for y in range(0, h, 16):
+            # LEFT is a per-row carry; the player clears it before the first
+            # macroblock of every new macroblock row.
+            cache.left = (0, 0)
             for x in range(0, w, 16):
                 self._decode_macroblock(br, cur, ref, offset, stride, x, y, cache)
 
     def _decode_macroblock(self, br, cur, ref, offset, stride, x, y, cache):
         col8 = x // 8
         mtype = read_mb_type(br, self.img)
+        if self.trace is not None:
+            self.trace.append((offset, x, y, mtype, None))
         if mtype in (0, 3):
             cache.clear(col8)
 
@@ -229,9 +243,17 @@ class InterDecoder:
             return
 
         if mtype == 1:
-            top = cache.top_at(col8)
-            topright = cache.top_at(col8 + 2)
-            mx, my = read_mv(br, self.mvt, cache.left, top, topright)
+            if y == 0:
+                # There is no top neighbour on the first row. The player
+                # aliases all three predictor pointers to the left slot.
+                mx, my = read_mv(br, self.mvt, cache.left, cache.left,
+                                 cache.left)
+            else:
+                top = cache.top_at(col8)
+                topright = cache.top_at(col8 + 2)
+                mx, my = read_mv(br, self.mvt, cache.left, top, topright)
+            if self.trace is not None:
+                self.trace.append((offset, x, y, 1, (mx, my)))
             cache.left = (mx, my)
             cache.top[col8] = (mx, my)
             cache.top[col8 + 1] = (mx, my)
@@ -256,9 +278,19 @@ class InterDecoder:
         write order onto the persistent registers and the spatial layout
         used for motion compensation below."""
         c = col8
-        mv_a = read_mv(br, self.mvt, cache.left, cache.top_at(c), cache.top_at(c + 2))
+        if y == 0:
+            mv_a = read_mv(br, self.mvt, cache.left, cache.left, cache.left)
+        else:
+            mv_a = read_mv(br, self.mvt, cache.left, cache.top_at(c),
+                           cache.top_at(c + 2))
         scratch = mv_a
-        mv_b = read_mv(br, self.mvt, scratch, cache.top_at(c + 1), cache.top_at(c + 2))
+        # On the top macroblock row the player aliases all three mv_b
+        # predictor inputs to ROLL (mv_a); there is no populated top row yet.
+        if y == 0:
+            mv_b = read_mv(br, self.mvt, scratch, scratch, scratch)
+        else:
+            mv_b = read_mv(br, self.mvt, scratch, cache.top_at(c + 1),
+                           cache.top_at(c + 2))
         cache.left = mv_b
         mv_c = read_mv(br, self.mvt, scratch, cache.left, cache.top_at(c - 1))
         cache.top[c] = mv_c
@@ -272,4 +304,6 @@ class InterDecoder:
             fx, fy = emx & 1, emy & 1
             sx = sub_x + (emx >> 1)
             sy = sub_y + (emy >> 1)
+            if self.trace is not None:
+                self.trace.append((offset, sub_x, sub_y, 2, (mx, my, sx, sy)))
             pick_mc(fx, fy)(ref, cur, sx, sy, offset, sub_x, sub_y, offset, stride, 8, 8)
