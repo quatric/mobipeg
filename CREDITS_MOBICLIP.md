@@ -29,7 +29,7 @@ The implementation of Mobiclip support in this software was made possible thanks
 ## TiVo TyStream (`.ty` / `.ty+` / `.tmf`)
 
 * FFmpeg's built-in `ty` demuxer (Series 1/2).
-* [`s3tots`](tools/s3tots) by B.C. — Series-3 TyStream/TMF → MPEG-2 TS converter, bundled under `tools/s3tots/` (see its `LICENSE.txt`).
+* `s3tots` by B.C. — Series-3 TyStream/TMF → MPEG-2 TS converter, the logic for which has been ported into this codebase.
 * [Dan203/s3totsGUI](https://github.com/Dan203/s3totsGUI) — GUI front-end for s3tots (reference).
 * [elitak/mfs-utils](https://github.com/elitak/mfs-utils) — `vsplit` and TiVo MFS tooling (reference).
 * `tytompg` / `tyffmpeg` (`hdemux`) by B.C. — TyStream → MPEG program-stream converters and the FFmpeg `ty` demuxer patch this work builds on (reference).

@@ -51,10 +51,10 @@ BNS files are usually LZ10-compressed, wrapped in an IMD5 header, or both.
 Decoding unwraps whichever combination it finds; `-compress 1` writes the
 compressed form.
 
-Decode-only inputs can be transcoded into any of the encodable formats
-above, or previewed with `encode.py decode <file>`. Series-3 TiVo
-TyStreams (and MFS VideoClip resources) are handled through the bundled
-[`s3tots`](tools/s3tots) tool, which losslessly rewraps them to MPEG-2 TS
+Decode-only inputs (HVQM4) can be transcoded into any of the encodable
+formats above, or previewed with `encode.py decode <file>`. Series-3 TiVo
+TyStreams (and MFS VideoClip resources) are handled through an internal
+port of the `s3tots` tool, which losslessly rewraps them to MPEG-2 TS
 before FFmpeg reads them.
 
 TiVo `.ty` encoding (the `ty` muxer, `mpeg2video` + `mp2`/`ac3`) is ported
