@@ -583,7 +583,6 @@ jobs:
             --arch=${{ matrix.ffarch }} \
             --target-os=mingw32 \
             --cross-prefix=${{ matrix.cross_prefix }}- \
-            --pkg-config=pkg-config \
             ${{ matrix.asm_flag }} \
             --enable-gpl \
             --enable-libx264 \
@@ -600,7 +599,7 @@ jobs:
             --disable-outdev=sdl2 \
             --pkg-config-flags="--static" \
             --extra-cflags="-I$DEPS/include" \
-            --extra-ldflags="-L$DEPS/lib -static"
+            --extra-ldflags="-L$DEPS/lib -static" || { cat ffbuild/config.log; exit 1; }
 
       - name: Build
         run: make -j$(nproc)
