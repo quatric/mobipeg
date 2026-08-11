@@ -395,7 +395,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config nasm mingw-w64 mingw-w64-tools
+            build-essential pkg-config nasm mingw-w64 mingw-w64-tools mingw-w64-i686-zlib mingw-w64-i686-bzip2 mingw-w64-i686-xz-utils mingw-w64-i686-pthreads
 
       - name: Install llvm-mingw (arm64)
         if: matrix.use_llvm == true
@@ -577,9 +577,10 @@ jobs:
       - name: Configure FFmpeg
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
-          export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig"
+          export PKG_CONFIG_PATH="${DEPS}/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="${DEPS}/lib/pkgconfig"
           ./configure \
-            --prefix="$PWD/dist" \
+            --prefix="${PWD}/dist" \
             --arch=${{ matrix.ffarch }} \
             --target-os=mingw32 \
             --cross-prefix=${{ matrix.cross_prefix }}- \
@@ -597,6 +598,13 @@ jobs:
             --disable-doc \
             --disable-debug \
             --disable-outdev=sdl2 \
+            --disable-ffplay \
+            --disable-dxva2 \
+            --disable-d3d11va \
+            --disable-d3d12va \
+            --disable-vdpau \
+            --disable-mediacodec \
+            --disable-pthreads \
             --pkg-config-flags="--static" \
             --extra-cflags="-I$DEPS/include" \
             --extra-ldflags="-L$DEPS/lib -static" || { cat ffbuild/config.log; exit 1; }
