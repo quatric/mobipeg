@@ -23,6 +23,7 @@ such as audio, video, subtitles and related metadata.
 | THP | `.thp` | GameCube / Wii | ✅ | ✅ |
 | RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
 | HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
+| BPK1 | `.bpk`, `.bpk1` | Nintendo 3DS Swapdoodle | — | ✅ |
 | TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
 
