@@ -395,7 +395,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config nasm mingw-w64 mingw-w64-tools mingw-w64-i686-zlib mingw-w64-i686-bzip2 mingw-w64-i686-xz-utils mingw-w64-i686-pthreads
+            build-essential pkg-config nasm mingw-w64 mingw-w64-tools
 
       - name: Install llvm-mingw (arm64)
         if: matrix.use_llvm == true
