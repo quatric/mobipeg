@@ -988,6 +988,357 @@ fixes didn't touch, rather than simple drift from picture 63's own residual
 error compounding through the reference chain -- but this has not been
 confirmed either way.
 
+### Caimans 2.2 (Bad Boys 2 trailer): audio codec confirmed identical to Pro
+
+Started this generation cold: no title string in the GBA header (confirmed),
+Thumb-only entry (`b 0x080000e0` -> standard devkitARM-style crt0: IRQ/system
+stack setup, mode switch to Thumb at `0x08000101`, then three
+`memcpy`/`memset`-style section copies driven from a literal pool at
+`0x080001b4`). Unlike Pro, **the hot code stays mostly in ROM**: the only
+`.iwram`-style copy in the crt0 table is 432 bytes, ROM `0x08001f8c` ->
+IWRAM `0x03000000` -- nowhere near Pro's ~28 KB resident image. This ROM's
+code should be analysed largely from ROM directly, not by importing an IWRAM
+dump.
+
+**The audio codec is the exact same kernel as Pro, not just structurally
+similar.** Found by searching the ROM for Pro's own `ff_adpcm_step_table`
+bytes -- it's present verbatim at ROM `0x08001ed8` -- then following the one
+cross-reference to it, which lands on a function (`0x0800022c`, Thumb) whose
+decompile is the identical algorithm: same magnitude ladder (`mag>>3`,
+`+step>>2` / `+step>>1` / `+step` bit tests, the same extra `+step>>1` when
+`mag==7`), the same index-adjust table `{-1,-1,-1,-1,2,4,7,12}` (confirmed by
+reading the literal bytes directly, not assumed), and the same
+`[-32768,32767]` predictor clamp. `caimans_adpcm.py` needed **no changes** --
+it decodes 2.2's audio bit-exact as-is.
+
+Framing differs from Pro only in block size: **32 samples (16 bytes) per
+call**, not Pro's 64/32, output alternating between two fixed IWRAM buffers
+(`0x03002908` / `0x030001d0`) via the same DMA1/FIFO scheme (same `0xb640`
+`DMA1CNT_H` value, confirmed against this ROM's own literal pool). Validated
+with a live hardware capture: 60 consecutive calls, reading the true call
+arguments via breakpoints at the callee entry and at the caller's own return
+address (not inside the callee -- an early attempt broke mid-function and
+produced nonsense all-zero readings) -- **0 PCM mismatches, 0 state
+mismatches** against `caimans_adpcm.decode()`. The audio bitstream itself
+starts at ROM `0x00707720` (found live, not yet cross-checked against a
+container/index structure). This first capture only exercised near-silent
+audio, the same trap documented for Pro -- a deeper capture exercising real
+signal (particularly nibble magnitude 7, the deviation term) was attempted
+but not completed this session; the code-identity argument (literally the
+same decompiled function, same tables) is strong evidence on its own, but a
+loud-audio hardware capture is the next thing to actually run before
+treating this as fully proven the way Pro's audio is.
+
+**Video is unstarted.** The publisher's own tech notes (see "What is
+established" above) describe 2.x as 4x4-codebook YUV, which would make it a
+genuinely different codec from Pro's recursive/bintree scheme, not a
+parameter variant -- don't assume `caimans_blocks.py` transfers. A literal
+search for the VRAM base address `0x06000000` found 175 hits in the ROM,
+too many to be a useful lead by itself (most are surely coincidental 4-byte
+matches inside unrelated code/data). The next step is the same one that
+cracked Pro's video layer: find the picture-decode entry point by tracing
+forward from the main loop (the init function at `0x08000e09`, called via
+`0x08001a6c` from the crt0 tail, is the first plausible candidate -- it
+touches what looks like `DISPCNT` at `0x04000000`) rather than pattern-matching
+constants.
+
+### Caimans 2.2: the container and the shape of the video codec
+
+Picking back up: the video stream location and record framing are now
+known, and the texture-block format has a first concrete read on it. None
+of this is validated against hardware yet (no mGBA capture of video, unlike
+the audio work above) -- it is a static-analysis reading of the decompile,
+one level less certain than everything with a hardware check mark.
+
+**The stream cursors live in a small state block.** `crt0` copies 7 words
+from ROM `0x0800213c` to IWRAM `0x0300502c` (see the crt0 table earlier in
+this doc). Reading those words directly:
+
+| word | IWRAM addr | ROM init value | role |
+|---:|---|---|---|
+| 0 | `0x0300502c` | `0x08707720` | audio stream cursor -- confirmed: this is the exact address the live audio capture above found as the *first* audio call's `src` |
+| 4 | `0x03005044` | `0x08002710` | video stream cursor |
+| 6 | `0x03005048`? | -- | (struct is 7 words, `0x0300502c..0x03005048`) |
+
+Words 4-5 (`0x03005030`/`0x03005034`) start at zero and are almost certainly
+codebook-table pointers set up dynamically from inside the video stream
+itself (see below) -- `FUN_08000418`'s pixel-reconstruction code reads
+through them.
+
+**Video records.** The function at `0x08000e09` (the app's init/main
+routine -- see the crt0 tail) contains a record loop reading from the video
+cursor: each record is at least 12 bytes, with a 24-bit big-endian length at
+offset+1..+3 and a type byte at offset+11 (`0x11` selects one dispatch path,
+anything else the other). Both paths call `FUN_08000418(state, record_ptr,
+length, table, 240, 104, 16, ...)` -- `240` is almost certainly the screen
+width in pixels; the non-`0x11` path additionally calls
+`FUN_08001a78(..., 0x68, ...)` afterward, a second processing step not yet
+identified (a blit/composite step is the obvious guess).
+
+**`FUN_08000418` is a tagged sub-chunk parser**, not a single monolithic
+per-frame decoder: it reads a 16-bit tag + 16-bit length from the record
+body and dispatches per tag. Two tag values seen so far: `0x2300` and
+`0x3000`.
+
+**The pixel format is packed RGB555, not an 8bpp palette like Pro.** Every
+reconstructed pixel is built as
+`table[i+dr] | table[i+dg]<<10 | table[i+db]<<5` -- a 5-5-5 packed
+value, meaning **2.2 very likely renders in GBA Mode 3** (direct 16bpp
+framebuffer), a completely different display mode from Pro's palette-indexed
+Mode 4. Do not assume the two share a framebuffer layout.
+
+**The texture block format looks like real YCoCg, table-driven.** Six bytes
+per block: four 8-bit indices (`idx0..idx3`, one per sub-position) and two
+*signed* 8-bit deltas (`d1`, `d2`), shared across the whole block. Per index,
+three lookups build one packed pixel:
+
+```c
+dr =  2*(int8_t)d2;
+dg =  2*(int8_t)d1;
+db = -(int8_t)d2 - (((int8_t)d1 + 1) >> 1);
+pixel = table[idx+dr] | table[idx+dg]<<10 | table[idx+db]<<5;
+```
+
+`dr`, `dg`, `db` are **exactly** the classic YCoCg-R inverse-transform
+constants (`2*Co`, `2*Cg`, `-Co-((Cg+1)>>1)`, up to a relabelling) --
+`d1`/`d2` are very plausibly a shared chroma pair for the block, and `table`
+is a per-something (frame? codebook slot?) lookup indexed by `luma_index +
+chroma_offset`, replacing runtime YCoCg->RGB555 math with a precomputed LUT.
+This lines up with the publisher's own description of 2.x as "4x4-codebook
+YUV" far better than a coincidence would. Two structurally-identical branches
+of `FUN_08000418` use different table-pointer pairs (`0x03005030`/`34` in
+one, an equivalent pair in the other) -- almost certainly a two-tap
+horizontal or vertical duplication (each 8-bit index expands to 2 output
+pixels in the snippet actually read), which is what a "4x4" block built from
+4 indices would need to reach 16 output pixels.
+
+**None of this has been checked against real pixels or even a single decoded
+frame.** No hardware capture of the video path has been done yet (audio
+was captured and validated; video was not, this session ran out of time
+before getting there). Treat the pixel-reconstruction formula above as a
+strong, concrete hypothesis worth testing next, not an established fact the
+way everything with a "validated against hardware" mark in this document is.
+
+### Caimans 2.2: the core pixel formula is now hardware-validated
+
+Continuing from the container/format hypothesis above: **the display mode
+guess was confirmed live** (`DISPCNT = 0x403`, mode 3, BG2 enabled -- direct
+16bpp framebuffer, exactly as predicted from the packed-RGB555 pixel
+construction seen in the decompile). A VRAM dump taken a few sub-chunks into
+the very first frame renders as a clean, correct MPAA-style green
+approval card with `www.caimans.net/gbavideo` watermark text -- proof the
+container/record framing understanding is on the right track, since mGBA's
+own (correct) decode produces exactly what the earlier structural reading
+predicted.
+
+**The per-pixel reconstruction formula is now proven bit-exact against real
+hardware**, not just plausible from the decompile. Correction to the earlier
+revision of this doc: the three RGB channels of one output pixel are **not**
+built from three different table taps -- one whole pixel comes entirely from
+one table, using all three lookups against *that* table. The two-table split
+is instead **per output pixel of a pair**: each 6-byte source record (4
+index bytes + 2 signed delta bytes) produces **two** adjacent output pixels,
+one from each of two persistent table pointers (`0x03005030` = table A,
+`0x03005034` = table B, both IWRAM, set up per-keyframe -- values seen this
+session: `0x03004ea8` and `0x03002768`).
+
+```c
+int8_t d1 = ..., d2 = ...;      // the record's two shared delta bytes
+int dr =  2*d2;
+int dg = -d2 - ((d1 + 1) >> 1);
+int db =  2*d1;
+uint16_t pixel_from(uint8_t *table, uint8_t idx) {
+    return table[idx+dr] | table[idx+dg]<<5 | table[idx+db]<<10;   // R | G<<5 | B<<10
+}
+// for each of the 4 index bytes idx0..idx3 in the record:
+//   even output pixel = pixel_from(table_A, idxN)
+//   odd  output pixel = pixel_from(table_B, idxN)
+```
+
+(The bit positions were mis-stated in the previous revision of this section
+-- confirmed correct by disassembly of the actual `strh`/shift instructions,
+not just the decompile's variable names, which don't reflect field order.)
+
+**Validated two ways, live, in the same capture**: broke at the instruction
+writing the first pixel of a cache cell (`0x0800072a`), captured that cell's
+base address, then broke again on the *next* cell to guarantee the previous
+one had fully finished writing, and read back both the raw source bytes the
+cell stored (indices `{0x75,0x75,0x75,0x75}`, deltas `{0xe3,0xc5}` = signed
+`{-29,-59}`) and the two pixels it produced (`0x2300`, `0x1f00`). Both table
+dumps were captured at the same instant. Feeding the recovered formula the
+exact same bytes in Python reproduces **`0x2300` and `0x1f00` exactly** --
+this is a real hardware check, the same bar as everything else validated in
+this document, not a plausibility argument.
+
+This 6-bytes-in-4-cells-out (8-out-with-the-two-table-tap) shape plus the
+byte-for-byte YCoCg-R-shaped delta arithmetic is what "4x4-codebook YUV"
+almost certainly refers to.
+
+**What is still open, and is the actual blocker to a full frame:** the cells
+this sub-chunk writes go into an **intermediate cache** in IWRAM (this
+capture's cell was at `0x03000230`), not directly into VRAM -- consecutive
+cells are `0x24` = 36 bytes apart (16 bytes of pixel pairs + 6 bytes of the
+original source data stored back, presumably for reuse/skip detection on a
+later frame, + padding). How this linear cache array maps onto the 240x160
+screen grid, and what later step (`FUN_08001a78`, called only on the
+non-keyframe record path, or a different sub-chunk tag) blits it to the
+actual VRAM destination the top-level record handler passed in (`0x06003480`
+was seen as a destination for later records) has **not** been traced yet.
+That mapping is the one piece separating this from a working frame decoder.
+
+Sub-chunk tags identified inside `FUN_08000418` so far: `0x2200` (the one
+decoded above -- driven through a helper `FUN_08001a80(len,6)` that just
+computes `len/6`, i.e. a record count), `0x2300`, `0x3000`. Only `0x2200`'s
+body has been read in this detail; the other two are unexamined.
+
+### Caimans 2.2: the tag-0x3100 raster pass decodes PIXEL-EXACT
+
+Resolved. `caimans22_frame.decode_raster_3100` now reproduces hardware's
+framebuffer **byte for byte** on record 1 and on records 2, 3, 5 and 8 --
+`0 differing bytes` out of 76800 in every case, measured by
+`caimans_trace_video22.py`.
+
+**This overturns the previous section's conclusion.** An earlier blit-set
+diff reported only 2 of 57 cells overlapping and concluded the scan model was
+"structurally wrong", with a leading hypothesis that cells were 2 rows tall
+rather than 4. Both the conclusion and the hypothesis were **wrong**. The
+decompile's reading -- 4-row cells, raster order, `row += 4` -- was correct
+all along. Two harness bugs produced the misleading evidence:
+
+**Bug 1 (the big one): the decoder was fed the wrong sub-chunk.** A record is
+a chain of sub-chunks, each `{uint16 tag, uint16 total_len}` followed by
+`total_len - 4` data bytes. For record 1 the chain is:
+
+```
+0x080039f4  tag=0x2100  len=588   <- codebook build
+0x08003c40  tag=0x2300  len=36    <- codebook build
+0x08003c64  tag=0x3100  len=318   <- the raster pass  (314 data bytes)
+```
+
+The harness was passing the raster decoder a pointer to the **first**
+sub-chunk (the 0x2100 codebook data) together with the **record-wide**
+remaining count (942) instead of the raster chunk's own 314. So it parsed
+codebook bytes as raster bytes and then ran ~3x past the end, inventing
+hundreds of bogus cells -- which is exactly the "402 cells vs hardware's 57"
+and the irregular column order that looked like a broken scan. The fix is to
+walk the sub-chunk chain and hand the decoder only the raster chunk's data
+and its own length.
+
+**Bug 2: the cell caches were sampled too early.** They were read at the
+record header, before this record's 0x2100/0x2300 codebook sub-chunks had
+run, so the decode used the *previous* record's colours. They must be sampled
+after those chunks execute -- the harness now samples at the first blit,
+where the caches are final and nothing has been drawn yet.
+
+With both fixed, everything lines up exactly:
+
+| check | result |
+|---|---|
+| blit sequence (kind + destination), record 1 | **57/57 identical** |
+| cell indices passed to each blit | **57/57 identical** |
+| final framebuffer, records 1/2/3/5/8 | **0 differing bytes each** |
+
+**Both blit primitives are independently confirmed**, not just confirmed in
+aggregate:
+
+- `blit_simple` (IWRAM `0x03000114`): rows 0/2 verbatim, rows 1/3 with pixel
+  pairs swapped (`ror #16`).
+- `blit_complex` (IWRAM `0x0300015c`): `row0 = {A[0],A[3],B[0],B[3]}`,
+  `row1 = {A[5],A[6],B[5],B[6]}`. Verified on a *discriminating* case (A != B,
+  non-uniform pixels) for both the top-half and bottom-half calls. The
+  previously-flagged worry that `FUN_08001a7c` might be a different routine
+  is settled: **both halves call the same routine** at `0x0300015c`, the
+  second simply at the `row + 2` destination.
+
+A separate control run replaying hardware's own captured cell bytes through
+these two primitives also reproduced the framebuffer with 0 differing bytes,
+which isolates the primitives from the bitstream parsing.
+
+**Methodological note worth keeping.** Two intermediate measurements during
+this work (9.21% and 0.74% mismatch) were *harness artifacts*, not decoder
+error, and both looked like plausible "almost there" residuals. The 0.74% one
+in particular survived several rounds of hunting for a pixel-formula bug that
+did not exist. What settled it was building one single-session comparison of
+four buffers -- seed, decoder output, replay-from-captured-cells, and hardware
+final -- rather than comparing artifacts produced by separate mGBA runs. When
+a residual resists explanation, suspect the measurement before the decoder.
+
+### Caimans 2.2: what remains
+
+The complete observed 2.2 video stream now decodes from cold ROM. Implemented:
+
+1. **Codebooks.** `decode_codebook_chunk` implements
+   all four cache-building tags. `0x2000`/`0x2200` are dense six-byte streams;
+   `0x2100`/`0x2300` use little-endian 32-bit, MSB-first update masks. The
+   0x20xx pair targets the complex cache and materialises only taps 0/3/5/6;
+   the 0x22xx pair targets the simple cache and materialises all eight pixels.
+   Cache comparisons are byte-exact for the record-0 dense chunks and for
+   sparse records 1, 2, 3, 5 and 8. `build_color_tables` also reproduces
+   `FUN_08000324`: two 512-byte signed-index tables covering -128..383, with
+   quantisation thresholds 2 and 5 respectively. Both tables compare with
+   **0 differing bytes** against live IWRAM. No live cache or colour-table
+   input is needed now.
+2. **All observed raster variants.** `0x3000/0x8000` use one selector bit per
+   cell with no skips; `0x3100/0x8100` are skip-capable; `0x3200/0x8200` are
+   unmasked simple-index streams. The sample contains 232 `0x3000`, 2105
+   `0x3100`, and 22 `0x3200` chunks (the 0x8xxx aliases are implemented but
+   do not occur in this ROM).
+3. **Cold record driver.** `caimans22_decode.py` walks records from ROM offset
+   `0x2710`, applies persistent codebook updates, and maintains the Mode 3
+   framebuffer. It decodes all **2359 video records** before stopping cleanly
+   at the audio stream at ROM offset `0x707720`.
+4. **Hardware validation.** Cold output differs by 0 bytes after records
+   0, 1, 2, 3, 5, 8, 26, 86 and 87. This covers the initial keyframe, delta
+   frames, the `0x3200` simple-only path, and a later keyframe/staging-copy
+   transition. Record 0 itself is now pixel-exact, overturning the previous
+   “not validated” status.
+
+### Caimans 2.2: timing and synchronized audio are resolved
+
+The player sets up two independent cascaded timer pairs:
+
+- **Audio:** Timer 0's reload is computed as
+  `-(16777216 / 0x2910)`, where `0x2910 = 10512` is passed as a literal to
+  the divider. This clocks the direct-sound FIFO at **10512 Hz**. Timer 1 is
+  cascaded with reload `0xffe0`, so it interrupts after 32 Timer-0 overflows,
+  exactly matching each decoder call's 32 output samples.
+- **Video:** Timer 2 uses reload `0xf000` and prescaler setting 2 = /256.
+  It therefore overflows at `16777216 / 256 / 4096 = 16 Hz`. Timer 3 is
+  cascaded from Timer 2, and the main loop waits for its count before decoding
+  direct records. The video rate is therefore exactly **16 fps**, not an
+  estimate from total duration.
+
+The four-record lead visible in `while (timer3 < record_index - 4)` is decode
+prebuffering, not a different presentation rate. Live cross-checks agree with
+the timer math: at record 16 Timer 3 is 12 and the audio cursor is 3936 bytes
+past its base; at record 64 they are 60 and 19696 bytes; at record 256 they
+are 252 and 82768 bytes. These are the expected 16-byte-block-rounded audio
+positions at 10512 Hz and 16 fps.
+
+Audio framing is completely flat:
+
+| property | value |
+|---|---|
+| ROM offset | `0x707720` |
+| channels | mono |
+| coding | Caimans modified IMA ADPCM |
+| block | 16 encoded bytes -> 32 signed 8-bit PCM samples |
+| initial state | predictor 0, step index 0 |
+| state lifetime | carried continuously across the stream |
+| sample rate | 10512 Hz |
+
+`caimans22_audio.py` decodes this stream and writes an 8-bit mono WAV. Since
+`10512 / 16 = 657` exactly, synchronization needs no fractional accumulator:
+every video frame spans exactly **657 audio samples**. The 2359-frame stream
+is 147.4375 seconds and therefore uses 1,549,863 samples. The ROM tail contains
+4,377 additional decoded samples (0.41638 s); the synchronized extractor trims
+those trailing samples rather than treating ROM EOF as the presentation end.
+
+The kernel itself was already validated live with 0 PCM/state mismatches; the
+framing/timing work above turns that kernel into a complete synchronized audio
+decoder. The only large remaining task is packaging the proven prototype as
+an FFmpeg demuxer/decoder.
+
 ## Useful commands
 
 ```sh
@@ -1051,6 +1402,14 @@ registers/IWRAM after the breakpoint. mGBA reported PC `0x03000000` and CPSR
 
 ## Recommended next work
 
+The **live frontier is the Caimans 2.2 video residual** (see "the 0x3100
+skip-capable raster pass" above): the decoder produces a real image but
+7073/76800 VRAM bytes (9.21%) still differ from hardware, and the diagnostic
+that would localise them -- a blit-call-sequence diff against hardware's true
+order -- was cut off by the session rate limit before it produced any output.
+That is the single highest-value next action; everything below it is either
+Pro-side cleanup or downstream of 2.2 reaching pixel-exactness.
+
 Work statically in Ghidra from here -- the ROM<->IWRAM mapping above means no
 emulator is needed to read code. When something needs settling against the
 real player, capture *values*, not just bit positions, the way the MV
@@ -1058,7 +1417,21 @@ predictor bug was found: bit-position matching alone did not catch either of
 the two bugs above, since VLC codeword length never depends on predictor
 values.
 
-1. **Find the second pixel bug** (see "Where pixel accuracy stands now").
+1. **Re-derive the 2.2 raster loop from a hardware measurement, NOT the
+   decompile.** The blit-sequence diff (see the "0x3100 skip-capable raster
+   pass" section) has already established that `decode_raster_3100`'s walk
+   is structurally wrong -- hardware and mine share only 2/57 cells on the
+   same record, hardware emits only complex blits (never simple) in a
+   compact 30-row band, and hardware's cell-top rows are 2 rows apart in
+   places, which mine's `row += 4` step cannot produce. The next capture
+   that would actually resolve it: on every blit hit, also read the
+   bitstream byte cursor and the mask-word bit position (the raster loop's
+   bit-reader state lives somewhere in IWRAM -- find it by watching what
+   `FUN_08000418` at `0x080004d6` writes on the way into the loop), so the
+   true per-cell byte consumption and mask-bit consumption are *measured*.
+   Then rewrite `decode_raster_3100` from that measurement.
+   `tools/gba_video/caimans_diff_blits.py` is the harness to extend.
+2. **Find the second Pro pixel bug** (see "Where pixel accuracy stands now").
    Start from a checkpoint that's still bad (e.g. picture 65 or 68) and
    bisect the same way picture 63 was localized: find the first mismatching
    picture, then the first mismatching macroblock and its type, then compare
@@ -1067,21 +1440,28 @@ values.
    (count calls needed to reach a specific macroblock in Python, then use
    that exact count of `FUN_03005848` breakpoint hits in GDB) is much faster
    than tagging every call with its macroblock coordinates.
-2. **Chase the remaining 25-mismatch shape in picture 63** if time allows --
-   the fact that it's a single *column* within an 8x8 sub-block rather than
+3. **Chase the remaining 25-mismatch shape in Pro picture 63** if time allows
+   -- the fact that it's a single *column* within an 8x8 sub-block rather than
    the whole sub-block suggests an off-by-one somewhere specific (a half-pel
    edge condition, or a residual leaf boundary), not a wholesale wiring
    error, and might be a quick, separate fix once found.
-3. **Nail down the audio framing** -- block size, channel count, and
-   per-stream initialisation of the 2-word codec state at `0x03007050`. The
-   sample kernel is already transcribed in `tools/gba_video/caimans_adpcm.py`.
-4. **Finish the container**: how a picture's length is known, and whether
-   anything indexes the audio. Tracing the ROM Thumb code that builds the
-   descriptor struct passed to `0x03006af0` would settle it.
-5. **Then** the FFmpeg port, following the integration plan below -- only
-   after pixel-exactness is re-established generally.
-6. Keep version 2.2 and Pro as separate targets -- everything established so
-   far is Pro-only.
+4. **Finish the Caimans container** (Pro-side, still partly open): how a
+   picture's length is known, and whether anything indexes the audio.
+   Tracing the ROM Thumb code that builds the descriptor struct passed to
+   `0x03006af0` would settle it. (2.2's container -- the 7-word cursor
+   struct at `0x0300502c`, 24-bit record length, tagged sub-chunks -- is
+   already worked out; see the 2.2 sections above.)
+5. **2.2 loud-audio capture** (the one remaining 2.2 gap before that kernel
+   is fully proven): the audio kernel is byte-identical to Pro's and validated
+   0-mismatch, but only on near-silent audio -- the loud/magnitude-7 case was
+   never captured. Same `--skip-frames` trick Pro needed.
+6. **Then** the FFmpeg port, following the integration plan below -- only
+   after both Pro and 2.2 reach pixel-exactness. 2.2 is *closer than it's
+   ever been* (9.21% delta, real image) but is **not** there yet.
+7. Keep version 2.2 and Pro as separate targets -- they are genuinely
+   different codecs (Pro: recursive bintree + H.263-style MC, 8bpp; 2.2:
+   4x4 codebook + YCoCg-R delta, RGB555 Mode 3). Pro intra is pixel-exact;
+   2.2 video is at the 9.21% delta described above.
 
 ## Scope boundary
 
@@ -1110,16 +1490,162 @@ the scope boundary above rules out folding Caimans into that file.
    `fvmv_probe`, `read_header` parsing the stream table into an `AVStream`,
    `read_packet` slicing one record per call. Register in
    `libavformat/allformats.c` + `libavformat/Makefile`.
-4. **Decoder** (`libavcodec/caimansdec.c`): since the publisher's own tech
-   notes describe two genuinely different block/motion schemes (2.2:
-   4x4-codebook YUV; Pro: recursive 8x8/8x4/4x4/4x2 with motion
-   compensation — both still unverified hypotheses per "What is
-   established" above), expect two decoders or one decoder gated on a
-   version field, not one shared code path. Register in
-   `libavcodec/allcodecs.c` + `libavcodec/Makefile`.
+4. **Decoder** (`libavcodec/caimansdec.c`): the two generations are now more
+   than hypotheses — Pro intra is pixel-exact (recursive bintree + H.263-style
+   MC, 8bpp), and 2.2 is a real working decode at 9.21% delta (4x4 codebook +
+   YCoCg-R delta, RGB555 Mode 3). They are genuinely different codecs, so
+   expect two decoders or one decoder gated on a version field, not one shared
+   code path. Register in `libavcodec/allcodecs.c` + `libavcodec/Makefile`.
 5. **GUI listing**: add the family to the encoder GUI's supported-decoder
    list, same as `d78a14d24a` did for the other five.
 
 Do not start step 3 until step 1 has validated frame output against captured
 hardware reference frames — every prior lineage in this repo was ported only
-after a Python reference decoder matched real output exactly.
+after a Python reference decoder matched real output exactly. Pro intra has
+cleared that bar; 2.2 has not (9.21% delta, residual unlocalised — see the
+"0x3100 skip-capable raster pass" section and next-work item 1).
+
+## FFmpeg Caimans 2.2 integration (completed)
+
+The stale integration plan above has now been superseded for Caimans 2.2.
+The cold-ROM Python decoder matches hardware framebuffer captures byte for
+byte, and the native FFmpeg implementation is registered as the `caimans22`
+demuxer/video decoder plus the `caimans22_audio` decoder.
+
+The demuxer exposes 2359 RGB555LE frames at exactly 16 fps and synchronized
+mono unsigned 8-bit audio at 10512 Hz (657 samples per frame). It trims the
+flat encoded audio tail to 1,549,863 samples, exactly the video duration.
+Native FFmpeg output was compared against the independent Python decoder at
+frames 0, 1, 2, 3, 5, 8, 26, 86, 87, and 2358; every raw-frame MD5 matched.
+The MD5 of the entire decoded, synchronized audio stream also matched
+(`e71ca19cb56bef8155fcdf8db10a5c9b`).
+
+## Pro container capture utility
+
+`tools/gba_video/caimans_pro_index.py` captures the arguments of the Pro
+player's picture-entry routine (`0x03005a00`) from mGBA. At each call, `r1`
+is the authoritative ROM pointer to the picture and `r3` is the player's
+picture counter; adjacent captured `r1` values define exact packet boundaries
+without heuristically scanning for start-code-shaped bytes.
+
+A reproducible 100-call capture starts at `0x00c778` and ends at `0x017ddc`.
+It also establishes a timing caveat that blocks native Pro demuxing for now:
+the calls are not numbered contiguously (`r3` reaches 125 by the 100th call).
+Thus the player can advance its presentation counter between picture decode
+calls. Do not map one decode call to one timestamp or derive a frame rate from
+this counter until the top-level scheduling loop is recovered.
+
+`--skip-calls` permits captures in short, reproducible chunks, avoiding long
+mGBA GDB-stub runs. Concatenating the first two 100-call captures and using
+the next captured pointer as each packet end was checked through 199 bounded
+packets: every Python picture decode completed without an overread. This
+includes the scheduling discontinuity after call 60 (`r3` changes from 60 to
+80), so it is evidence for the packet boundaries, not merely the easy opening
+sequence. The final packet of a partial capture is intentionally not treated
+as bounded until the following chunk supplies its endpoint.
+
+`tools/gba_video/caimans_pro_validate.py` validates a contiguous sequence at
+a stable boundary: on entry to picture N+1, descriptor word `+0x28` points to
+the completed output of picture N. Its first 99-picture run replaces the old
+ad-hoc framebuffer checkpoints with reproducible results: calls 0–62 are
+pixel-exact; call 63 has 25 luma-only differences; call 64 has 35 luma-only
+differences; calls 65–80 expose the known larger luma divergence; and later
+keyframes reset the error to small isolated regions. The first 25-byte error
+is four type-2 luma macroblocks, not a frame-edge condition, ruling out the
+simple high/low motion-vector clamp hypothesis.
+
+The validator was extended one level deeper for the first affected block:
+breaking at `FUN_03004cd4` before its residual decode and reading the pending
+16x16 destination shows four mismatches already present in the player's
+motion-compensated prediction. The residual bitstream is therefore not the
+cause of that first four-pixel subset. The affected pixels lie in the
+lower-left 8x8 vector of the type-2 macroblock at `(128,32)`; the remaining
+question is which reference-buffer state the player selects for that vector,
+not an image-edge clamp or a residual-VLC length error.
+
+**Resolved (picture 63/64).** `FUN_030041b8`, the player's unaligned 8x8
+copy primitive, contains a literal byte-load typo: its second packed word
+loads source byte `+5` twice and never loads `+6`. Thus an unaligned copy
+writes `{0,1,2,3,4,5,5,7}`. `mc_full` now emulates this hardware behavior for
+unaligned 8x8 copies only; 16x16 and aligned copies remain ordinary copies.
+This removes every mismatch through call 64 (65 consecutive decoded pictures
+are pixel-exact). The next independent divergence starts at call 65.
+
+**Resolved (call 65).** A type-2 macroblock on the top row has no valid
+top-neighbour row. For its second vector, the player aliases all three median
+predictor pointers to the first vector's ROLL slot. `InterDecoder` now uses
+that special case only when `y == 0`; ordinary rows retain the independently
+captured top-cache wiring. This extends the byte-exact contiguous run through
+call 86. The next mismatch is a V-plane-only 8x8 horizontal-half-pel region
+at call 87; treating the horizontal primitive's observed floor-arithmetic as
+a global rule regresses earlier frames, so that path needs a more targeted
+capture before changing decoder behavior.
+
+**Resolved (calls 87–122).** The top-row alias rule applies to the first
+type-2 vector too, not only its second vector: both use LEFT for all three
+median inputs. The same alias applies to top-row type-1 vectors. With those
+two narrow cases, calls 0–122 validate byte-for-byte. The next independent
+failure is call 123 (`ROM 0x01e958`): 49 luma bytes, followed by a larger
+propagating luma divergence. Use it as the next first-mismatch target.
+
+**Resolved (call 123 and beyond).** LEFT is not carried between macroblock
+rows: the player clears it before `x == 0` on every row, while retaining the
+top-row cache. This was confirmed from the call-123 luma macroblock `(0,32)`:
+hardware's live predictor inputs were `{0, (8,-2), 0}` and produced MV
+`(6,6)`, whereas the old cross-row carry produced `(6,4)`. Resetting LEFT at
+each row makes the first 149 player-delimited pictures byte-exact.
+
+**Full-stream result (Pooh HQ).** The independent reference decoder now
+validates all **1,068** consecutive player-delimited pictures byte-for-byte
+against mGBA in one cold-ROM run:
+
+```
+PYTHONPATH=tools/gba_video python3 tools/gba_video/caimans_pro_validate.py --calls 1150
+# end of picture stream at call 1069 (counter 1, ROM 0xc778)
+# checked 1068 pictures; 0 mismatched
+```
+
+The call after picture 1,068 re-enters `FUN_03005a00` at the original stream
+pointer and counter 1, proving that this is the player's loop boundary rather
+than a malformed final packet. `caimans_pro_validate.py` explicitly detects
+that non-increasing pointer as end-of-stream, so it no longer attempts to
+decode a zero-length pseudo-packet. Video reconstruction is therefore ready
+for a native port; the remaining integration blocker is the player's
+presentation schedule/audio association, not video correctness.
+
+The pointer immediately after those pictures, `0x147354`, is an explicit
+**terminal sentinel**, not a 1,069th picture. Its bytes superficially begin
+with `00 00 81`, but a GDB trace at `FUN_03005a00` shows that the call returns
+to `0x03006f9c` with **zero** changed bytes in the selected 44,544-byte output
+buffer. It is followed by the flat audio at `0x1473e1`. The validator records
+the sentinel and requires it before accepting the subsequent loop pointer;
+it deliberately does not pass the sentinel to the bitstream decoder.
+
+### Pro presentation timeline (Pooh HQ, recovered)
+
+The player configures Timer 2 with reload `0xeaab` (period `0x1555`) and
+prescaler `/256`, then cascades Timer 3 from it. The presentation counter is
+Timer 3's count: its exact frequency is `16777216 / (256 * 0x1555)` Hz
+(about 12.001 Hz). A complete call capture contains 1,068 picture calls with
+counter values spanning 0 through 1,149, then the `0x147354` sentinel and a
+loop to the first picture. Missing counter values are intentional display
+ticks with no decode call. Therefore a native demuxer must retain each
+picture's captured counter as its PTS (with time base `0x1555 * 256 / 16777216`),
+not renumber the packets densely. A 1,150-call capture includes the first 81
+calls of the next loop; those are the apparent repeated pointers, not
+in-cycle decoder replays.
+
+The packet boundary is also recoverable without mGBA: across all 1,068
+validated pictures, the reference decoder's final bit position lands at the
+end of coded data, followed only by 0 or 4 bytes of padding before the next
+player pointer. This is the native demuxer route: use the ROM seek table for
+coarse input packets, let the decoder consume exactly one picture at a time,
+and advance over the observed padding. Do not bake the emulator-captured
+pointer list into an FFmpeg demuxer.
+
+At the sentinel, the live Pro audio cursor is `0x081a35e1`: it has consumed
+377,344 of 379,584 encoded bytes, leaving exactly 2,240 bytes (4,480 decoded
+samples). This proves the tail is live audio, but its relationship to the
+video counter is not yet a native-demuxer contract: the audio service runs
+independently and must be traced through its wrap/stop behavior before its
+presentation duration is asserted.
