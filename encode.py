@@ -305,7 +305,7 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid) — use 'decode' to decode any supported file including .rvid/.h4m/.ty, or 'play' to play one back without writing a file")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .rvid/.h4m/.ty, or 'play' to play one back without writing a file")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
     parser.add_argument("input2", nargs="?", default="", help="Second input file (for moflex3d/cia right eye)")
@@ -467,13 +467,23 @@ def main():
         # Nintendo DS DPG (MoonShell): MPEG-1 video + MP2 audio in separate
         # regions of the file. DS screen is 256x192.
         mode, dmx, scale, moaud, cvc = "vid", "dpg", "256:192", 0, "mpeg1video"
+    elif fmt == "hvqm4":
+        # Hudson Soft HVQM4 (.h4m), GameCube/Wii FMV. Encoder+muxer carry
+        # video only (no audio support yet), so moaud stays 0 and the audio
+        # stream is always dropped further down regardless of --audio.
+        mode, dmx, scale, moaud, cvc = "vid", "hvqm4", "320:240", 0, "hvqm4"
+    elif fmt == "fastvideo":
+        # ActImagine FastVideoDS (.fv). All-intra BGR555 DCT video; audio (if
+        # any) is adpcm_ima_moflex, muxed directly rather than through the
+        # mobiclip -mo_audio path, so moaud stays 0.
+        mode, dmx, scale, moaud, cvc = "vid", "fv", "256:192", 0, "fastvideo"
     elif fmt in AUDIO_FORMATS:
         # Audio-only containers: no video stream, so none of the scaling,
         # keyframe or frame-rate machinery below applies.
         mode, dmx, scale, moaud, cvc = "aud", fmt, "", 0, ""
     else:
         print(f"unknown format '{fmt}' "
-              f"(play|decode|mo|moflex|moflex3d|mods|vx|thp|rvid|dpg|"
+              f"(play|decode|mo|moflex|moflex3d|mods|vx|thp|rvid|dpg|hvqm4|fastvideo|"
               f"{'|'.join(AUDIO_FORMATS)})")
         sys.exit(2)
 
@@ -737,7 +747,12 @@ def main():
     inp = preprocess_input(inp, OUTDIR)
 
     stem = f"{OUTDIR}/roundtrip_{fmt}_{audio}"
-    container = f"{stem}.{fmt}"
+    # The hvqm4 muxer's registered extension is .h4m (the retail extension),
+    # not .hvqm4, and the fastvideo muxer is named "fv" not "fastvideo" --
+    # ffmpeg picks the muxer from the output filename, so the container name
+    # has to match even though the fmt string doesn't.
+    out_ext = {"hvqm4": "h4m", "fastvideo": "fv"}.get(fmt, fmt)
+    container = f"{stem}.{out_ext}"
     watch = f"{stem}.mp4"
     
     enc_opts = []
@@ -847,6 +862,17 @@ def main():
             # 16-bit PCM (pcm_s16le) is the higher-quality of the two rvid audio
             # stream types; the muxer writes it as the left/right sound stream.
             enc_opts.extend(["-c:a", "pcm_s16le"])
+            if audio_rate > 0:
+                enc_opts.extend(["-ar", str(audio_rate)])
+    elif fmt == "hvqm4":
+        # The hvqm4 muxer carries video only -- drop any audio stream
+        # regardless of the --audio choice.
+        enc_opts.append("-an")
+    elif fmt == "fastvideo":
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "adpcm_ima_moflex"])
             if audio_rate > 0:
                 enc_opts.extend(["-ar", str(audio_rate)])
 
