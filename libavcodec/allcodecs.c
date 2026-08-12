@@ -209,8 +209,6 @@ extern const FFCodec ff_gba_vx_decoder;
 extern const FFCodec ff_fvmv_decoder;
 extern const FFCodec ff_caimans22_decoder;
 extern const FFCodec ff_caimanspro_decoder;
-extern const FFCodec ff_odh_decoder;
-extern const FFCodec ff_odh_encoder;
 extern const FFCodec ff_ads_gba_audio_decoder;
 extern const FFCodec ff_fvmv_audio_decoder;
 extern const FFCodec ff_caimans22_audio_decoder;
