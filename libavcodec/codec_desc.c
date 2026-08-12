@@ -3690,7 +3690,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .id        = AV_CODEC_ID_CAIMANS22_AUDIO,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "caimans22_audio",
-        .long_name = NULL_IF_CONFIG_SMALL("Caimans 2.2 modified IMA ADPCM"),
+        .long_name = NULL_IF_CONFIG_SMALL("Caimans GBA modified IMA ADPCM"),
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
