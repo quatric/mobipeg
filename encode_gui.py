@@ -18,6 +18,7 @@ DECODER_FAMILIES = [
     ("THP", "*.thp"),
     ("RocketVideo", "*.rvid"),
     ("HVQM4", "*.h4m"),
+    ("FastVideoDS", "*.fv"),
     ("TiVo TyStream", "*.ty *.ty+ *.tmf"),
     ("Flipnote", "*.ppm *.kwz"),
     ("DS DPG video", "*.dpg"),
@@ -143,6 +144,8 @@ class EncodeGUI(tk.Tk):
             "DS ActImagine .vx": "vx",
             "GameCube/Wii THP .thp": "thp",
             "DS RocketVideo .rvid": "rvid",
+            "GameCube/Wii HVQM4 .h4m": "hvqm4",
+            "DS ActImagine FastVideoDS .fv": "fastvideo",
             "DS MoonShell .dpg": "dpg",
             "Nintendo DSP-ADPCM .dsp": "dsp",
             "Wii stream .brstm": "brstm",
@@ -165,6 +168,9 @@ class EncodeGUI(tk.Tk):
             "vx":       ["codebook", "none"],
             "thp":      ["adpcm", "none"],
             "rvid":     ["pcm", "none"],
+            # hvqm4 has no audio support yet -- video only.
+            "hvqm4":    ["none"],
+            "fastvideo": ["adpcm", "none"],
             "dpg":      ["mp2", "none"],
             # Audio-only formats: the choice is which of the container's own
             # codecs to write, so "none" is not on offer.
