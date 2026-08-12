@@ -2030,14 +2030,6 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
-        .id        = AV_CODEC_ID_ODH,
-        .type      = AVMEDIA_TYPE_VIDEO,
-        .name      = "odh",
-        .long_name = NULL_IF_CONFIG_SMALL("ODH (AJPG) image"),
-        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
-        .mime_types= MT("image/x-odh"),
-    },
-    {
         .id        = AV_CODEC_ID_GBA_VX,
         .type      = AVMEDIA_TYPE_VIDEO,
         .name      = "gba_vx",
