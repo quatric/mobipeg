@@ -1,9 +1,15 @@
 # Caimans GBA Video — handoff
 
-State as of 2026-08-09. This is the next non-retail GBA video family to
+State as of 2026-08-11. This is the next non-retail GBA video family to
 reverse after the five Game Boy Advance Video lineages. It is a separate
-commercial codec, not an ADS, Hydrogen, VX, or FVMV variant. No Caimans
-demuxer or decoder has been added to FFmpeg yet.
+commercial codec, not an ADS, Hydrogen, VX, or FVMV variant.
+
+**Caimans Pro is now ported and complete in this tree** --
+`libavformat/caimanspro.c` plus `libavcodec/caimansprodec.c` decode all 1,068
+pictures of the Pooh HQ ROM byte-identically to the hardware-validated Python
+reference, and the demuxer also exposes the flat ADPCM audio at 7884 Hz,
+bit-exact against `caimans_adpcm.py` (see "FFmpeg Caimans Pro integration
+(completed)" below). Caimans 2.2 video is still unported.
 
 ## Repository state
 
@@ -1462,6 +1468,120 @@ values.
    different codecs (Pro: recursive bintree + H.263-style MC, 8bpp; 2.2:
    4x4 codebook + YCoCg-R delta, RGB555 Mode 3). Pro intra is pixel-exact;
    2.2 video is at the 9.21% delta described above.
+
+## FFmpeg Caimans Pro integration (completed)
+
+`ff_caimanspro_demuxer` + `ff_caimanspro_decoder` decode the Pooh HQ ROM end
+to end:
+
+```sh
+ffmpeg -i build_caimans/roms/caimans_pro_pooh_hq.gba -fps_mode passthrough out.mp4
+# 1068 frames, 240x128, yuv410p
+```
+
+Every one of those 1,068 pictures is byte-identical to `caimans_frame.py` /
+`caimans_inter.py`, which are themselves validated 0-mismatch against mGBA.
+Both intra and inter pictures are covered.
+
+What the port needed beyond the earlier syntax skeleton:
+
+- **Two tables the ROM does not contain.** The resident image the demuxer
+  slices out of the ROM (`0x4f6c`, `0x7050` bytes) carries every VLC and
+  codebook table, but the player *builds* the leaf-geometry pair at
+  `0x030000b4`/`0x030000bc` and loads the source-format table at
+  `0x030070b4` separately. Both are now static const tables in the decoder;
+  the earlier code read them out of the ROM window and got garbage.
+- **The inter value VLC had one tier's value and length tables swapped**
+  (`0x03000940` vs `0x030008a0`, the `v >> 14` tier). This is what desynced
+  every non-trivial inter picture.
+- **Mode 0 on the inter path is not a skip**: it still adds the DC term to
+  the prediction. Only levels 4 and 5 make it a no-op, and only because
+  their raw leaf sizes are zero.
+- **The unaligned 8-byte motion-copy typo** (`{0,1,2,3,4,5,5,7}`) keys off
+  the *row's* alignment, not the alignment of the byte being copied.
+- **MV cache clearing** for macroblock types 0 and 3 cleared only the x
+  component of each `top` slot.
+- One picture per packet is wrong: a chunk holds many pictures with no
+  length field, so the decoder is a `FF_CODEC_CAP_SUBFRAME` codec that
+  reports what it consumed.
+
+### The picture advance rule (recovered statically)
+
+A picture's successor starts at
+
+    4 * ceil((bits_consumed + 24) / 32)
+
+bytes past its own start. That is a 32-bit-word bit reader that keeps at
+least 24 bits -- one maximum-length codeword -- buffered, so a picture leaves
+the stream past every word it touched plus that lookahead. Fitted over every
+picture boundary in the ROM's unobfuscated chunks (109 samples, exact; the
+constant is only ambiguous between 24 and 25), and it lands each chunk
+exactly on its seek-table end.
+
+This replaces the earlier "0 or 4 bytes of padding" observation with a closed
+form, and removes the need for the emulator-captured pointer list.
+
+### Container notes
+
+- The seek table at `0xc4b0` (87 x uint32, relative to `0xc768`) delimits
+  86 *chunks*, not pictures; the table at `0xc610` is the cumulative picture
+  *number* at each chunk start, not a picture count -- some pictures are held
+  for several frame times, so 86 chunks yield 1,065 pictures across 1,146
+  frame times. The chunks are pure video: the walk above consumes every one
+  of them exactly to its end byte.
+- The seek table's last entry is **not** the end of the stream. Three more
+  pictures follow it (`0x145168`, `0x14626c`, `0x146e40`), ending exactly at
+  the terminal record at `0x147354` that hardware also refuses. The demuxer
+  therefore hands the rest of the ROM over as a final packet and lets the
+  decoder walk it; decoding stops on the terminal record, which costs one
+  "Decoding error" line at EOF and yields the full 1,068.
+- PTS comes from the `0xc610` table (chunk granularity) with the
+  `0x1555 * 256 / 16777216` time base. Nothing recovered so far says which
+  pictures inside a chunk are held for extra frame times, so the decoder
+  numbers a chunk's pictures densely from the chunk's timestamp and resyncs
+  at the next chunk. That reproduces the player's 95.7 s duration.
+
+### Pro audio (settled, and the rate correction)
+
+The flat ADPCM stream starts at ROM `0x1473e1` -- immediately after the video's
+terminal record -- and runs 379,584 bytes to the end of the ROM. Mono, no
+headers, codec state never reset, output is the predictor's high byte.
+`AV_CODEC_ID_CAIMANS22_AUDIO` decodes it unchanged: the Pro and 2.2 kernels
+are byte-identical, so only the rate differs. FFmpeg's output is
+sample-for-sample identical to `caimans_adpcm.py` over all 759,168 samples.
+
+**The sample rate is 7884.03 Hz = 16777216 / 2128, not the 24564 Hz an
+earlier note recorded.** Two independent measurements agree:
+
+- TM0's reload is `0xf7b0`, i.e. a period of 2128 cycles at prescaler 1.
+  Recovered without any literal in the ROM by sampling the *live* TM0 counter
+  at 2,500 breakpoint hits and taking the minimum (63408 = `0xf7b0`); the
+  observed maximum, 65534, confirms the wrap.
+- The audio cursor at IWRAM `0x03007080` advances 377,088 bytes over 1,148
+  presentation ticks, i.e. 328.47 bytes/tick x 2 samples x 12.0007 Hz =
+  7883.9 Hz.
+
+That closes the contradiction the earlier note flagged: at 7884 Hz the audio
+the player consumes in one pass (377,344 bytes = 754,688 samples = 95.72 s)
+matches the video's 1,150 ticks at 12.0007 Hz = 95.83 s. The last 2,240 bytes
+of the stream are never reached in a pass; the demuxer emits them anyway, so
+its audio stream is 96.29 s against 95.74 s of video.
+
+The full-pass capture also independently reconfirms the video side: 1,069
+calls to `FUN_03005a00`, the last being the terminal record at `0x147354`,
+i.e. exactly the 1,068 pictures this demuxer produces.
+
+Audio and video are two separate flat runs with no interleaving of their own,
+so the demuxer interleaves them by comparing the next packet of each in a
+common `1/16777216 s` unit, emitting audio in 512-byte (1024-sample) packets.
+
+### Still open on the Pro side
+
+- The demuxer's table offsets -- including the audio base -- are constants
+  validated by its probe against the one available Pro sample; a second Pro
+  ROM would show whether they are a format or a build artifact.
+- Nothing recovered indexes the audio, so a seek would desync it (the ADPCM
+  state is stream-global). The demuxer exposes no seeking.
 
 ## Scope boundary
 
