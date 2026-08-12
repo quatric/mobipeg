@@ -312,9 +312,12 @@ const FFCodec ff_caimans22_decoder = {
     CODEC_PIXFMTS(AV_PIX_FMT_RGB555LE),
 };
 
+/* The Pro player's audio kernel is byte-identical to 2.2's (same step table,
+ * same {-1,-1,-1,-1,2,4,7,12} index table, same (mag == 7) extra term), so
+ * the Caimans Pro demuxer uses this decoder too -- only the rate differs. */
 const FFCodec ff_caimans22_audio_decoder = {
     .p.name         = "caimans22_audio",
-    CODEC_LONG_NAME("Caimans 2.2 modified IMA ADPCM"),
+    CODEC_LONG_NAME("Caimans GBA modified IMA ADPCM"),
     .p.type         = AVMEDIA_TYPE_AUDIO,
     .p.id           = AV_CODEC_ID_CAIMANS22_AUDIO,
     .priv_data_size = sizeof(Caimans22AudioContext),
