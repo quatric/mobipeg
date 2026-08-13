@@ -171,7 +171,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}
+          # The x264 build now includes its architecture-specific assembly.
+          # Keep this marker in the key so a previously cached scalar build
+          # cannot be reused for a release artifact.
+          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Install foreign-arch codec headers (cross targets)
         if: matrix.foreign_arch != ''
@@ -292,7 +295,6 @@ jobs:
             --enable-pic \
             --disable-cli \
             --disable-opencl \
-            --disable-asm \
             $CROSS || { cat config.log; exit 1; }
           make -j$(nproc) && make install
 
@@ -309,7 +311,6 @@ jobs:
             --disable-shared \
             --disable-doc \
             --disable-debug \
-            --disable-x86asm \
             --disable-sdl2 \
             --disable-bzlib \
             --disable-lzma \
@@ -432,7 +433,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
-          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}
+          # Match the Linux cache marker: these artifacts need an x264 build
+          # with platform assembly enabled, not the older scalar-only build.
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -448,8 +451,7 @@ jobs:
             --enable-static \
             --enable-pic \
             --disable-cli \
-            --disable-opencl \
-            --disable-asm
+            --disable-opencl
           make -j$(nproc) && make install
 
       - name: Install SDL2 for Windows
