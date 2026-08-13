@@ -131,6 +131,7 @@ class EncodeGUI(tk.Tk):
                             lightcolor="#4a474d", darkcolor="#1a1a1a")
             style.map("TCombobox", fieldbackground=[("readonly", field_bg),
                                                      ("focus", "#454149")],
+                      foreground=[("readonly", text_fg)],
                       background=[("active", active_bg)])
             style.configure("TButton", background=control_bg, foreground=text_fg,
                             bordercolor="#77717d", lightcolor="#77717d",
@@ -173,7 +174,11 @@ class EncodeGUI(tk.Tk):
         self.console.config(yscrollcommand=scrollbar.set)
         
     def setup_encode_tab(self):
-        self.encode_frame.columnconfigure(1, weight=1)
+        # Some Tcl/Tk builds bundled by PyInstaller collapse an otherwise
+        # weighted ttk grid column to the width of its arrow/button element.
+        # Give the editable column a real floor so inputs retain their normal
+        # full-width form at the default 750px window size.
+        self.encode_frame.columnconfigure(1, weight=1, minsize=320)
         
         # Row 0: Format
         ttk.Label(self.encode_frame, text="Format:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
@@ -474,7 +479,7 @@ class EncodeGUI(tk.Tk):
             self.enc_hq_var.set(False)
 
     def setup_decode_tab(self):
-        self.decode_frame.columnconfigure(1, weight=1)
+        self.decode_frame.columnconfigure(1, weight=1, minsize=320)
         
         # Input File. The supported extensions used to sit in the label, which
         # made one very wide line; they live in the file dialog's type filter
