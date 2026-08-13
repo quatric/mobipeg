@@ -51,6 +51,7 @@ OBJS = ac3_parser.o                                                     \
        imgconvert.o                                                     \
        jni.o                                                            \
        majesco.o                                                        \
+       majescoenc.o                                                     \
        mathtables.o                                                     \
        mediacodec.o                                                     \
        mpeg12framerate.o                                                \
