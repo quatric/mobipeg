@@ -128,7 +128,7 @@ jobs:
           # fresh index before giving up.
           for attempt in 1 2 3; do
             sudo apt-get install -y --no-install-recommends \
-              build-essential pkg-config nasm \
+              build-essential pkgconf nasm \
               libc6-dev${FOREIGN} \
               zlib1g-dev${FOREIGN} \
               ${CROSS_CC} \
@@ -395,13 +395,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config nasm mingw-w64 mingw-w64-tools
+            build-essential pkgconf nasm mingw-w64 mingw-w64-tools
 
       - name: Install llvm-mingw (arm64)
         if: matrix.use_llvm == true
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config nasm
+          sudo apt-get install -y --no-install-recommends build-essential pkgconf nasm
           LLVM_MINGW_VER="20240619"
           wget -q "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VER}/llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64.tar.xz"
           sudo tar -xJf "llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-20.04-x86_64.tar.xz" -C /opt
