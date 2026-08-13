@@ -379,7 +379,9 @@ jobs:
             use_llvm: true
             asm_flag: --disable-asm
             # Opus 1.5.2's ARM RTCD does not support Windows/llvm-mingw.
-            opus_configure: --disable-asm
+            # --disable-asm alone still compiles celt/arm/armcpu.c, so disable
+            # the run-time CPU dispatcher as well.
+            opus_configure: --disable-asm --disable-rtcd
 
     steps:
       - uses: actions/checkout@v5
@@ -439,7 +441,7 @@ jobs:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # Match the Linux cache marker: these artifacts need an x264 build
           # with platform assembly enabled, not the older scalar-only build.
-          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
