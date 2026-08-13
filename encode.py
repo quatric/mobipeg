@@ -315,7 +315,7 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.ty, or 'play' to play one back without writing a file")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.ty, or 'play' to play one back without writing a file")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
     parser.add_argument("input2", nargs="?", default="", help="Second input file (right eye for moflex3d / 3ds_camera3d)")
@@ -330,8 +330,8 @@ def main():
         env_quant = int(os.environ.get("QUANT", os.environ.get("QP", 0)))
     except ValueError:
         pass
-    parser.add_argument("--quantizer", "--qp", dest="quantizer", type=int, default=env_quant, help="Constant quantizer / QP setting (e.g. 18-28 for MobiClip, 32 for VX, 1-31 for THP qscale). Default 0 = format default (32 for VX, 22 for MobiClip CQP, 2 for THP). Can also be set via QUANT or QP environment variables.")
-    parser.add_argument("--audio-rate", dest="audio_rate", type=int, default=0, help="vx/mods codebook: resample audio to this rate (Hz). 0 = keep source. Match the sample rate of the retail clip you're replacing (e.g. 22050 for americ1 cutscenes) — a DS player that sizes its audio buffer for the original rate can stall on a higher-rate stream.")
+    parser.add_argument("--quantizer", "--qp", dest="quantizer", type=int, default=env_quant, help="Constant quantizer / QP setting (e.g. 18-28 for MobiClip, 32 for VX, 1-31 for THP/TiVo MPEG-2 qscale). Default 0 = format default (32 for VX, 22 for MobiClip CQP, bitrate mode for TiVo, 2 for THP). Can also be set via QUANT or QP environment variables.")
+    parser.add_argument("--audio-rate", dest="audio_rate", type=int, default=0, help="Resample audio to this rate (Hz). TiVo defaults to 48000; other formats keep the source unless their preset requires a hardware-specific rate. Match the retail clip when replacing one.")
     parser.add_argument("--fps", dest="fps", default="", help="Force this video frame rate (all formats). Accepts a decimal (e.g. 15) or an exact fraction (e.g. 60000/1001). Empty = keep source (.mo defaults to 30000/1001). The frame rate must usually match the clip you're replacing or the video plays too slow/fast.")
     parser.add_argument("--rvid-mode", dest="rvid_mode", default="rgb555", choices=["rgb555", "rgb565", "256"], help="rvid only: pixel mode. rgb555 (unlimited color, default), rgb565 (max color), or 256 (8bpp palette).")
     parser.add_argument("--no-compress", dest="rvid_no_compress", action="store_true", help="rvid only: store raw 16bpp frames instead of Nintendo LZ10 compression.")
@@ -500,6 +500,11 @@ def main():
         # Nintendo DS DPG (MoonShell): MPEG-1 video + MP2 audio in separate
         # regions of the file. DS screen is 256x192.
         mode, dmx, scale, moaud, cvc = "vid", "dpg", "256:192", 0, "mpeg1video"
+    elif fmt == "ty":
+        # TiVo TY Stream: MPEG-2 video with optional MP2/AC-3 audio. Keep the
+        # source dimensions and frame rate by default because retail TiVos use
+        # several valid raster sizes; --scale/--fps can target a specific box.
+        mode, dmx, scale, moaud, cvc = "vid", "ty", "", 0, "mpeg2video"
     elif fmt == "hvqm4":
         # Hudson Soft HVQM4 (.h4m), GameCube/Wii FMV. Encoder+muxer carry
         # video only (no audio support yet), so moaud stays 0 and the audio
@@ -516,7 +521,7 @@ def main():
         mode, dmx, scale, moaud, cvc = "aud", fmt, "", 0, ""
     else:
         print(f"unknown format '{fmt}' "
-              f"(play|decode|mo|moflex|moflex3d|mods|vx|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|"
+              f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|"
               f"{'|'.join(AUDIO_FORMATS)})")
         sys.exit(2)
 
@@ -926,6 +931,25 @@ def main():
         else:
             enc_opts.extend(["-c:a", "mp2", "-b:a", "128k"])
             enc_opts.extend(["-ar", str(audio_rate if audio_rate > 0 else 32000)])
+    elif fmt == "ty":
+        # Stand-alone TiVo TY streams carry MPEG-2 video and optionally MP2 or
+        # AC-3 audio. Map only the first video/audio streams so attachments or
+        # subtitles from a general-purpose input cannot make the muxer reject
+        # the output's stream layout.
+        enc_opts.extend(["-map", "0:v:0", "-pix_fmt", "yuv420p"])
+        if vx_quant > 0:
+            enc_opts.extend(["-qscale:v", str(vx_quant)])
+        else:
+            enc_opts.extend(["-b:v", "6000k", "-maxrate", "8000k",
+                             "-bufsize", "1835k"])
+        enc_opts.extend(["-g", "15"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-map", "0:a:0?", "-c:a", audio,
+                             "-b:a", "192k", "-ar",
+                             str(audio_rate if audio_rate > 0 else 48000),
+                             "-ac", "2"])
     elif fmt == "rvid":
         # RocketVideo: 16bpp (RGB555/565) frames, optional Nintendo LZ10, encoded
         # entirely by ffmpeg's rvid encoder. The encoder consumes rgb24 and packs
