@@ -20,12 +20,20 @@ such as audio, video, subtitles and related metadata.
 | MODS | `.mods` | Nintendo DS | ✅ | ✅ |
 | MO | `.mo` | Nintendo Wii | ✅ | ✅ |
 | VX | `.vx` | Nintendo DS | ✅ | ✅ |
+| FastVideo DS | `.fv` | Nintendo DS | ✅ | ✅ |
 | THP | `.thp` | GameCube / Wii | ✅ | ✅ |
 | RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
 | HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
-| BPK1 | `.bpk`, `.bpk1` | Nintendo 3DS Swapdoodle | — | ✅ |
+| BPK1 | `.bpk`, `.bpk1` | Nintendo 3DS Swapdoodle | ✅ | ✅ |
 | TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
+| GBA Video (ADS) | `.mmstr` / `.gba` | Game Boy Advance (Majesco) | — | ✅ |
+| GBA Video (VX++) | `.gba` | Game Boy Advance (ActImagine) | — | ✅ |
+| GBA Video (Caimans 2.2) | `.gba` | Game Boy Advance | — | ✅ |
+| GBA Video (CaimansPro) | `.gba` | Game Boy Advance | — | ✅ |
+| GBA FVMV | `.gba` | Game Boy Advance (Pokémon) | — | ✅ |
+| Flipnote Studio 3D | `.kwz` | Nintendo 3DS | — | ✅ |
+| Flipnote Studio | `.ppm` | Nintendo DS / DSi | — | ✅ |
 
 ### Audio formats
 
