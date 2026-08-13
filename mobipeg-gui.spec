@@ -52,5 +52,5 @@ app = BUNDLE(
     name='mobipeg-gui.app',
     icon='logo.png',
     bundle_identifier=None,
-    version='1.2',
+    version='2.0',
 )
