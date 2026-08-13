@@ -15,37 +15,37 @@ such as audio, video, subtitles and related metadata.
 
 | Format | Container | Platform | Encode | Decode |
 |--------|-----------|----------|--------|--------|
-| MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
-| MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
-| MODS | `.mods` | Nintendo DS | ✅ | ✅ |
-| MO | `.mo` | Nintendo Wii | ✅ | ✅ |
-| VX | `.vx` | Nintendo DS | ✅ | ✅ |
-| FastVideo DS | `.fv` | Nintendo DS | ✅ | ✅ |
-| THP | `.thp` | GameCube / Wii | ✅ | ✅ |
-| RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
-| HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
 | BPK1 | `.bpk`, `.bpk1`, `.apd` | Nintendo 3DS Swapdoodle / Swapnote | ✅ | ✅ |
-| TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
-| GBA Video (ADS) | `.mmstr` / `.gba` | Game Boy Advance (Majesco) | ✅ `.mmstr` | ✅ |
-| GBA Video (VX++) | `.gba` | Game Boy Advance (ActImagine) | — | ✅ |
+| FastVideo DS | `.fv` | Nintendo DS | ✅ | ✅ |
+| Flipnote Studio | `.ppm` | Nintendo DS / DSi | — | ✅ |
+| Flipnote Studio 3D | `.kwz` | Nintendo 3DS | — | ✅ |
+| GBA FVMV | `.gba` | Game Boy Advance (Pokémon) | — | ✅ |
+| GBA Video (ADS) | `.mmstr` / `.gba` | Game Boy Advance (Majesco) | ✅ | ✅ |
 | GBA Video (Caimans 2.2) | `.gba` | Game Boy Advance | — | ✅ |
 | GBA Video (CaimansPro) | `.gba` | Game Boy Advance | — | ✅ |
-| GBA FVMV | `.gba` | Game Boy Advance (Pokémon) | — | ✅ |
-| Flipnote Studio 3D | `.kwz` | Nintendo 3DS | — | ✅ |
-| Flipnote Studio | `.ppm` | Nintendo DS / DSi | — | ✅ |
+| GBA Video (VX++) | `.gba` | Game Boy Advance (ActImagine) | — | ✅ |
+| HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
+| MO | `.mo` | Nintendo Wii | ✅ | ✅ |
+| MODS | `.mods` | Nintendo DS | ✅ | ✅ |
+| MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
+| MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
+| RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
+| THP | `.thp` | GameCube / Wii | ✅ | ✅ |
+| TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
+| VX | `.vx` | Nintendo DS | ✅ | ✅ |
 
 ### Audio formats
 
 | Format | Container | Platform | Encode | Decode |
 |--------|-----------|----------|--------|--------|
-| DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
-| BRSTM | `.brstm` | Nintendo Wii | ✅ | ✅ |
-| BFSTM | `.bfstm` | Nintendo Wii U | ✅ | ✅ |
-| BCSTM | `.bcstm` | Nintendo 3DS | ✅ | ✅ |
-| BNS | `.bns` | Nintendo Wii (banner sound) | ✅ | ✅ |
 | AST | `.ast` | GameCube / Wii | ✅ | ✅ |
+| BCSTM | `.bcstm` | Nintendo 3DS | ✅ | ✅ |
+| BFSTM | `.bfstm` | Nintendo Wii U | ✅ | ✅ |
+| BNS | `.bns` | Nintendo Wii (banner sound) | ✅ | ✅ |
+| BRSTM | `.brstm` | Nintendo Wii | ✅ | ✅ |
 | BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
+| DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
 
 The DSP-ADPCM encoder derives its predictor coefficients over the whole
 stream, the same autocorrelation and Levinson refinement Nintendo's own
