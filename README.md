@@ -104,22 +104,31 @@ faithfully and that nothing can sensibly target. Modes 2, 3 and 4 have
 three-pixel-tall blocks, so they need a height divisible by three and cannot
 cover the GBA's 160 lines.
 
-Blobs are written with the Hydrogen-era compressor (`majescoenc.c`), the exact
-inverse of the bundled decompressor: DEFLATE-shaped, but bits run most
-significant first out of little-endian halfwords, a block header is a bare
-2-bit type with no BFINAL, and the uncompressed size in each blob's prefix is
-the only thing that ends the stream. Stored, fixed-Huffman and dynamic-Huffman
-encodings are all built and the cheapest kept, which bounds the incompressible
-case.
+Blobs go through one of two compressors, picked with `-compression`:
 
-Two caveats. This writes `.mmstr` resource files, not cartridges — nothing here
-rebuilds a ROM. And the Hydrogen compressor has never been found in a retail
-ADS cart: Dragon Ball GT, the reference ADS title, decompresses with stock
-LZMA, and the patent-scheme decoder it inverts is an unverified port (see the
-header of `libavcodec/majesco.h`). So the output round-trips through this
-tree's own decoder but has not been checked against hardware. Reading a bare
-`.mmstr` infers the compressor from the first blob; `-compression 0|1` overrides
-it. Audio is decode-only, since the cart's ADPCM has no encoder yet.
+* `0` (default) — the LZMA the ADS-era / Dragon Ball GT lineage runs
+  (`adslzmaenc.c`), stock LZMA with `lc=0, lp=0, pb=2` and no end marker, the
+  exact inverse of the bundled decoder. Every probability-coded decision
+  mirrors the decoder's bit-read one for one, which is what lets two
+  independently-run range coders track one adaptive model without either side
+  ever transmitting it. The match finder is a plain greedy hash-chain search
+  with repeated-distance and short-rep preference, not a multi-pass optimal
+  parse — that costs ratio, not correctness.
+* `1` — the Hydrogen-era compressor (`majescoenc.c`) that Dora the Explorer and
+  the rest of that lineage use instead: DEFLATE-shaped, but bits run most
+  significant first out of little-endian halfwords, a block header is a bare
+  2-bit type with no BFINAL, and the uncompressed size in each blob's prefix is
+  the only thing that ends the stream. Stored, fixed-Huffman and
+  dynamic-Huffman encodings are all built and the cheapest kept, which bounds
+  the incompressible case.
+
+Both write the same 8-byte `[uint32 uncompressed_size][uint32 params]` prefix,
+and reading a bare `.mmstr` infers which compressor was used from the first
+blob rather than needing to be told.
+
+One caveat: this writes `.mmstr` resource files, not cartridges — nothing here
+rebuilds a ROM. Audio is decode-only, since the cart's ADPCM has no encoder
+yet.
 
 ### Splitting stereoscopic MOFLEX video
 
