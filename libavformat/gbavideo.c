@@ -71,6 +71,8 @@ typedef struct GBAVideoDemuxContext {
     const char *resource;       /* SFCD member to play, NULL = the largest */
     int64_t best_size;
     int inflate;                /* Hydrogen carts compress with Inflate */
+    int compression;            /* -1 auto, 0 LZMA, 1 Inflate */
+    int sniff_inflate;          /* may an LZMA guess be revised upwards? */
     int flat_audio_context;     /* Hydrogen audio sends a flat context table */
     int size_unit;              /* resource sizes: 4 for ADS, 1 for Hydrogen */
     int count_mask;             /* resource count: 0xff for ADS, 0xf for Hydrogen */
@@ -189,17 +191,24 @@ static int parse_video_resource(AVFormatContext *avctx, int64_t off,
     /* Noah's Final Threat is a transitional Hydrogen prototype: it uses the
      * byte-sized Hydrogen container and audio syntax, but retains the older
      * LZMA video blobs. Their second prefix word is the LZMA parameter word;
-     * the varying 0x1c00 field selects the dictionary size. */
-    if (s->inflate && s->chunk_pos + 16 <= s->chunk_end) {
+     * the varying 0x1c00 field selects the dictionary size. An Inflate blob's
+     * second word is coded data, which all but never lands on that pattern, so
+     * the same test serves both directions - but only where there is no
+     * stronger signal. A ROM's own layout is that stronger signal: an SFCD
+     * archive means an ADS-era cart, and a bare resource table means a
+     * Hydrogen one, so neither gets second-guessed here.
+     */
+    if (s->compression >= 0) {
+        s->inflate = s->compression;
+    } else if ((s->inflate || s->sniff_inflate) &&
+               s->chunk_pos + 16 <= s->chunk_end) {
         uint32_t params;
 
         avio_seek(pb, s->chunk_pos + 12, SEEK_SET);
         params = avio_rl32(pb);
-        if ((params & 0xFFFFE3FF) == 0x00010002) {
-            av_log(avctx, AV_LOG_VERBOSE,
-                   "Hydrogen container with LZMA video blobs\n");
-            s->inflate = 0;
-        }
+        s->inflate = (params & 0xFFFFE3FF) != 0x00010002;
+        av_log(avctx, AV_LOG_VERBOSE, "video blobs look like %s\n",
+               s->inflate ? "Inflate" : "LZMA");
     }
 
     st = avformat_new_stream(avctx, NULL);
@@ -366,8 +375,11 @@ static int gbavideo_read_header(AVFormatContext *avctx)
 {
     GBAVideoDemuxContext *s = avctx->priv_data;
 
-    s->size_unit  = 4;
-    s->count_mask = 0xFF;
+    s->size_unit     = 4;
+    s->count_mask    = 0xFF;
+    /* A bare .mmstr carries no cart layout to infer the compressor from, so
+     * let parse_video_resource() look at the first blob and decide. */
+    s->sniff_inflate = 1;
     return read_mmstr(avctx, 0);
 }
 
@@ -748,6 +760,9 @@ static const AVOption gbavideo_options[] = {
       AV_OPT_FLAG_DECODING_PARAM },
     { "sample_rate", "audio sample rate (the container does not record one)",
       OFFSET(sample_rate), AV_OPT_TYPE_INT, { .i64 = 16384 }, 1000, 48000,
+      AV_OPT_FLAG_DECODING_PARAM },
+    { "compression", "blob compressor: -1 detect, 0 LZMA, 1 Inflate",
+      OFFSET(compression), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1,
       AV_OPT_FLAG_DECODING_PARAM },
     { "resource", "name of the SFCD member to demux (ROM input only)",
       OFFSET(resource), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0,
