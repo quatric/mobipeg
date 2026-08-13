@@ -18,7 +18,8 @@ MOBICLIP_KEYINT_MAX = 90
 # Audio-only containers. Every one of these carries GameCube/Wii-family
 # DSP-ADPCM except btsnd, which is raw big-endian PCM, and ast, which can do
 # either. They share a code path that skips everything video-shaped.
-AUDIO_FORMATS = ("dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd")
+AUDIO_FORMATS = ("dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd",
+                 "wii_photo_m4a", "3ds_sound")
 
 # Audio codec each one is written with, keyed by the GUI's "audio" argument.
 # "adpcm" means the format's native ADPCM; "pcm" its uncompressed form.
@@ -35,11 +36,20 @@ AUDIO_FORMAT_CODECS = {
     # The Wii U boot-sound player has no format negotiation: 48 kHz stereo
     # big-endian PCM or nothing.
     "btsnd": {"pcm": ["-c:a", "pcm_s16be", "-ar", "48000", "-ac", "2"]},
+    # Wii Photo Channel 1.1 and Nintendo 3DS Sound both accept ordinary
+    # AAC-LC M4A. 44.1 kHz / 128 kb/s stereo is inside the 3DS Sound's
+    # documented 32-48 kHz and 16-320 kb/s limits.
+    "wii_photo_m4a": {"aac": ["-c:a", "aac", "-profile:a", "aac_low",
+                               "-b:a", "128k", "-ar", "44100", "-ac", "2"]},
+    "3ds_sound": {"aac": ["-c:a", "aac", "-profile:a", "aac_low",
+                            "-b:a", "128k", "-ar", "44100", "-ac", "2"]},
 }
 
 # .bcstm is read by the bfstm demuxer (same layout, different magic), so it
 # has a muxer of its own but no demuxer to name on the way back in.
-AUDIO_FORMAT_DEMUXERS = {"bcstm": "bfstm"}
+AUDIO_FORMAT_DEMUXERS = {"bcstm": "bfstm", "wii_photo_m4a": "mov",
+                         "3ds_sound": "mov"}
+AUDIO_FORMAT_EXTENSIONS = {"wii_photo_m4a": "m4a", "3ds_sound": "m4a"}
 
 # Config
 if getattr(sys, 'frozen', False):
@@ -305,10 +315,10 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .rvid/.h4m/.ty, or 'play' to play one back without writing a file")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.ty, or 'play' to play one back without writing a file")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
-    parser.add_argument("input2", nargs="?", default="", help="Second input file (for moflex3d/cia right eye)")
+    parser.add_argument("input2", nargs="?", default="", help="Second input file (right eye for moflex3d / 3ds_camera3d)")
 
     parser.add_argument("--scale", default="", help="Override scale (e.g. 320x240)")
     parser.add_argument("--layout", default="4", help="MO3D layout (default 4)")
@@ -454,6 +464,29 @@ def main():
         mode, dmx, scale, moaud, cvc = "vid", "mods", "256:192", 1, "mobiclip"
     elif fmt == "vx":
         mode, dmx, scale, moaud, cvc = "vid", "vx", "256:192", 0, "vx"
+    elif fmt in ("gba_ads", "gba_hydrogen"):
+        # Majesco GBA Video resource. Both generations use the same ADS video
+        # bitstream and .mmstr container; only their blob compressor differs.
+        # These are resources suitable for insertion into a compatible ROM,
+        # not standalone bootable cartridges.
+        mode, dmx, scale, moaud, cvc = "vid", "gbavideo", "240:160", 0, "ads_gba"
+    elif fmt == "wii_photo":
+        # Wii Photo Channel: ordinary AVI containing Motion JPEG. 640x480 is
+        # a practical 4:3 default below its documented 848x480 ceiling.
+        mode, dmx, scale, moaud, cvc = "vid", "avi", "640:480", 0, "mjpeg"
+    elif fmt == "nintendo_channel":
+        # The archived UK Nintendo Channel clips are 3gp6, AVC constrained
+        # baseline L2.1, 378x284 at 25 fps, with 32 kHz AAC-LC audio.
+        mode, dmx, scale, moaud, cvc = "vid", "3gp", "378:284", 0, "libx264"
+    elif fmt == "3ds_camera":
+        # 3DS Camera imports 2D AVI/MJPEG clips at 480x240 / 20 fps with
+        # 16 kHz mono IMA-ADPCM. Stereoscopic camera clips have two video
+        # tracks; this preset deliberately targets compatible 2D playback.
+        mode, dmx, scale, moaud, cvc = "vid", "avi", "480:240", 0, "mjpeg"
+    elif fmt == "3ds_camera3d":
+        # Native Camera 3D AVI has two synchronized MJPEG tracks: left first,
+        # right second. It is not a single packed side-by-side frame.
+        mode, dmx, scale, moaud, cvc = "camera3d", "avi", "480:240", 0, "mjpeg"
     elif fmt == "thp":
         # GameCube/Wii THP: motion-JPEG video + adpcm_thp (DSP-ADPCM) audio.
         # Not a mobiclip codec, so no -mobiclip/-mo_audio; keeps source size.
@@ -483,12 +516,12 @@ def main():
         mode, dmx, scale, moaud, cvc = "aud", fmt, "", 0, ""
     else:
         print(f"unknown format '{fmt}' "
-              f"(play|decode|mo|moflex|moflex3d|mods|vx|thp|rvid|dpg|hvqm4|fastvideo|"
+              f"(play|decode|mo|moflex|moflex3d|mods|vx|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|"
               f"{'|'.join(AUDIO_FORMATS)})")
         sys.exit(2)
 
 
-    if scale_ovr:
+    if scale_ovr and fmt not in ("3ds_camera", "3ds_camera3d"):
         scale = scale_ovr.replace("x", ":")
     elif audio == "vorbis":
         scale = "384:288"
@@ -695,6 +728,47 @@ def main():
 
         sys.exit(0)
 
+    if mode == "camera3d":
+        inp = input_file or "stupi.mp4"
+        inp2 = input2 or inp
+        if not os.path.isfile(inp):
+            print(f"left input not found: {inp}")
+            sys.exit(2)
+        if not os.path.isfile(inp2):
+            print(f"right input not found: {inp2}")
+            sys.exit(2)
+        inp = preprocess_input(inp, OUTDIR)
+        inp2 = preprocess_input(inp2, OUTDIR)
+        stem = f"{OUTDIR}/roundtrip_3ds_camera3d_{audio}"
+        container = f"{stem}.avi"
+        watch = f"{stem}.mp4"
+        print(f">> encoding 3DS Camera 3D  L={inp}  R={inp2}  ->  {container}")
+
+        fc = ("[0:v:0]scale=480:240,setsar=1[l];"
+              "[1:v:0]scale=480:240,setsar=1[r]")
+        cmd = ([FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp]
+               + input_fmt(inp2) + ["-i", inp2, "-filter_complex", fc,
+                                     "-map", "[l]", "-map", "[r]"])
+        if audio == "none":
+            cmd += ["-an"]
+        else:
+            cmd += ["-map", "0:a:0?", "-c:a", "adpcm_ima_wav",
+                    "-ar", "16000", "-ac", "1"]
+        cmd += ["-c:v", "mjpeg", "-qscale:v", str(vx_quant if vx_quant > 0 else 3),
+                "-pix_fmt", "yuvj420p", "-r", "20"] + extra_args + [container]
+        run_cmd(cmd) or sys.exit(1)
+
+        if roundtrip:
+            print(f">> decoding  {container}  ->  {watch}  (left|right SBS preview)")
+            preview_fc = "[0:v:0][0:v:1]hstack=inputs=2[v]"
+            cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error", "-f", "avi",
+                   "-i", container, "-filter_complex", preview_fc, "-map", "[v]",
+                   "-map", "0:a:0?", "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
+            run_cmd(cmd) or sys.exit(1)
+        print("\nencode complete:")
+        run_cmd(["ls", "-la", container] + ([watch] if roundtrip else []))
+        sys.exit(0)
+
     if mode == "aud":
         inp = input_file
         if not inp or not os.path.isfile(inp):
@@ -706,7 +780,8 @@ def main():
         if audio not in codecs:
             print(f"   ({fmt} has no '{audio}' audio; using '{choice}')")
 
-        container = f"{OUTDIR}/roundtrip_{fmt}_{choice}.{fmt}"
+        out_ext = AUDIO_FORMAT_EXTENSIONS.get(fmt, fmt)
+        container = f"{OUTDIR}/roundtrip_{fmt}_{choice}.{out_ext}"
         watch     = f"{OUTDIR}/roundtrip_{fmt}_{choice}.wav"
 
         enc_opts = ["-vn"] + list(codecs[choice])
@@ -751,7 +826,10 @@ def main():
     # not .hvqm4, and the fastvideo muxer is named "fv" not "fastvideo" --
     # ffmpeg picks the muxer from the output filename, so the container name
     # has to match even though the fmt string doesn't.
-    out_ext = {"hvqm4": "h4m", "fastvideo": "fv"}.get(fmt, fmt)
+    out_ext = {"hvqm4": "h4m", "fastvideo": "fv",
+               "gba_ads": "mmstr", "gba_hydrogen": "mmstr",
+               "wii_photo": "avi", "nintendo_channel": "3gp",
+               "3ds_camera": "avi"}.get(fmt, fmt)
     container = f"{stem}.{out_ext}"
     watch = f"{stem}.mp4"
     
@@ -875,6 +953,41 @@ def main():
             enc_opts.extend(["-c:a", "adpcm_ima_moflex"])
             if audio_rate > 0:
                 enc_opts.extend(["-ar", str(audio_rate)])
+    elif fmt in ("gba_ads", "gba_hydrogen"):
+        # GBA audio remains decode-only. The encoder writes a video-only
+        # .mmstr and selects the compressor used by the requested lineage.
+        enc_opts.extend(["-an", "-pix_fmt", "rgb24", "-compression",
+                         "1" if fmt == "gba_hydrogen" else "0"])
+    elif fmt == "wii_photo":
+        # The Photo Channel's documented video format is Motion JPEG AVI.
+        # PCM is broadly interoperable, but its audio component is not
+        # guaranteed by Nintendo's player, so callers can choose --audio none.
+        enc_opts.extend(["-qscale:v", str(vx_quant if vx_quant > 0 else 3),
+                         "-pix_fmt", "yuvj420p"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "pcm_s16le", "-ar",
+                             str(audio_rate if audio_rate > 0 else 32000)])
+    elif fmt == "nintendo_channel":
+        # Match the UK Nintendo Channel 2009 3GP profile: 3gp6 + AVC
+        # constrained baseline L2.1 + stereo 32 kHz AAC-LC. libx264 is also
+        # required for the project's MobiClip encoder.
+        enc_opts.extend(["-profile:v", "constrained_baseline", "-level:v", "2.1",
+                         "-pix_fmt", "yuv420p", "-b:v", mobi_bitrate or "484k",
+                         "-g", "250", "-brand", "3gp6",
+                         "-video_track_timescale", "1000000", "-movflags", "+faststart"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "aac", "-b:a", "50k", "-ar", "32000", "-ac", "2"])
+    elif fmt == "3ds_camera":
+        enc_opts.extend(["-qscale:v", str(vx_quant if vx_quant > 0 else 3),
+                         "-pix_fmt", "yuvj420p"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "adpcm_ima_wav", "-ar", "16000", "-ac", "1"])
 
     # --fps applies to every format: the output frame rate generally has to match
     # the clip being replaced.  A DS VX player clocks video off the audio, so a
@@ -882,7 +995,9 @@ def main():
     # overruns the ARM9 decode budget; retail THP movies are 29.97.  .mo defaults
     # to 29.97 (what the Wii player expects) but --fps still overrides it.
     fps_filter = ""
-    if fps_ovr:
+    if fmt in ("3ds_camera", "3ds_camera3d"):
+        fps_filter = "fps=20"
+    elif fps_ovr:
         fps_filter = f"fps={fps_ovr}"
     elif fmt == "mo":
         fps_filter = "fps=30000/1001"
@@ -890,6 +1005,8 @@ def main():
         # The DS decodes MPEG-1 in software; 15 fps is what MoonShell's own
         # encoders target and what the hardware keeps up with.
         fps_filter = "fps=15"
+    elif fmt == "nintendo_channel":
+        fps_filter = "fps=25"
         
     filters = []
     if scale:
@@ -900,6 +1017,10 @@ def main():
     if fmt == "mods":
         ycgco = "format=gbrp,geq=g='(r(X,Y)+2*g(X,Y)+b(X,Y))/4':b='(2*g(X,Y)-r(X,Y)-b(X,Y))/4+128':r='(r(X,Y)-b(X,Y))/2+128',mergeplanes=0x000102:yuv444p,format=yuv420p"
         filters.append(ycgco)
+    elif fmt == "3ds_camera":
+        # The camera's 480x240 pixels are square. Do not preserve a source
+        # video's display aspect ratio through the scale filter.
+        filters.append("setsar=1")
         
     vf = []
     if filters:
