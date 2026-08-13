@@ -13,7 +13,7 @@ ENCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode
 # from this, so they can't drift apart.
 DECODER_FAMILIES = [
     ("Mobiclip", "*.mo *.moflex *.mods"),
-    ("GBA Video cartridges", "*.gba"),
+    ("GBA Video cartridges / resources", "*.gba *.mmstr"),
     ("ActImagine VX", "*.vx"),
     ("THP", "*.thp"),
     ("RocketVideo", "*.rvid"),
@@ -27,11 +27,13 @@ DECODER_FAMILIES = [
     ("Nintendo streams", "*.brstm *.bfstm *.bcstm"),
     ("Wii BNS / AST", "*.bns *.ast"),
     ("Wii U boot sound", "*.btsnd"),
+    ("Wii / 3DS AAC audio", "*.m4a"),
 ]
 
 # Formats with no video stream. The Encode tab hides every video-only control
 # for these, and encode.py decodes them to .wav rather than .mp4.
-AUDIO_ONLY_FORMATS = {"dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd"}
+AUDIO_ONLY_FORMATS = {"dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd",
+                      "wii_photo_m4a", "3ds_sound"}
 
 # How many family cells sit side by side in the expandable grid.
 DECODER_GRID_COLUMNS = 3
@@ -143,6 +145,14 @@ class EncodeGUI(tk.Tk):
             "3DS Mobiclip .moflex (3D)": "moflex3d",
             "DS Mobiclip .mods": "mods",
             "DS ActImagine .vx": "vx",
+            "GBA Video ADS/LZMA .mmstr": "gba_ads",
+            "GBA Video Hydrogen/Inflate .mmstr": "gba_hydrogen",
+            "Wii Photo Channel Motion-JPEG .avi": "wii_photo",
+            "Wii Photo Channel AAC .m4a": "wii_photo_m4a",
+            "Wii Nintendo Channel .3gp": "nintendo_channel",
+            "Nintendo 3DS Camera 2D .avi": "3ds_camera",
+            "Nintendo 3DS Camera 3D .avi": "3ds_camera3d",
+            "Nintendo 3DS Sound AAC .m4a": "3ds_sound",
             "GameCube/Wii THP .thp": "thp",
             "DS RocketVideo .rvid": "rvid",
             "GameCube/Wii HVQM4 .h4m": "hvqm4",
@@ -167,6 +177,14 @@ class EncodeGUI(tk.Tk):
             "moflex3d": ["adpcm", "fastaudio", "pcm", "none"],
             "mods":     ["adpcm", "fastaudio", "pcm", "codebook", "none"],
             "vx":       ["codebook", "none"],
+            "gba_ads":  ["none"],
+            "gba_hydrogen": ["none"],
+            "wii_photo": ["pcm", "none"],
+            "wii_photo_m4a": ["aac"],
+            "nintendo_channel": ["aac", "none"],
+            "3ds_camera": ["adpcm", "none"],
+            "3ds_camera3d": ["adpcm", "none"],
+            "3ds_sound": ["aac"],
             "thp":      ["adpcm", "none"],
             "rvid":     ["pcm", "none"],
             # hvqm4 has no audio support yet -- video only.
@@ -364,16 +382,16 @@ class EncodeGUI(tk.Tk):
         # that should show them. Hiding uses grid_remove() (not state=disabled)
         # so rows collapse instead of sitting there greyed out.
         self.enc_conditional_widgets = [
-            ({"moflex3d"}, (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn)),
+            ({"moflex3d", "3ds_camera3d"}, (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn)),
             ({"moflex3d"}, (self.enc_layout_label, self.enc_layout_entry)),
             ({"mo", "moflex", "moflex3d", "vx"}, (self.enc_keyframes_label, self.enc_keyframes_entry)),
-            ({"vx", "mo", "moflex", "moflex3d", "mods", "thp"}, (self.enc_quant_label, self.enc_quant_entry)),
-            ({"vx", "mods", "thp", "rvid", "dpg"} | AUDIO_ONLY_FORMATS,
+            ({"vx", "mo", "moflex", "moflex3d", "mods", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"}, (self.enc_quant_label, self.enc_quant_entry)),
+            ({"vx", "mods", "thp", "rvid", "dpg", "wii_photo", "3ds_camera"} | AUDIO_ONLY_FORMATS,
              (self.enc_arate_label, self.enc_arate_entry)),
             # Scale and FPS describe a video stream, so they go away entirely
             # for the audio-only containers.
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "thp", "rvid", "dpg"}, (self.enc_scale_label, self.enc_scale_entry)),
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "thp", "rvid", "dpg"}, (self.enc_fps_label, self.enc_fps_entry)),
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_scale_label, self.enc_scale_entry)),
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_fps_label, self.enc_fps_entry)),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),
@@ -636,12 +654,13 @@ class EncodeGUI(tk.Tk):
         cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
         cmd.extend([fmt, audio, inp1])
 
-        if fmt == "moflex3d":
+        if fmt in ("moflex3d", "3ds_camera3d"):
             if inp2:
                 cmd.append(inp2)
-            layout = self.enc_layout_var.get().strip()
-            if layout and layout != "4":
-                cmd.extend(["--layout", layout])
+            if fmt == "moflex3d":
+                layout = self.enc_layout_var.get().strip()
+                if layout and layout != "4":
+                    cmd.extend(["--layout", layout])
         if scale:
             cmd.extend(["--scale", scale])
         if outdir:
@@ -656,7 +675,7 @@ class EncodeGUI(tk.Tk):
             cmd.append("--hq")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
             cmd.append("--fast-audio")
-        if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "thp"):
+        if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
                 cmd.extend(["--quantizer", q])
