@@ -34,7 +34,7 @@
 #include "mpegts.h"
 
 #define SERIES1_PES_LENGTH  11    /* length of audio PES hdr on S1 */
-#define SERIES2_PES_LENGTH  16    /* length of audio PES hdr on S2 */
+#define SERIES2_PES_LENGTH  17    /* length of audio PES hdr on S2 */
 #define AC3_PES_LENGTH      14    /* length of audio PES hdr for AC3 */
 #define VIDEO_PES_LENGTH    16    /* length of video PES header */
 #define DTIVO_PTS_OFFSET    6     /* offs into PES for MPEG PTS on DTivo */
@@ -739,6 +739,20 @@ static int demux_video(AVFormatContext *s, TyRecHdr *rec_hdr, AVPacket *pkt)
     const int64_t rec_size = rec_hdr->rec_size;
     int es_offset1, ret;
     int got_packet = 0;
+    int resource_trailer = 0;
+
+    /* Series 1 resource files end with a type 0xb metadata record.  Its
+     * payload contains resource names and table data, but can also contain
+     * byte patterns resembling MPEG picture start codes. */
+    for (int i = 0; i + 4 <= rec_size; i++)
+        if (!memcmp(ty->chunk + ty->cur_chunk_pos + i, ".toc", 4)) {
+            resource_trailer = 1;
+            break;
+        }
+    if (subrec_type == 0x0b && resource_trailer) {
+        ty->cur_chunk_pos += rec_size;
+        return 0;
+    }
 
     if (subrec_type != 0x02 && rec_size > 7) {
 
@@ -832,8 +846,16 @@ static int check_sync_pes(AVFormatContext *s, AVPacket *pkt,
                           int32_t offset, int32_t rec_len)
 {
     TYDemuxContext *ty = s->priv_data;
+    int pes_length = ty->pes_length;
 
-    if (offset < 0 || offset + ty->pes_length > rec_len) {
+    /* MPEG-audio PES header sizes vary between TiVo generations and even
+     * between records.  The header-data-length byte is authoritative; leaving
+     * any of the header in the elementary stream shifts the MP2 sync word. */
+    if (ty->audio_type == TIVO_AUDIO_MPEG &&
+        offset >= 0 && offset + 9 <= rec_len)
+        pes_length = 9 + pkt->data[offset + 8];
+
+    if (offset < 0 || offset + pes_length > rec_len) {
         /* entire PES header not present */
         ff_dlog(s, "PES header at %"PRId32" not complete in record. storing.\n", offset);
         /* save the partial pes header */
@@ -861,9 +883,34 @@ static int check_sync_pes(AVFormatContext *s, AVPacket *pkt,
     if (ty->first_audio_pts == AV_NOPTS_VALUE)
         ty->first_audio_pts = ty->last_audio_pts;
     pkt->pts = ty->last_audio_pts;
-    memmove(pkt->data + offset, pkt->data + offset + ty->pes_length, rec_len - ty->pes_length);
-    pkt->size -= ty->pes_length;
+    memmove(pkt->data + offset, pkt->data + offset + pes_length, rec_len - pes_length);
+    pkt->size -= pes_length;
     return 0;
+}
+
+static void strip_embedded_mpeg_audio_pes(AVPacket *pkt)
+{
+    int offset = 0;
+
+    while (offset + 9 <= pkt->size) {
+        int pes_length;
+
+        if (memcmp(pkt->data + offset, ty_MPEGAudioPacket, 4)) {
+            offset++;
+            continue;
+        }
+
+        pes_length = 9 + pkt->data[offset + 8];
+        if ((pkt->data[offset + 6] & 0xc0) != 0x80 ||
+            pes_length < 9 || pes_length > pkt->size - offset) {
+            offset++;
+            continue;
+        }
+
+        memmove(pkt->data + offset, pkt->data + offset + pes_length,
+                pkt->size - offset - pes_length);
+        pkt->size -= pes_length;
+    }
 }
 
 static int demux_audio(AVFormatContext *s, TyRecHdr *rec_hdr, AVPacket *pkt)
@@ -1004,6 +1051,9 @@ static int demux_audio(AVFormatContext *s, TyRecHdr *rec_hdr, AVPacket *pkt)
         ty->cur_chunk_pos += rec_size;
         return 0;
     }
+
+    if (ty->audio_type == TIVO_AUDIO_MPEG && pkt->size > 0)
+        strip_embedded_mpeg_audio_pes(pkt);
 
     return 1;
 }
