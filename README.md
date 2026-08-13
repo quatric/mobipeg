@@ -26,12 +26,15 @@ such as audio, video, subtitles and related metadata.
 | GBA Video (CaimansPro) | `.gba` | Game Boy Advance | — | ✅ |
 | GBA Video (VX++) | `.gba` | Game Boy Advance (ActImagine) | — | ✅ |
 | HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
+| Nintendo Channel | `.3gp` | Wii | ✅ | ✅ |
+| Nintendo 3DS Camera (2D) | `.avi` | Nintendo 3DS | ✅ | ✅ |
 | MO | `.mo` | Nintendo Wii | ✅ | ✅ |
 | MODS | `.mods` | Nintendo DS | ✅ | ✅ |
 | MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
 | MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
 | RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
 | THP | `.thp` | GameCube / Wii | ✅ | ✅ |
+| Wii Photo Channel | `.avi` | Wii | ✅ | ✅ |
 | TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
 | VX | `.vx` | Nintendo DS | ✅ | ✅ |
 
@@ -46,6 +49,8 @@ such as audio, video, subtitles and related metadata.
 | BRSTM | `.brstm` | Nintendo Wii | ✅ | ✅ |
 | BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
 | DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
+| Wii Photo Channel AAC | `.m4a` | Wii | ✅ | ✅ |
+| Nintendo 3DS Sound AAC | `.m4a` | Nintendo 3DS | ✅ | ✅ |
 
 The DSP-ADPCM encoder derives its predictor coefficients over the whole
 stream, the same autocorrelation and Levinson refinement Nintendo's own
@@ -59,8 +64,8 @@ BNS files are usually LZ10-compressed, wrapped in an IMD5 header, or both.
 Decoding unwraps whichever combination it finds; `-compress 1` writes the
 compressed form.
 
-Decode-only inputs (the GBA Video cartridge families and both Flipnote
-formats) can be transcoded into any of the encodable formats above, or
+Decode-only inputs (the FVMV, Caimans, and VX++ GBA Video cartridge families
+and both Flipnote formats) can be transcoded into any of the encodable formats above, or
 previewed with `encode.py decode <file>`. Series-3 TiVo
 TyStreams (and MFS VideoClip resources) are handled through an internal
 port of the `s3tots` tool, which losslessly rewraps them to MPEG-2 TS
@@ -91,6 +96,17 @@ codebook, which is built by k-means over every block in a chunk.
 ```sh
 ffmpeg -i input.mp4 -s 240x160 -pix_fmt rgb24 -c:v ads_gba movie.mmstr
 ```
+
+The bundled front ends expose both compressor generations directly:
+
+```sh
+python3 encode.py gba_ads none input.mp4       # LZMA / Dragon Ball GT lineage
+python3 encode.py gba_hydrogen none input.mp4  # Inflate / Hydrogen lineage
+```
+
+They also appear as separate GBA Video choices in the GUI. Both outputs are
+`.mmstr` resources for insertion into a compatible cartridge image; they are
+not bootable `.gba` ROMs.
 
 `-chunk_frames` sets how many frames share one codebook, trading size against
 sharpness — 30 frames of `testsrc2` span 37.9 KB at `1` and 10.9 KB at `32`,
@@ -129,6 +145,46 @@ blob rather than needing to be told.
 One caveat: this writes `.mmstr` resource files, not cartridges — nothing here
 rebuilds a ROM. Audio is decode-only, since the cart's ADPCM has no encoder
 yet.
+
+### Wii Photo Channel and Nintendo Channel
+
+`wii_photo` writes an ordinary Motion-JPEG AVI for the Wii Photo Channel. It
+defaults to 640x480 (the Channel accepts up to 848x480), with 32 kHz PCM audio
+when audio is selected. Nintendo only guarantees the video component, so use
+`none` if playback of an AVI's sound track is unreliable on a particular Wii.
+
+```sh
+python3 encode.py wii_photo pcm input.mp4
+```
+
+`wii_photo_m4a` writes AAC-LC M4A for Photo Channel 1.1. `3ds_sound` writes
+the same broadly compatible 44.1 kHz / 128 kb/s stereo AAC-LC profile; it is
+within Nintendo 3DS Sound's 16-320 kb/s and 32-48 kHz limits.
+
+```sh
+python3 encode.py wii_photo_m4a aac input.wav
+python3 encode.py 3ds_sound aac input.wav
+```
+
+`nintendo_channel` reproduces the delivery profile found in the UK Nintendo
+Channel 2009 archive: `3gp6`, H.264 constrained-baseline level 2.1 at 378x284
+and 25 fps, and stereo AAC-LC at 32 kHz. It requires the same `--enable-libx264`
+build configuration as MobiClip video encoding.
+
+```sh
+python3 encode.py nintendo_channel aac input.mp4
+```
+
+`3ds_camera` writes a 2D-compatible Camera AVI: 480x240, 20 fps, Motion JPEG,
+and 16 kHz mono IMA ADPCM. `3ds_camera3d` takes left and right input files and
+writes the Camera's native two-track stereoscopic MJPEG layout (left eye first).
+Copy either file to a DCIM camera folder and name it in the Camera's
+`HNI_####.AVI` style.
+
+```sh
+python3 encode.py 3ds_camera adpcm input.mp4
+python3 encode.py 3ds_camera3d adpcm left.mp4 right.mp4
+```
 
 ### Splitting stereoscopic MOFLEX video
 
