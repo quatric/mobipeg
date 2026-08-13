@@ -18,7 +18,7 @@ jobs:
   generate-patches:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -43,7 +43,7 @@ jobs:
           diff -urN --exclude=.git x264-master x264-src > x264.patch || test $? -eq 1
           echo "x264.patch: $(wc -l < x264.patch) lines"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: patches
           path: |
@@ -87,7 +87,7 @@ jobs:
 
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache nasm
         id: cache-nasm
@@ -343,7 +343,7 @@ jobs:
           [ -f ffplay ] && FILES="$FILES ffplay"
           tar -czf "../../mobipeg-${{ matrix.target }}.tar.gz" $FILES
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: mobipeg-${{ matrix.target }}
           path: mobipeg-${{ matrix.target }}.tar.gz
@@ -378,7 +378,7 @@ jobs:
             asm_flag: --disable-asm
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache nasm
         id: cache-nasm
@@ -630,7 +630,7 @@ jobs:
           [ -f "$DEPS/bin/SDL2.dll" ] && cp "$DEPS/bin/SDL2.dll" . && FILES="$FILES SDL2.dll"
           zip "../../mobipeg-${{ matrix.target }}.zip" $FILES
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: mobipeg-${{ matrix.target }}
           path: mobipeg-${{ matrix.target }}.zip
@@ -643,7 +643,7 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -799,7 +799,7 @@ jobs:
           [ -f ffplay ] && FILES="$FILES ffplay"
           tar -czf "../../mobipeg-macos-universal.tar.gz" $FILES
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: mobipeg-macos-universal
           path: mobipeg-macos-universal.tar.gz
@@ -857,7 +857,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up QEMU (cross-arch Linux builds)
         if: matrix.docker_platform != ''
@@ -871,7 +871,7 @@ jobs:
           architecture: ${{ matrix.python_arch }}
 
       - name: Download FFmpeg artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: mobipeg-${{ matrix.target }}
           path: artifact
@@ -958,7 +958,7 @@ jobs:
           fi
 
       - name: Upload GUI App
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mobipeg-gui-${{ matrix.target }}
           path: mobipeg-gui-${{ matrix.target }}.*
