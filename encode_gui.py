@@ -84,7 +84,7 @@ class CollapsibleSection(ttk.Frame):
 class EncodeGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("mobipeg v1.3")
+        self.title("mobipeg v2.0")
         self.geometry("750x650")
         self.minsize(650, 500)
         self.configure(padx=15, pady=15)
@@ -103,9 +103,12 @@ class EncodeGUI(tk.Tk):
             pass
         
         style = ttk.Style(self)
-        if "aqua" in style.theme_names():
-            style.theme_use("aqua")
-        elif "clam" in style.theme_names():
+        # Tk's native Aqua ttk theme can fail to paint Entry and Combobox
+        # widgets when a frozen application runs in macOS dark mode.  Those
+        # widgets still exist (and accept input), but look like empty space.
+        # ``clam`` is bundled with Tk and paints consistently on macOS as well
+        # as on the other packaged platforms.
+        if "clam" in style.theme_names():
             style.theme_use("clam")
             
         self.notebook = ttk.Notebook(self)
