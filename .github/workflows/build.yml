@@ -588,11 +588,15 @@ jobs:
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
           export PKG_CONFIG_PATH="${DEPS}/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="${DEPS}/lib/pkgconfig"
+          # llvm-mingw ships a target pkg-config that precedes /usr/local/bin
+          # in PATH and does not search our $DEPS prefix.  Use the shim by
+          # absolute path so all Windows targets query their built libraries.
           ./configure \
             --prefix="${PWD}/dist" \
             --arch=${{ matrix.ffarch }} \
             --target-os=mingw32 \
             --cross-prefix=${{ matrix.cross_prefix }}- \
+            --pkg-config="/usr/local/bin/${{ matrix.cross_prefix }}-pkg-config" \
             ${{ matrix.asm_flag }} \
             --enable-gpl \
             --enable-libx264 \
