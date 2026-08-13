@@ -56,4 +56,11 @@ int ff_majesco_inflate(const uint8_t *src, int src_size,
 /* First 4 bytes of a Majesco-compressed blob: little-endian output size. */
 uint32_t ff_majesco_get_output_size(const uint8_t *src, int src_size);
 
+/* Compresses src into a freshly allocated blob that ff_majesco_inflate() reads
+ * back byte for byte, picking whichever of stored, fixed and dynamic Huffman
+ * comes out smallest. On success *dst is the caller's to free and the return
+ * value is *dst_size; on failure nothing is allocated. */
+int ff_majesco_deflate(const uint8_t *src, int src_size,
+                       uint8_t **dst, int *dst_size);
+
 #endif /* AVCODEC_MAJESCO_H */
