@@ -30,15 +30,18 @@ jobs:
           git diff --no-color "$base" HEAD > mobipeg.patch
           echo "mobipeg.patch: $(wc -l < mobipeg.patch) lines"
 
-      - name: Clone x264 fork and diff against upstream x264
+      - name: Download upstream x264 and diff the MobiClip fork
         run: |
           git clone https://github.com/quatric/x264.git x264-src
-          cd x264-src
-          git remote add upstream https://code.videolan.org/videolan/x264.git
-          git fetch upstream master --quiet
-          base=$(git merge-base HEAD upstream/master)
-          git diff --no-color "$base" HEAD > ../x264.patch
-          echo "x264.patch: $(wc -l < ../x264.patch) lines"
+          curl --fail --location --retry 3 --retry-all-errors \
+            'https://code.videolan.org/videolan/x264/-/archive/master/x264-master.zip?ref_type=heads' \
+            --output x264-upstream.zip
+          unzip -q x264-upstream.zip
+          # The archive sidesteps VideoLAN's Anubis protection, which blocks
+          # unauthenticated HTTPS Git fetches in CI. This artifact is for
+          # review/applying elsewhere, so a source-tree diff is sufficient.
+          diff -urN --exclude=.git x264-master x264-src > x264.patch || test $? -eq 1
+          echo "x264.patch: $(wc -l < x264.patch) lines"
 
       - uses: actions/upload-artifact@v4
         with:
