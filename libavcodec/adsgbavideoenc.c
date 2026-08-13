@@ -51,6 +51,12 @@
  * twofold on its way back to RGB and covers blk_w pixels of a row, so its
  * squared error counts for 4 * blk_w * (blk_h / chroma_rows) times a luma
  * sample's.
+ *
+ * Both blobs in a chunk (codebook, index plane) go through whichever
+ * compressor -compression selects: LZMA (the ADS-era / Dragon Ball GT
+ * lineage, and the default here) or Inflate (the Hydrogen-era cartridges).
+ * Either way the blob keeps the format's 8-byte
+ * [uint32 uncompressed_size][uint32 params] prefix.
  */
 
 #include "libavutil/avassert.h"
@@ -61,6 +67,7 @@
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "encode.h"
+#include "adslzma.h"
 #include "majesco.h"
 
 #define FRAME_W    240
@@ -79,6 +86,7 @@ typedef struct ADSEncContext {
     int mode;
     int chunk_frames;
     int kmeans_iters;
+    int compression;            /* 0 = LZMA (ADS-era), 1 = Inflate (Hydrogen) */
 
     int blk_w, blk_h, chroma_rows;
     int grid_w, grid_h;
@@ -425,14 +433,21 @@ static void serialise_codebook(ADSEncContext *s, uint8_t *dst)
  * Compress a blob and pad it out to a whole number of words, because the chunk
  * header states both sizes in words. Trailing padding is invisible to the
  * decompressor, which stops on the uncompressed size in the blob's own prefix.
+ *
+ * Which compressor to use is the same choice the demuxer's -compression
+ * option gives a reader: 0 for the LZMA that the Dragon Ball GT / ADS-era
+ * lineage runs, 1 for the DEFLATE-shaped Inflate the Hydrogen-era carts
+ * (Dora the Explorer) use instead. Both write the same 8-byte
+ * [uint32 uncompressed_size][uint32 params] prefix.
  */
-static int compress_padded(const uint8_t *src, int src_size,
+static int compress_padded(ADSEncContext *s, const uint8_t *src, int src_size,
                            uint8_t **dst, int *dst_size)
 {
     uint8_t *buf;
     int size, ret;
 
-    ret = ff_majesco_deflate(src, src_size, &buf, &size);
+    ret = s->compression ? ff_majesco_deflate(src, src_size, &buf, &size)
+                         : ff_ads_lzma_encode_blob(src, src_size, &buf, &size);
     if (ret < 0)
         return ret;
 
@@ -473,12 +488,12 @@ static int flush_chunk(AVCodecContext *avctx, AVPacket *pkt, int *got_packet)
         return AVERROR(ENOMEM);
     serialise_codebook(s, raw);
 
-    ret = compress_padded(raw, cbook_size, &blob_a, &size_a);
+    ret = compress_padded(s, raw, cbook_size, &blob_a, &size_a);
     av_freep(&raw);
     if (ret < 0)
         return ret;
 
-    ret = compress_padded(s->index, s->nb_vec, &blob_b, &size_b);
+    ret = compress_padded(s, s->index, s->nb_vec, &blob_b, &size_b);
     if (ret < 0) {
         av_freep(&blob_a);
         return ret;
@@ -556,6 +571,8 @@ static const AVOption ads_options[] = {
       OFFSET(chunk_frames), AV_OPT_TYPE_INT, { .i64 = 8 }, 1, 1100, VE },
     { "kmeans_iters", "codebook refinement passes",
       OFFSET(kmeans_iters), AV_OPT_TYPE_INT, { .i64 = 6 }, 1, 64, VE },
+    { "compression", "blob compressor: 0 LZMA (ADS-era), 1 Inflate (Hydrogen)",
+      OFFSET(compression), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, VE },
     { NULL },
 };
 
