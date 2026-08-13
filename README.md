@@ -27,7 +27,7 @@ such as audio, video, subtitles and related metadata.
 | BPK1 | `.bpk`, `.bpk1`, `.apd` | Nintendo 3DS Swapdoodle / Swapnote | ✅ | ✅ |
 | TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
-| GBA Video (ADS) | `.mmstr` / `.gba` | Game Boy Advance (Majesco) | — | ✅ |
+| GBA Video (ADS) | `.mmstr` / `.gba` | Game Boy Advance (Majesco) | ✅ `.mmstr` | ✅ |
 | GBA Video (VX++) | `.gba` | Game Boy Advance (ActImagine) | — | ✅ |
 | GBA Video (Caimans 2.2) | `.gba` | Game Boy Advance | — | ✅ |
 | GBA Video (CaimansPro) | `.gba` | Game Boy Advance | — | ✅ |
@@ -59,8 +59,9 @@ BNS files are usually LZ10-compressed, wrapped in an IMD5 header, or both.
 Decoding unwraps whichever combination it finds; `-compress 1` writes the
 compressed form.
 
-Decode-only inputs (HVQM4) can be transcoded into any of the encodable
-formats above, or previewed with `encode.py decode <file>`. Series-3 TiVo
+Decode-only inputs (the GBA Video cartridge families and both Flipnote
+formats) can be transcoded into any of the encodable formats above, or
+previewed with `encode.py decode <file>`. Series-3 TiVo
 TyStreams (and MFS VideoClip resources) are handled through an internal
 port of the `s3tots` tool, which losslessly rewraps them to MPEG-2 TS
 before FFmpeg reads them.
@@ -79,6 +80,46 @@ directly against the bundled decoder rather than any original Hudson Soft
 encoder. Half-pixel search, predictive AOT residuals, and B-pictures are not
 implemented yet. Set FFmpeg's `-g` option to control the I-picture interval
 (`-g 1` produces an all-intra stream).
+
+### Encoding ADS-era GBA Video
+
+The `ads_gba` encoder and `mmstr` muxer write the in-house codec Majesco used
+before the GCC-era carts moved to ActImagine VX. Frames are all-intra and carry
+no prediction at all: a frame is nothing but 8-bit indices into a 256-entry
+codebook, which is built by k-means over every block in a chunk.
+
+```sh
+ffmpeg -i input.mp4 -s 240x160 -pix_fmt rgb24 -c:v ads_gba movie.mmstr
+```
+
+`-chunk_frames` sets how many frames share one codebook, trading size against
+sharpness — 30 frames of `testsrc2` span 37.9 KB at `1` and 10.9 KB at `32`,
+for about 31 dB either way, because what actually compresses here is
+consecutive frames reusing the same entries. `-mode` picks the block geometry:
+the even modes keep one chroma sample for a whole block, the odd ones one per
+block row. Mode 5 is refused rather than encoded, because it declares two
+chroma samples for a three-row block and the decoder reads the third off the
+end of the entry into its neighbour — a ROM quirk the decoder reproduces
+faithfully and that nothing can sensibly target. Modes 2, 3 and 4 have
+three-pixel-tall blocks, so they need a height divisible by three and cannot
+cover the GBA's 160 lines.
+
+Blobs are written with the Hydrogen-era compressor (`majescoenc.c`), the exact
+inverse of the bundled decompressor: DEFLATE-shaped, but bits run most
+significant first out of little-endian halfwords, a block header is a bare
+2-bit type with no BFINAL, and the uncompressed size in each blob's prefix is
+the only thing that ends the stream. Stored, fixed-Huffman and dynamic-Huffman
+encodings are all built and the cheapest kept, which bounds the incompressible
+case.
+
+Two caveats. This writes `.mmstr` resource files, not cartridges — nothing here
+rebuilds a ROM. And the Hydrogen compressor has never been found in a retail
+ADS cart: Dragon Ball GT, the reference ADS title, decompresses with stock
+LZMA, and the patent-scheme decoder it inverts is an unverified port (see the
+header of `libavcodec/majesco.h`). So the output round-trips through this
+tree's own decoder but has not been checked against hardware. Reading a bare
+`.mmstr` infers the compressor from the first blob; `-compression 0|1` overrides
+it. Audio is decode-only, since the cart's ADPCM has no encoder yet.
 
 ### Splitting stereoscopic MOFLEX video
 
