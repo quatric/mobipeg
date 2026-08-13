@@ -228,7 +228,7 @@ static av_cold int bpk_read_close(AVFormatContext *s)
 const FFInputFormat ff_bpk_demuxer = {
     .p.name         = "bpk",
     .p.long_name    = NULL_IF_CONFIG_SMALL("Swapdoodle BPK1"),
-    .p.extensions   = "bpk,bpk1",
+    .p.extensions   = "bpk,bpk1,apd",
     .priv_data_size  = sizeof(BPKDemuxContext),
     .read_probe      = bpk_probe,
     .read_header     = bpk_read_header,
