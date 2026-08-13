@@ -91,7 +91,7 @@ jobs:
 
       - name: Cache nasm
         id: cache-nasm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /usr/local/bin/nasm
           key: nasm-${{ env.NASM_VERSION }}
@@ -168,7 +168,7 @@ jobs:
 
       - name: Cache dependencies
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # The x264 build now includes its architecture-specific assembly.
@@ -388,7 +388,7 @@ jobs:
 
       - name: Cache nasm
         id: cache-nasm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /usr/local/bin/nasm
           key: nasm-${{ env.NASM_VERSION }}
@@ -436,7 +436,7 @@ jobs:
 
       - name: Cache dependencies for ${{ matrix.target }}
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # Match the Linux cache marker: these artifacts need an x264 build
@@ -674,7 +674,7 @@ jobs:
 
       - name: Cache dependencies
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/deps
           key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}
