@@ -20,6 +20,7 @@ DECODER_FAMILIES = [
     ("HVQM4", "*.h4m"),
     ("FastVideoDS", "*.fv"),
     ("TiVo TyStream", "*.ty *.ty+ *.tmf"),
+    ("Swapdoodle / Swapnote", "*.bpk *.bpk1 *.apd"),
     ("Flipnote", "*.ppm *.kwz"),
     ("DS DPG video", "*.dpg"),
     ("Nintendo DSP-ADPCM", "*.dsp"),
