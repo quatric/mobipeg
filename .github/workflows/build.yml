@@ -593,6 +593,7 @@ jobs:
             --enable-gpl \
             --enable-libx264 \
             --enable-libvorbis \
+            --enable-libopus \
             --enable-libmp3lame \
             --enable-libspeex \
             --enable-libtheora \
