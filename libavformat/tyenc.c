@@ -160,6 +160,7 @@ static uint64_t ty_compute_ts(TYMuxContext *ty, int64_t pts)
 static int ty_build_pes(int stream_id, int stuffing, int64_t pts, uint8_t *out)
 {
     int p = 4;
+    const int header_data_length = 5 + stuffing;
 
     if (pts == AV_NOPTS_VALUE)
         pts = 0;
@@ -171,7 +172,11 @@ static int ty_build_pes(int stream_id, int stuffing, int64_t pts, uint8_t *out)
     p += 2;
     out[p++] = 0x80; /* mpeg2 marker */
     out[p++] = 0x80; /* pes_flags: PTS present, no DTS */
-    out[p++] = 5;    /* pes_header_data_length: PTS only */
+    /* The MPEG-audio form has two stuffing bytes after its PTS. They are
+     * part of PES_header_data_length; otherwise a standards-compliant reader
+     * strips only 14 of the 16 bytes and leaves 0xffff before every MP2 sync
+     * word. AC-3 uses no stuffing and remains a 14-byte header. */
+    out[p++] = header_data_length;
 
     ty_put_pts(out + p, 0x02, pts);
     p += 5;
