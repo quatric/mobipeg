@@ -48,4 +48,33 @@ int ff_ads_lzma_decode_raw(const uint8_t *src, int src_size,
 int ff_ads_lzma_decode_blob(const uint8_t *src, int src_size,
                             uint8_t **dst, int *dst_size);
 
+/**
+ * Encode a raw LZMA stream with this format's fixed properties (lc = 0,
+ * lp = 0, pb = 2, no end marker) - the exact inverse of
+ * ff_ads_lzma_decode_raw().
+ *
+ * @param src      input
+ * @param src_size bytes in @p src
+ * @param dst      output buffer, at least @p dst_size bytes
+ * @param dst_size capacity of @p dst
+ * @return number of bytes written, or a negative AVERROR (AVERROR_BUG if
+ *         @p dst_size was not enough - see ff_ads_lzma_encode_blob(), which
+ *         sizes its own buffer generously and does not hit this)
+ */
+int ff_ads_lzma_encode_raw(const uint8_t *src, int src_size,
+                           uint8_t *dst, int dst_size);
+
+/**
+ * Encode a blob carrying this format's 8-byte
+ * [uint32 uncompressed_size][uint32 params] prefix, the counterpart of
+ * ff_ads_lzma_decode_blob().
+ *
+ * On success *dst points at a freshly allocated buffer the caller must free
+ * with av_free(), and *dst_size holds its length.
+ *
+ * @return *dst_size, or a negative AVERROR
+ */
+int ff_ads_lzma_encode_blob(const uint8_t *src, int src_size,
+                            uint8_t **dst, int *dst_size);
+
 #endif /* AVCODEC_ADSLZMA_H */
