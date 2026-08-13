@@ -103,50 +103,10 @@ class EncodeGUI(tk.Tk):
             pass
         
         style = ttk.Style(self)
-        # Tk's native Aqua ttk theme can fail to paint Entry and Combobox
-        # widgets when a frozen application runs in macOS dark mode. Those
-        # widgets still exist (and accept input), but look like empty space.
-        # Use Tk's portable theme, then give it the same dark appearance as the
-        # rest of the app.  This retains the readable, full-size controls from
-        # the Aqua UI without relying on Aqua's broken dark-mode rendering.
-        if "clam" in style.theme_names():
+        if "aqua" in style.theme_names():
+            style.theme_use("aqua")
+        elif "clam" in style.theme_names():
             style.theme_use("clam")
-            dark_bg = "#242424"
-            field_bg = "#3b393d"
-            control_bg = "#5d5963"
-            active_bg = "#706b76"
-            text_fg = "#f0f0f0"
-            muted_fg = "#b8b5bc"
-            style.configure(".", background=dark_bg, foreground=text_fg)
-            style.configure("TFrame", background=dark_bg)
-            style.configure("TLabel", background=dark_bg, foreground=text_fg)
-            style.configure("TEntry", fieldbackground=field_bg, foreground=text_fg,
-                            insertcolor=text_fg, bordercolor="#4a474d",
-                            lightcolor="#4a474d", darkcolor="#1a1a1a")
-            style.map("TEntry", fieldbackground=[("disabled", "#303030"),
-                                                  ("focus", "#454149")])
-            style.configure("TCombobox", fieldbackground=field_bg,
-                            background=control_bg, foreground=text_fg,
-                            arrowcolor=text_fg, bordercolor="#4a474d",
-                            lightcolor="#4a474d", darkcolor="#1a1a1a")
-            style.map("TCombobox", fieldbackground=[("readonly", field_bg),
-                                                     ("focus", "#454149")],
-                      foreground=[("readonly", text_fg)],
-                      background=[("active", active_bg)])
-            style.configure("TButton", background=control_bg, foreground=text_fg,
-                            bordercolor="#77717d", lightcolor="#77717d",
-                            darkcolor="#29262c")
-            style.map("TButton", background=[("active", active_bg),
-                                               ("pressed", "#48444d")])
-            style.configure("TCheckbutton", background=dark_bg, foreground=text_fg,
-                            indicatorbackground=control_bg)
-            style.map("TCheckbutton", background=[("active", dark_bg)],
-                      indicatorbackground=[("selected", "#79737f")])
-            style.configure("TNotebook", background=dark_bg, bordercolor="#55515a")
-            style.configure("TNotebook.Tab", background="#353238", foreground=text_fg,
-                            padding=(10, 4))
-            style.map("TNotebook.Tab", background=[("selected", control_bg),
-                                                     ("active", active_bg)])
             
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -174,11 +134,7 @@ class EncodeGUI(tk.Tk):
         self.console.config(yscrollcommand=scrollbar.set)
         
     def setup_encode_tab(self):
-        # Some Tcl/Tk builds bundled by PyInstaller collapse an otherwise
-        # weighted ttk grid column to the width of its arrow/button element.
-        # Give the editable column a real floor so inputs retain their normal
-        # full-width form at the default 750px window size.
-        self.encode_frame.columnconfigure(1, weight=1, minsize=320)
+        self.encode_frame.columnconfigure(1, weight=1)
         
         # Row 0: Format
         ttk.Label(self.encode_frame, text="Format:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
@@ -411,16 +367,16 @@ class EncodeGUI(tk.Tk):
         # Extra ffmpeg parameters. Always visible: it's the escape hatch for
         # every option this tab doesn't have a widget for, and it goes on the
         # ffmpeg command line last, so it overrides the format preset.
-        ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(row=19, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(row=20, column=0, sticky="e", padx=5, pady=5)
         self.enc_ffargs_var = tk.StringVar(value="")
-        ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(row=19, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(row=20, column=1, sticky="ew", padx=5, pady=5)
         ttk.Label(self.encode_frame, foreground="grey",
                   text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)"
-                  ).grid(row=19, column=2, sticky="w", padx=5)
+                  ).grid(row=21, column=1, columnspan=2, sticky="w", padx=5)
 
         # Run Button
         self.enc_run_btn = ttk.Button(self.encode_frame, text="▶ Run Encoding", command=self.run_encoding)
-        self.enc_run_btn.grid(row=20, column=1, pady=15)
+        self.enc_run_btn.grid(row=22, column=1, pady=15)
 
         # Widgets that only appear for certain formats, keyed by the formats
         # that should show them. Hiding uses grid_remove() (not state=disabled)
@@ -479,7 +435,7 @@ class EncodeGUI(tk.Tk):
             self.enc_hq_var.set(False)
 
     def setup_decode_tab(self):
-        self.decode_frame.columnconfigure(1, weight=1, minsize=320)
+        self.decode_frame.columnconfigure(1, weight=1)
         
         # Input File. The supported extensions used to sit in the label, which
         # made one very wide line; they live in the file dialog's type filter
