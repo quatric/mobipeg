@@ -104,12 +104,48 @@ class EncodeGUI(tk.Tk):
         
         style = ttk.Style(self)
         # Tk's native Aqua ttk theme can fail to paint Entry and Combobox
-        # widgets when a frozen application runs in macOS dark mode.  Those
+        # widgets when a frozen application runs in macOS dark mode. Those
         # widgets still exist (and accept input), but look like empty space.
-        # ``clam`` is bundled with Tk and paints consistently on macOS as well
-        # as on the other packaged platforms.
+        # Use Tk's portable theme, then give it the same dark appearance as the
+        # rest of the app.  This retains the readable, full-size controls from
+        # the Aqua UI without relying on Aqua's broken dark-mode rendering.
         if "clam" in style.theme_names():
             style.theme_use("clam")
+            dark_bg = "#242424"
+            field_bg = "#3b393d"
+            control_bg = "#5d5963"
+            active_bg = "#706b76"
+            text_fg = "#f0f0f0"
+            muted_fg = "#b8b5bc"
+            style.configure(".", background=dark_bg, foreground=text_fg)
+            style.configure("TFrame", background=dark_bg)
+            style.configure("TLabel", background=dark_bg, foreground=text_fg)
+            style.configure("TEntry", fieldbackground=field_bg, foreground=text_fg,
+                            insertcolor=text_fg, bordercolor="#4a474d",
+                            lightcolor="#4a474d", darkcolor="#1a1a1a")
+            style.map("TEntry", fieldbackground=[("disabled", "#303030"),
+                                                  ("focus", "#454149")])
+            style.configure("TCombobox", fieldbackground=field_bg,
+                            background=control_bg, foreground=text_fg,
+                            arrowcolor=text_fg, bordercolor="#4a474d",
+                            lightcolor="#4a474d", darkcolor="#1a1a1a")
+            style.map("TCombobox", fieldbackground=[("readonly", field_bg),
+                                                     ("focus", "#454149")],
+                      background=[("active", active_bg)])
+            style.configure("TButton", background=control_bg, foreground=text_fg,
+                            bordercolor="#77717d", lightcolor="#77717d",
+                            darkcolor="#29262c")
+            style.map("TButton", background=[("active", active_bg),
+                                               ("pressed", "#48444d")])
+            style.configure("TCheckbutton", background=dark_bg, foreground=text_fg,
+                            indicatorbackground=control_bg)
+            style.map("TCheckbutton", background=[("active", dark_bg)],
+                      indicatorbackground=[("selected", "#79737f")])
+            style.configure("TNotebook", background=dark_bg, bordercolor="#55515a")
+            style.configure("TNotebook.Tab", background="#353238", foreground=text_fg,
+                            padding=(10, 4))
+            style.map("TNotebook.Tab", background=[("selected", control_bg),
+                                                     ("active", active_bg)])
             
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
