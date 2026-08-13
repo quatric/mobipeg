@@ -145,6 +145,7 @@ class EncodeGUI(tk.Tk):
             "3DS Mobiclip .moflex (3D)": "moflex3d",
             "DS Mobiclip .mods": "mods",
             "DS ActImagine .vx": "vx",
+            "TiVo TY Stream .ty": "ty",
             "GBA Video ADS/LZMA .mmstr": "gba_ads",
             "GBA Video Hydrogen/Inflate .mmstr": "gba_hydrogen",
             "Wii Photo Channel Motion-JPEG .avi": "wii_photo",
@@ -177,6 +178,7 @@ class EncodeGUI(tk.Tk):
             "moflex3d": ["adpcm", "fastaudio", "pcm", "none"],
             "mods":     ["adpcm", "fastaudio", "pcm", "codebook", "none"],
             "vx":       ["codebook", "none"],
+            "ty":       ["mp2", "ac3", "none"],
             "gba_ads":  ["none"],
             "gba_hydrogen": ["none"],
             "wii_photo": ["pcm", "none"],
@@ -385,13 +387,13 @@ class EncodeGUI(tk.Tk):
             ({"moflex3d", "3ds_camera3d"}, (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn)),
             ({"moflex3d"}, (self.enc_layout_label, self.enc_layout_entry)),
             ({"mo", "moflex", "moflex3d", "vx"}, (self.enc_keyframes_label, self.enc_keyframes_entry)),
-            ({"vx", "mo", "moflex", "moflex3d", "mods", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"}, (self.enc_quant_label, self.enc_quant_entry)),
-            ({"vx", "mods", "thp", "rvid", "dpg", "wii_photo", "3ds_camera"} | AUDIO_ONLY_FORMATS,
+            ({"vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"}, (self.enc_quant_label, self.enc_quant_entry)),
+            ({"vx", "mods", "ty", "thp", "rvid", "dpg", "wii_photo", "3ds_camera"} | AUDIO_ONLY_FORMATS,
              (self.enc_arate_label, self.enc_arate_entry)),
             # Scale and FPS describe a video stream, so they go away entirely
             # for the audio-only containers.
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_scale_label, self.enc_scale_entry)),
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_fps_label, self.enc_fps_entry)),
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_scale_label, self.enc_scale_entry)),
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_fps_label, self.enc_fps_entry)),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),
@@ -675,7 +677,7 @@ class EncodeGUI(tk.Tk):
             cmd.append("--hq")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
             cmd.append("--fast-audio")
-        if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"):
+        if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
                 cmd.extend(["--quantizer", q])
@@ -683,7 +685,7 @@ class EncodeGUI(tk.Tk):
             fps = self.enc_fps_var.get().strip()
             if fps:
                 cmd.extend(["--fps", fps])
-        if fmt in ("vx", "mods", "thp", "rvid"):
+        if fmt in ("vx", "mods", "ty", "thp", "rvid"):
             arate = self.enc_audio_rate_var.get().strip()
             if arate and arate != "0":
                 cmd.extend(["--audio-rate", arate])
