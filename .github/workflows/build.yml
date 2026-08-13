@@ -435,7 +435,7 @@ jobs:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # Match the Linux cache marker: these artifacts need an x264 build
           # with platform assembly enabled, not the older scalar-only build.
-          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -514,10 +514,14 @@ jobs:
           cd opus-1.5.2
           [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
           [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
-          ./configure \
+          # Opus 1.5.2 adds _FORTIFY_SOURCE=2 independently of its
+          # --disable-hardening option.  MinGW's CRT has no __memcpy_chk,
+          # so explicitly disable fortify for these static Windows builds.
+          CFLAGS="-O2 -D_FORTIFY_SOURCE=0" ./configure \
             --prefix="$DEPS" \
             --host=${{ matrix.cross_prefix }} \
-            --enable-static --disable-shared --disable-doc --disable-extra-programs --disable-stack-protector
+            --enable-static --disable-shared --disable-doc --disable-extra-programs \
+            --disable-stack-protector --disable-hardening
           make -j$(nproc) && make install
           cd ..
 
