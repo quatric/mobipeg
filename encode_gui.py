@@ -85,8 +85,8 @@ class EncodeGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("mobipeg v2.0")
-        self.geometry("750x650")
-        self.minsize(650, 500)
+        self.geometry("750x900")
+        self.minsize(700, 750)
         self.configure(padx=15, pady=15)
         
         try:
