@@ -6,6 +6,7 @@ import glob
 import argparse
 import math
 import shlex
+import shutil
 import struct
 from fractions import Fraction
 
@@ -226,9 +227,69 @@ def input_fmt(path):
     return []
 
 
+def _decodes_cleanly(path):
+    """Quick sanity probe: can our bundled ffmpeg actually decode this input's
+    video? Some codecs (e.g. AV1, without libdav1d linked in) fail silently --
+    the encode still "succeeds" but writes a 0-frame video track -- so this
+    checks a few real frames decode without error instead of trusting ffprobe,
+    which only reads the container header.
+    """
+    try:
+        p = subprocess.run(
+            [FFENC, "-v", "error", "-nostdin"] + input_fmt(path) +
+            ["-i", path, "-frames:v", "3", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30)
+        return p.returncode == 0 and not p.stderr.strip()
+    except Exception:
+        return True  # don't block the encode on a probe failure
+
+
 def preprocess_input(inp, outdir):
-    """Transcode-source shim for input files (returns input path unchanged)."""
-    return inp
+    """For inputs the bundled ffmpeg can't decode cleanly (e.g. AV1 sources --
+    no libdav1d linked in, and its native AV1 decoder is broken on at least
+    ARM64), use the system ffmpeg *only* to decode+scale the video to a piped
+    y4m stream, then hand that to our OWN bundled ffmpeg to encode into a
+    small intermediate .mp4 -- so the actual encode (and its libx264) is
+    always the tested, known-good one this project ships, never whatever
+    libx264 the system ffmpeg happens to be linked against. Audio is read
+    from the original file directly by the bundled ffmpeg (its native opus/
+    vorbis/etc decoders are unaffected by the AV1 problem).
+
+    Every target format here tops out at 624x352 (.mo, the largest), so the
+    intermediate is capped at 960px wide: ample margin over the final scale
+    with none of the size/time cost of preserving the source's own resolution
+    (a full-res copy of a 4K source can be tens of GB for no quality benefit
+    downstream).
+    """
+    if not os.path.isfile(inp) or _decodes_cleanly(inp):
+        return inp
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if not sys_ffmpeg or os.path.realpath(sys_ffmpeg) == os.path.realpath(FFENC):
+        print(f"warning: {inp} may not decode correctly with the bundled ffmpeg, "
+              "and no separate system ffmpeg was found to fall back to")
+        return inp
+    os.makedirs(outdir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(inp))[0]
+    intermediate = os.path.join(outdir, f".preprocessed_{stem}.mp4")
+    print(f">> {os.path.basename(inp)} doesn't decode cleanly with the bundled "
+          f"ffmpeg (unsupported/broken codec) -- decoding video with system "
+          f"ffmpeg and re-encoding with our own libx264 to {intermediate}")
+    decode_cmd = [sys_ffmpeg, "-nostdin", "-v", "error", "-i", inp,
+                  "-map", "0:v:0", "-vf", "scale='min(960,iw)':-2",
+                  "-f", "yuv4mpegpipe", "-pix_fmt", "yuv420p", "-"]
+    encode_cmd = [FFENC, "-nostdin", "-y",
+                  "-f", "yuv4mpegpipe", "-i", "-"] + input_fmt(inp) + ["-i", inp,
+                  "-map", "0:v:0", "-map", "1:a:0?",
+                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
+                  "-c:a", "pcm_s16le", intermediate]
+    decoder = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE)
+    encoder = subprocess.run(encode_cmd, stdin=decoder.stdout)
+    decoder.stdout.close()
+    decoder.wait()
+    if encoder.returncode != 0 or decoder.returncode != 0:
+        print("warning: pre-transcode failed, using original input")
+        return inp
+    return intermediate
 
 
 def probe_duration(inp):
