@@ -33,3 +33,11 @@ The implementation of Mobiclip support in this software was made possible thanks
 * [Dan203/s3totsGUI](https://github.com/Dan203/s3totsGUI) — GUI front-end for s3tots (reference).
 * [elitak/mfs-utils](https://github.com/elitak/mfs-utils) — `vsplit` and TiVo MFS tooling (reference).
 * `tytompg` / `tyffmpeg` (`hdemux`) by B.C. — TyStream → MPEG program-stream converters and the FFmpeg `ty` demuxer patch this work builds on (reference).
+
+## FastVideoDS (`.fv`)
+
+* **Gericom** — mobipeg's scalar ARM64 FastVideoDS encoder
+  (`libavcodec/fastvideo.c` and the FastVideoDS entry in `encode.py`) is a
+  port of Gericom's AVX2-gated FastVideoDS reference encoder, the same
+  source of ActImagine-format expertise credited above for MobiclipDecoder
+  and the Mobiclip x264 fork.
