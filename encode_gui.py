@@ -126,7 +126,13 @@ class EncodeGUI(tk.Tk):
         console_frame = ttk.Frame(self)
         console_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.console = tk.Text(console_frame, height=10, state="disabled", bg="#1e1e1e", fg="#cccccc", font=("Menlo", 12))
+        # bg is close enough to the window's own dark background that without
+        # a visible border, the whole pane reads as empty dead space rather
+        # than a text widget -- highlightthickness draws a border even though
+        # this is a plain tk.Text (not ttk), which has no built-in themed one.
+        self.console = tk.Text(console_frame, height=10, state="disabled", bg="#1e1e1e", fg="#cccccc",
+                                font=("Menlo", 12), highlightthickness=1, highlightbackground="#3a3a3a",
+                                highlightcolor="#3a3a3a")
         self.console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         scrollbar = ttk.Scrollbar(console_frame, command=self.console.yview)
@@ -372,7 +378,7 @@ class EncodeGUI(tk.Tk):
         ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(row=20, column=0, sticky="e", padx=5, pady=5)
         self.enc_ffargs_var = tk.StringVar(value="")
         ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(row=20, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Label(self.encode_frame, foreground="grey",
+        ttk.Label(self.encode_frame, foreground="grey", wraplength=440,
                   text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)"
                   ).grid(row=21, column=1, columnspan=2, sticky="w", padx=5)
 
@@ -494,12 +500,18 @@ class EncodeGUI(tk.Tk):
         ttk.Label(self.decode_frame, text="Extra FFmpeg parameters:").grid(row=5, column=0, sticky="e", padx=5, pady=5)
         self.dec_ffargs_var = tk.StringVar(value="")
         ttk.Entry(self.decode_frame, textvariable=self.dec_ffargs_var).grid(row=5, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Label(self.decode_frame, foreground="grey",
+        # On its own row, spanning columns 1-2 with a wraplength: an unwrapped
+        # single-line hint here (as a same-row column-2 sibling) forces column
+        # 2 wide enough to fit the whole sentence, which starves column 1 --
+        # the column the actual input fields live in -- down to a few pixels.
+        # This tab has fewer competing rows than Encode's to counteract that
+        # pull, so it showed up here as entries rendering only a few px wide.
+        ttk.Label(self.decode_frame, foreground="grey", wraplength=440,
                   text="passed to ffmpeg verbatim, after the settings above (applies to Play too)"
-                  ).grid(row=5, column=2, sticky="w", padx=5)
+                  ).grid(row=6, column=1, columnspan=2, sticky="w", padx=5)
 
         btns = ttk.Frame(self.decode_frame)
-        btns.grid(row=6, column=1, pady=15, sticky="w")
+        btns.grid(row=7, column=1, pady=15, sticky="w")
         self.dec_play_btn = ttk.Button(btns, text="▶ Play", command=self.run_play)
         self.dec_play_btn.grid(row=0, column=0, padx=(0, 10))
         self.dec_run_btn = ttk.Button(btns, text="▶ Run Decoding", command=self.run_decoding)
