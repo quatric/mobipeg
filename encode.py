@@ -598,6 +598,18 @@ def main():
     if out_directory and mode != "play":
         os.makedirs(out_directory, exist_ok=True)
 
+    def _missing_binary_exit(cmd, e):
+        # A bundled ffmpeg/ffprobe that _find_frozen_binary resolved to a path
+        # which doesn't actually exist at run time -- most commonly Windows
+        # Defender (or another AV) quarantining the packed exe as a false
+        # positive, which is a known issue with PyInstaller+ffmpeg bundles.
+        print(f"error: could not run '{cmd[0]}' ({e}).\n"
+              "This binary is bundled with mobipeg-gui -- if it's missing, your "
+              "antivirus may have quarantined it (a known false positive for "
+              "packaged ffmpeg builds). Check your AV's quarantine/history, "
+              "restore it, and add an exclusion for the mobipeg-gui folder.")
+        sys.exit(2)
+
     def run_cmd(cmd, check=True, hide_err=False):
         try:
             subprocess.run(cmd, check=check)
@@ -605,12 +617,17 @@ def main():
             if not hide_err:
                 print(f"Command failed: {e}")
             return False
+        except FileNotFoundError as e:
+            _missing_binary_exit(cmd, e)
         return True
 
     def run_ffenc_fallback(cmd1, cmd2):
-        if subprocess.run(cmd1).returncode != 0:
-            if subprocess.run(cmd2).returncode != 0:
-                sys.exit(1)
+        try:
+            if subprocess.run(cmd1).returncode != 0:
+                if subprocess.run(cmd2).returncode != 0:
+                    sys.exit(1)
+        except FileNotFoundError as e:
+            _missing_binary_exit(cmd1, e)
 
     if mode == "play":
         # Play back a source file directly, with no intermediate file: our own
