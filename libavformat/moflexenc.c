@@ -12,9 +12,10 @@
  *     terminator and is zero-padded out to the block_size boundary.
  *
  *   - Each block begins (after an optional 4C32 sync header) with one flags
- *     byte = (counter<<2)|1.  bit0=1 (VariablePacketSize), bit1=0.  The 6-bit
- *     counter increments only on blocks that carry a sync header; intervening
- *     blocks reuse the same flags byte.
+ *     byte = counter<<2.  bit0=0 (fixed-size blocks, as retail uses), bit1=0.
+ *     The 6-bit counter increments only on blocks that carry a sync header;
+ *     intervening blocks reuse the same flags byte.  The official player
+ *     checks this counter for continuity and stops at the first break.
  *
  *   - A 4C32 sync header (magic + checksum + LE-unused / BE ts(µs) + blocksize,
  *     followed by the full descriptor list) is written at a block start about
@@ -26,7 +27,7 @@
  *
  *   - The seek table is stream_index 2 (type=4 data descriptor) and lives at
  *     the FRONT of the file, with one 24-byte entry per sync point (~1/sec):
- *       16-byte header: LE32 n, LE32 total_frames, LE32 dur_us, LE32 0
+ *       16-byte header: LE32 n, LE32 total_frames, LE64 dur_us
  *       entry: LE64 frame_index, LE64 ts_us, LE64 file_offset(of a 4C32 block)
  *
  * Because the front table's entries reference absolute offsets of media sync
@@ -34,6 +35,12 @@
  * to media start).  Once muxing is done the entry count n — and therefore the
  * exact front size — is known, media offsets are biased by the front size, and
  * the header + table + media are written out in order.  No seek-back needed.
+ *
+ * The flags-counter continuity rule and the u64 width of the seek-table
+ * duration field were cross-checked against brainphreak's independent
+ * write-up in clownsec-moflex-encoder (docs/moflex-format.md), which also
+ * confirms our sync checksum: what it describes as a CRC-16 with polynomial
+ * 0x0001 and XOR-out 0xAAAA is exactly the 16-bit word fold below.
  *
  * This file is part of FFmpeg.
  */
@@ -765,8 +772,7 @@ static int moflex_write_trailer(AVFormatContext *s)
     if (!blob) { ret = AVERROR(ENOMEM); goto end; }
     AV_WL32(blob + 0, n);
     AV_WL32(blob + 4, m->total_frames);
-    AV_WL32(blob + 8, (uint32_t)dur_us);
-    AV_WL32(blob + 12, 0);
+    AV_WL64(blob + 8, (uint64_t)dur_us);   /* u64: a LE32 here truncated past ~71 min */
 
     /* Measure front size by emitting the blob to a throwaway buffer. */
     int64_t front_size;
