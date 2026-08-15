@@ -463,6 +463,23 @@ static int mo_read_packet(AVFormatContext *s, AVPacket *pkt)
             return ret;
         }
 
+        /* A single-track file may still use the MULTITRACK ('AM') layout, which
+         * writes a one-entry u32 offset table at the head of every audio
+         * section. The multi-track path above consumes that table, but this
+         * single-track path (num_tracks == 1) never did, so the 4 table bytes
+         * were handed to the audio decoder as payload. For PCM that is a
+         * literal zero sample frame injected once per chunk -- a ~30 Hz click
+         * train heard as constant crackle (Pandora's Tower). */
+        if (mo->num_tracks == 1 && mo->audio_size >= 4) {
+            avio_skip(pb, 4);
+            mo->audio_size -= 4;
+            /* With the table consumed, the audio payload runs to the start of
+             * the next chunk, so the trailing alignment bytes are real samples
+             * too -- retail chunks otherwise came up exactly one sample frame
+             * short (1023/1279 instead of 1024/1280 stereo frames). */
+            mo->audio_size += mo->audio_padding;
+        }
+
         // We now need to read the audio packet within this chunk.
         if (s->streams[1]->codecpar->codec_id == AV_CODEC_ID_VORBIS) {
             /* Vorbis audio section formats:
