@@ -42,6 +42,19 @@
  * confirms our sync checksum: what it describes as a CRC-16 with polynomial
  * 0x0001 and XOR-out 0xAAAA is exactly the 16-bit word fold below.
  *
+ * Verified against a retail Nintendo Video moflex (233-entry seek table,
+ * 168/168 resolvable sync blocks checksum-clean with the fold below):
+ *   - Seek-table entry ts == the sync block's ts exactly; there is no -1.
+ *     The TIMESTAMP BASE IS 1, not 0 (first sync ts=1, its entry frame=0
+ *     ts=1), so elapsed time = ts - 1.  We write base 1 for the front sync
+ *     but raw pts (base 0) for media syncs and entries -- self-consistent
+ *     as retail is, but offset 1us from retail.
+ *   - Retail duration confirmed u64 at blob+8 (216666666us, high word 0).
+ *   - Caution when parsing retail: that file sets flags bit0=1 (variable
+ *     packet size) and its sync blocks are NOT at multiples of the header's
+ *     advertised size, so a fixed-stride walk finds only the first one.
+ *     We write bit0=0 / fixed-size blocks.
+ *
  * This file is part of FFmpeg.
  */
 
