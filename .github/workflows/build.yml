@@ -473,7 +473,9 @@ jobs:
             cp -a "$SDL2_ARCH_DIR/bin/SDL2.dll" "$DEPS/bin/"
             sed -i "s|^prefix=.*|prefix=$DEPS|" "$DEPS/lib/pkgconfig/sdl2.pc"
           else
-            echo "::warning::SDL2 not found for ${{ matrix.cross_prefix }} — ffplay will be omitted"
+            # Upstream SDL2 mingw releases don't ship an aarch64-w64-mingw32 dev
+            # package, so this is expected on windows-arm64, not a build problem.
+            echo "::notice::SDL2 not found for ${{ matrix.cross_prefix }} — ffplay will be omitted"
           fi
 
 
@@ -663,6 +665,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          brew untap aws/tap || true
           brew update
           brew install yasm pkg-config nasm sdl2
 
