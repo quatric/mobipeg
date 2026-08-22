@@ -3,8 +3,12 @@ name: Build FFmpeg
 on:
   push:
     branches: [master, main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 env:
   NASM_VERSION: "2.16.03"
@@ -982,3 +986,50 @@ jobs:
           name: mobipeg-gui-${{ matrix.target }}
           path: mobipeg-gui-${{ matrix.target }}.*
           retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Release — publishes tagged builds so other projects (e.g. the wszst-gui
+  # build in wiimms-szs-tools-plus, which bundles the mobipeg CLI binary for
+  # its passthru media transcoding) have a stable public download instead of
+  # having to pull an ephemeral per-run Action artifact across repos.
+  # ─────────────────────────────────────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-linux, build-windows, build-macos, build-gui]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          path: dist
+      - name: Create source archive
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          git archive --format=tar.gz --prefix="mobipeg-${tag}/" \
+            -o "mobipeg-${tag}-source.tar.gz" HEAD
+      - name: Package each target
+        run: |
+          cd dist
+          for d in */; do
+            [ -d "$d" ] || continue
+            # build-linux/windows/macos already upload pre-packaged
+            # .tar.gz/.zip files directly (not a directory of loose files
+            # like the szs/iso-tools forks) -- just hoist those out, and
+            # only re-tar directories that actually contain loose files.
+            find "$d" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} .. \;
+            remaining=$(find "$d" -mindepth 1 | head -1)
+            if [ -n "$remaining" ]; then
+              tar -czf "../${d%/}.tar.gz" -C "$d" .
+            fi
+          done
+      - name: Create checksums
+        run: |
+          sha256sum *.tar.gz *.zip 2>/dev/null > SHA256SUMS.txt || true
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            *.tar.gz
+            *.zip
+            SHA256SUMS.txt
