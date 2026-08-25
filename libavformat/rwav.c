@@ -307,7 +307,11 @@ static int rwav_read_header(AVFormatContext *s)
                 return AVERROR_INVALIDDATA;
             avio_skip(s->pb, 4);
             ch_data_rel = read32(s);
-            b->ch_data_offsets[ch] = data_offset + 8 + ch_data_rel + 24;
+            /* The reference's offset is relative to the DATA block's
+             * payload, and already accounts for the 24 bytes of padding
+             * that follow the block's magic and length -- every real file
+             * stores 0x18 for channel 0. */
+            b->ch_data_offsets[ch] = data_offset + 8 + ch_data_rel;
             avio_skip(s->pb, 4);
             ai_rel = read32(s);
             if (b->is_adpcm && ai_rel != 0xFFFFFFFF) {
