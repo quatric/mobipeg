@@ -503,17 +503,35 @@ library:
     @tab Argonaut Games format.
 @item Brute Force & Ignorance   @tab   @tab X
     @tab Used in the game Flash Traffic: City of Angels.
-@item BFSTM                     @tab   @tab X
+@item BCSTM                     @tab X @tab X
+    @tab Audio format used on the Nintendo 3DS (based on BRSTM). Read by
+    the BFSTM demuxer, which the magic apart is the same layout.
+@item BFSTM                     @tab X @tab X
     @tab Audio format used on the Nintendo WiiU (based on BRSTM).
-@item BRSTM                     @tab   @tab X
+@item BRSTM                     @tab X @tab X
     @tab Audio format used on the Nintendo Wii.
+@item BCWAV                     @tab X @tab X
+    @tab Nintendo 3DS single-sample wave (.bcwav/.cwav); DSP-ADPCM, planar
+    PCM16 and planar PCM8.
+@item BFWAV                     @tab X @tab X
+    @tab Nintendo Wii U and Switch single-sample wave (.bfwav/.fwav); same
+    layout as BCWAV, byte order taken from the BOM.
+@item BNS                       @tab X @tab X
+    @tab Nintendo Wii banner sound; optionally LZ10-compressed and/or IMD5-wrapped.
+@item BTSND                     @tab X @tab X
+    @tab Nintendo Wii U boot sound; always 48 kHz stereo big-endian PCM.
 @item BW64                      @tab   @tab X
     @tab Broadcast Wave 64bit.
 @item BWF                       @tab X @tab X
+@item Caimans GBA modified IMA ADPCM  @tab     @tab  X
 @item codec2 (raw)              @tab X @tab X
     @tab Must be given -mode format option to decode correctly.
 @item codec2 (.c2 files)        @tab X @tab X
     @tab Contains header with version and mode info, simplifying playback.
+@item Caimans 2.2 GBA Video     @tab   @tab X
+    @tab Game Boy Advance Video cartridge, Caimans 2.2 player generation.
+@item Caimans Pro GBA Video     @tab   @tab X
+    @tab Game Boy Advance Video cartridge, CaimansPro player generation.
 @item CRI ADX                   @tab X @tab X
     @tab Audio-only format used in console video games.
 @item CRI AIX                   @tab   @tab X
@@ -543,6 +561,10 @@ library:
 @item DFA                       @tab   @tab X
     @tab This format is used in Chronomaster game
 @item DirectDraw Surface        @tab   @tab X
+@item DPG                       @tab X @tab X
+    @tab Nintendo DS nDs-mPeG, as played by MoonShell.
+@item DSP-ADPCM                 @tab X @tab X
+    @tab Nintendo GameCube/Wii/3DS raw ADPCM stream (.dsp).
 @item DSD Stream File (DSF)     @tab   @tab X
 @item DV video                  @tab X @tab X
 @item DXA                       @tab   @tab X
@@ -552,6 +574,12 @@ library:
 @item Electronic Arts Multimedia  @tab    @tab X
     @tab Used in various EA games; files have extensions like WVE and UV2.
 @item Ensoniq Paris Audio File  @tab   @tab X
+@item FastVideoDS               @tab X @tab X
+    @tab Nintendo DS FastVideoDS (.fv).
+@item Flipnote Studio (PPM)     @tab   @tab X
+    @tab Nintendo DSi Flipnote Studio animation.
+@item Flipnote Studio 3D (KWZ)  @tab   @tab X
+    @tab Nintendo 3DS Flipnote Studio 3D animation.
 @item FFM (FFserver live feed)  @tab X @tab X
 @item Flash (SWF)               @tab X @tab X
 @item Flash 9 (AVM2)            @tab X @tab X
@@ -567,12 +595,19 @@ library:
 @item G.726                     @tab   @tab X @tab Both left- and right-justified.
 @item G.729 BIT                 @tab X @tab X
 @item G.729 raw                 @tab   @tab X
+@item GBA Video (ADS/Majesco)   @tab X @tab X
+    @tab Game Boy Advance Video, Majesco's in-house pre-ActImagine codec;
+    the mmstr muxer writes the resource, not a bootable ROM.
+@item GBA Video (VXGB/VX++)     @tab   @tab X
+    @tab Game Boy Advance Video cartridge, ActImagine player generation.
 @item GENH                      @tab   @tab X
     @tab Audio format for various games.
 @item GIF Animation             @tab X @tab X
 @item GXF                       @tab X @tab X
     @tab General eXchange Format SMPTE 360M, used by Thomson Grass Valley
          playout servers.
+@item HVQM4                     @tab X @tab X
+    @tab Hudson Soft GameCube/Wii movie (.h4m).
 @item HNM @tab   @tab X
     @tab Only version 4 supported, used in some games from Cryo Interactive
 @item iCEDraw File              @tab   @tab X
@@ -621,8 +656,17 @@ library:
 @item Metal Gear Solid: The Twin Snakes @tab @tab X
 @item Megalux Frame             @tab   @tab X
     @tab Used by Megalux Ultimate Paint
-@item MobiClip MODS             @tab   @tab X
-@item MobiClip MOFLEX           @tab   @tab X
+@item MobiClip MO               @tab X @tab X
+    @tab Nintendo Wii MobiClip movie container.
+@item MobiClip MOC2/MOC3        @tab   @tab X
+    @tab The two MobiClip container generations that precede MO and share
+    its .mo extension; fla2, gvi3 and vid2 payload tags.
+@item MobiClip MODS             @tab X @tab X
+    @tab Nintendo DS MobiClip movie container.
+@item MobiClip MOFLEX           @tab X @tab X
+    @tab Nintendo 3DS MobiClip movie container, 2D and stereoscopic.
+@item MobiClip VX               @tab X @tab X
+    @tab ActImagine/MobiClip Nintendo DS movie (.vx).
 @item Mobotix .mxg              @tab   @tab X
 @item Monkey's Audio            @tab   @tab X
 @item Motion Pixels MVI         @tab   @tab X
@@ -736,6 +780,11 @@ library:
 @item raw PCM floating-point 32 bit little-endian  @tab X @tab X
 @item raw PCM floating-point 64 bit big-endian  @tab X @tab X
 @item raw PCM floating-point 64 bit little-endian  @tab X @tab X
+@item RocketVideo (RVID)        @tab X @tab X
+    @tab Nintendo DS RocketVideo movie (.rvid).
+@item RWAV                      @tab X @tab X
+    @tab Nintendo Wii single-sample wave (.brwav/.rwav); the samples RWAR
+    wave archives and RBNK instrument banks reference.
 @item RDT                       @tab   @tab X
 @item REDCODE R3D               @tab   @tab X
     @tab File format used by RED Digital cameras, contains JPEG 2000 frames and PCM audio.
@@ -755,6 +804,8 @@ library:
     @tab Output is performed by publishing stream to RTMP server
 @item RTP                       @tab X @tab X
 @item RTSP                      @tab X @tab X
+@item Swapdoodle BPK1           @tab X @tab X
+    @tab Nintendo 3DS Swapdoodle / Swapnote note (.bpk/.apd).
 @item Sample Dump eXchange      @tab   @tab X
 @item SAP                       @tab X @tab X
 @item SBG                       @tab   @tab X
@@ -787,8 +838,11 @@ library:
     @tab Audio format used in Konami PS2 games.
 @item TDSC                      @tab   @tab X
 @item Text files                @tab   @tab X
-@item THP                       @tab   @tab X
-    @tab Used on the Nintendo GameCube.
+@item THP                       @tab X @tab X
+    @tab Used on the Nintendo GameCube and Wii.
+@item TiVo TY Stream            @tab X @tab X
+    @tab Series 1-3 TyStream; muxing targets the Series 2 layout and needs
+    --enable-gpl.
 @item Tiertex Limited SEQ       @tab   @tab X
     @tab Tiertex .seq files used in the DOS CD-ROM version of the game Flashback.
 @item True Audio                @tab X @tab X
@@ -935,8 +989,11 @@ following image formats are supported:
 @item 8088flex TMV           @tab     @tab  X
 @item A64 multicolor         @tab  X  @tab
     @tab Creates video suitable to be played on a commodore 64 (multicolor mode).
- at item Actimagine VX Video    @tab     @tab  X
+@item Actimagine VX Video    @tab  X  @tab  X
     @tab fourcc: vxs1, VXS1
+@item ADS-era GBA Video      @tab  X  @tab  X
+    @tab Majesco's in-house Game Boy Advance Video codec; all-intra,
+    codebook-indexed blocks.
 @item Amazing Studio PAF Video @tab     @tab  X
 @item American Laser Games MM  @tab    @tab X
     @tab Used in games like Mad Dog McCree.
@@ -998,6 +1055,8 @@ following image formats are supported:
     @tab Video codec for CD+G karaoke disks
 @item CDXL                   @tab     @tab  X
     @tab Amiga CD video codec
+@item Caimans 2.2 GBA Video  @tab     @tab  X
+@item Caimans Pro GBA Video  @tab     @tab  X
 @item Chinese AVS video      @tab  E  @tab  X
     @tab AVS1-P2, JiZhun profile, encoding through external library libxavs
 @item Delphine Software International CIN video  @tab     @tab  X
@@ -1030,6 +1089,7 @@ following image formats are supported:
     @tab fourcc: TR20
 @item DV (Digital Video)     @tab  X  @tab  X
 @item Dxtory capture format  @tab     @tab  X
+@item FastVideoDS Video      @tab  X  @tab  X
 @item Feeble Files/ScummVM DXA  @tab     @tab  X
     @tab Codec originally used in Feeble Files game.
 @item Electronic Arts CMV video  @tab     @tab  X
@@ -1070,6 +1130,8 @@ following image formats are supported:
 @item HuffYUV FFmpeg variant @tab  X  @tab  X
 @item IBM Ultimotion         @tab     @tab  X
     @tab fourcc: ULTI
+@item Hudson HVQM4 video     @tab  X  @tab  X
+    @tab Used in GameCube and Wii .h4m movies.
 @item id Cinematic video     @tab     @tab  X
     @tab Used in Quake II.
 @item id RoQ video           @tab  X  @tab  X
@@ -1120,6 +1182,8 @@ following image formats are supported:
 @item Miro VideoXL           @tab     @tab  X
     @tab fourcc: VIXL
 @item MJPEG (Motion JPEG)    @tab  X  @tab  X
+@item MobiClip Video         @tab  X  @tab  X
+    @tab Encoding requires --enable-libx264 against the MobiClip x264 fork.
 @item Mobotix MxPEG video    @tab     @tab  X
 @item Motion Pixels video    @tab     @tab  X
 @item MPEG-1 video           @tab  X  @tab  X
@@ -1130,7 +1194,9 @@ following image formats are supported:
 @item MPEG-4 part 2 Microsoft variant version 2  @tab  X  @tab  X
 @item MPEG-4 part 2 Microsoft variant version 3  @tab  X  @tab  X
 @item Newtek SpeedHQ               @tab  X  @tab  X
-@item Nintendo Gamecube THP video  @tab     @tab  X
+@item Nintendo Pokemon GBA FVMV Video  @tab     @tab  X
+@item Nintendo Swapdoodle drawing  @tab     @tab  X
+@item Nintendo Gamecube THP video  @tab  X  @tab  X
 @item NotchLC                @tab     @tab  X
 @item NuppelVideo/RTjpeg     @tab     @tab  X
     @tab Video encoding used in NuppelVideo files.
@@ -1172,6 +1238,8 @@ following image formats are supported:
     @tab Texture dictionaries used by the Renderware Engine.
 @item RivaTuner Video        @tab     @tab  X
     @tab fourcc: 'RTV1'
+@item RVID video             @tab  X  @tab  X
+    @tab RocketVideo, Nintendo DS.
 @item RL2 video              @tab     @tab  X
     @tab used in some games by Entertainment Software Partners
 @item ScreenPressor          @tab     @tab  X
@@ -1276,7 +1344,9 @@ following image formats are supported:
 @item ADPCM IMA Electronic Arts SEAD  @tab     @tab  X
 @item ADPCM IMA Funcom       @tab     @tab  X
 @item ADPCM IMA High Voltage Software ALP      @tab  X  @tab  X
-@item ADPCM IMA MobiClip MOFLEX  @tab     @tab  X
+@item ADPCM IMA MobiClip MOFLEX  @tab  X  @tab  X
+@item ADPCM IMA MobiClip Wii  @tab     @tab  X
+@item ADPCM IMA Nintendo DS  @tab     @tab  X
 @item ADPCM IMA QuickTime    @tab  X  @tab  X
 @item ADPCM IMA Simon & Schuster Interactive   @tab  X  @tab  X
 @item ADPCM IMA Ubisoft APM  @tab  X  @tab  X
@@ -1294,9 +1364,11 @@ following image formats are supported:
 @item ADPCM IMA Xbox         @tab     @tab  X
 @item ADPCM Microsoft        @tab  X  @tab  X
 @item ADPCM MS IMA           @tab  X  @tab  X
-@item ADPCM Nintendo Gamecube AFC  @tab     @tab  X
+@item ADPCM Nintendo Gamecube AFC  @tab  X  @tab  X
 @item ADPCM Nintendo Gamecube DTK  @tab     @tab  X
-@item ADPCM Nintendo THP  @tab     @tab  X
+@item ADPCM Nintendo THP  @tab  X  @tab  X
+    @tab The encoder derives its predictor coefficients over the whole
+    stream, as Nintendo's own DSPADPCM tool does.
 @item ADPCM Playstation      @tab     @tab  X
 @item ADPCM QT IMA           @tab  X  @tab  X
 @item ADPCM Sanyo            @tab     @tab  X
@@ -1317,6 +1389,8 @@ following image formats are supported:
     @tab encoding supported through external library libopencore-amrnb
 @item AMR-WB                 @tab  E  @tab  X
     @tab encoding supported through external library libvo-amrwbenc
+@item ActImagine VX audio    @tab  X  @tab  X
+    @tab Trained-codebook audio shared by .vx and .mods streams.
 @item Amazing Studio PAF Audio @tab     @tab  X
 @item Apple lossless audio   @tab  X  @tab  X
     @tab QuickTime fourcc 'alac'
@@ -1399,9 +1473,10 @@ following image formats are supported:
 @item MPEG-4 Audio Lossless Coding (ALS)  @tab     @tab  X
 @item MPEG-H 3D Audio        @tab     @tab  E
     @tab decoding supported through external library libmpeghdec
-@item MobiClip FastAudio     @tab     @tab  X
+@item MobiClip FastAudio     @tab  X  @tab  X
 @item Musepack SV7           @tab     @tab  X
 @item Musepack SV8           @tab     @tab  X
+@item Nintendo Pokemon GBA FVMV audio  @tab     @tab  X
 @item Nellymoser Asao        @tab  X  @tab  X
 @item On2 AVC (Audio for Video Codec) @tab     @tab  X
 @item Opus                   @tab  E  @tab  X
