@@ -378,7 +378,8 @@ static int rwav_write_trailer(AVFormatContext *s)
         wr32(s, channels); /* channel table anchor */
 
         for (int ch = 0; ch < channels; ch++) {
-            wr32(s, 0x71000000);
+            wr16(s, 0x7100);   /* channel-info Reference type id */
+            wr16(s, 0);        /* padding */
             wr32(s, 4 + entry_size * channels + ci_size * ch);
         }
 
@@ -386,7 +387,8 @@ static int rwav_write_trailer(AVFormatContext *s)
             wr16(s, 0x1F00);
             wr16(s, 0);
             wr32(s, stream_pad + ch * (stream_pad + ch_bytes[0]));
-            wr32(s, 0x03000000);
+            wr16(s, 0x0300);   /* DSP-ADPCM-info Reference type id */
+            wr16(s, 0);        /* padding */
             wr32(s, c->is_adpcm ? (ai_base + ai_size * ch - (ci_base + ci_size * ch)) : 0xFFFFFFFF);
             wr32(s, 0);
         }
