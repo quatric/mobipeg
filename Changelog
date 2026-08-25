@@ -26,6 +26,8 @@ version 9.1:
 - D3D12 DirectML zero-copy inference for the ONNX Runtime DNN backend
 - side_data bitstream filter
 - JPEG Multi-Picture Format demuxer
+- RWAV/BRWAV, FWAV/BFWAV and CWAV/BCWAV demuxers and muxers
+- MobiClip MOC2/MOC3 demuxer
 
 
 version 9.0:

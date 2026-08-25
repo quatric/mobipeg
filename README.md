@@ -29,6 +29,7 @@ such as audio, video, subtitles and related metadata.
 | Nintendo Channel | `.3gp` | Wii | ✅ | ✅ |
 | Nintendo 3DS Camera (2D) | `.avi` | Nintendo 3DS | ✅ | ✅ |
 | MO | `.mo` | Nintendo Wii | ✅ | ✅ |
+| MOC2 / MOC3 | `.mo` | Nintendo Wii (early MobiClip) | — | ✅ |
 | MODS | `.mods` | Nintendo DS | ✅ | ✅ |
 | MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
 | MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
@@ -44,11 +45,14 @@ such as audio, video, subtitles and related metadata.
 |--------|-----------|----------|--------|--------|
 | AST | `.ast` | GameCube / Wii | ✅ | ✅ |
 | BCSTM | `.bcstm` | Nintendo 3DS | ✅ | ✅ |
+| BCWAV | `.bcwav`, `.cwav` | Nintendo 3DS | ✅ | ✅ |
 | BFSTM | `.bfstm` | Nintendo Wii U | ✅ | ✅ |
+| BFWAV | `.bfwav`, `.fwav` | Nintendo Wii U / Switch | ✅ | ✅ |
 | BNS | `.bns` | Nintendo Wii (banner sound) | ✅ | ✅ |
 | BRSTM | `.brstm` | Nintendo Wii | ✅ | ✅ |
 | BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
 | DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
+| RWAV | `.brwav`, `.rwav` | Nintendo Wii | ✅ | ✅ |
 | Wii Photo Channel AAC | `.m4a` | Wii | ✅ | ✅ |
 | Nintendo 3DS Sound AAC | `.m4a` | Nintendo 3DS | ✅ | ✅ |
 
@@ -63,6 +67,38 @@ because its player on the console reads no format fields at all.
 BNS files are usually LZ10-compressed, wrapped in an IMD5 header, or both.
 Decoding unwraps whichever combination it finds; `-compress 1` writes the
 compressed form.
+
+RWAV, FWAV and CWAV are the same single-sample wave container across three
+console generations — Wii `.brwav`, Wii U / Switch `.bfwav`, 3DS `.bcwav` —
+and share one demuxer and one muxer here. All three carry DSP-ADPCM
+(`adpcm_thp`, or `adpcm_thp_le` when the BOM says little-endian), planar
+PCM16 or planar PCM8, and all three store their channels as separate blocks
+referenced from the INFO chunk rather than interleaved. The byte order is
+read from the `0xFEFF` / `0xFFFE` BOM at offset 4, not assumed from the
+magic, so a little-endian `.brwav` and a big-endian `.bcwav` both decode.
+These are the individual samples that RWAR / FWAR / CWAR wave archives and
+the RBNK / BRSAR instrument banks reference; the sibling
+[wiimms-szs-tools-plus](https://github.com/quatric/wiimms-szs-tools-plus)
+unpacks those archives into the loose wave files this reads and writes.
+
+```sh
+ffmpeg -i input.wav -c:a adpcm_thp out.brwav
+ffmpeg -i input.wav -c:a adpcm_thp out.bfwav
+ffmpeg -i input.wav -c:a pcm_s16be_planar out.bcwav
+ffmpeg -i sound.bcwav out.wav
+```
+
+They are FFmpeg-level formats only: `encode.py` and the GUI do not list them
+among their audio targets yet, so use `ffmpeg` directly.
+
+MOC2 and MOC3 are the two MobiClip container generations that predate the
+`.mo` layout the `mo` demuxer reads, and use the same `.mo` extension. The
+`moc3` demuxer covers the `fla2`, `gvi3` and `vid2` payload tags; `vid2`
+carries MOC5-style chunk headers, while `fla2` and `gvi3` are a raw
+bitstream whose frame boundaries are recovered by scanning. It is
+decode-only — new files are written in the `mo` layout — and `vid2` seeking
+is not implemented. Its header size is not fixed (64 bytes on MOC2,
+240/284/288/292 on MOC3), so it is read from the header rather than assumed.
 
 Decode-only inputs (the FVMV, Caimans, and VX++ GBA Video cartridge families
 and both Flipnote formats) can be transcoded into any of the encodable formats above, or
