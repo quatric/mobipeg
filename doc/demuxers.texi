@@ -874,6 +874,34 @@ ffmpeg -i video_and_audio.mxf -eia608_extract 0 -i CC.mcc -c copy -map 0 -map 1 
 This retains all VANC data and inserts it into the output MXF file as a @code{SMPTE_436M_ANC} data stream.
 @end itemize
 
+@section moc3
+
+MobiClip MOC2/MOC3 demuxer.
+
+The two MobiClip container generations that predate the @code{mo} layout.
+They use the same @file{.mo} extension, so the two demuxers are told apart by
+the @code{MOC2}/@code{MOC3} magic rather than by the file name.
+
+Three payload tags are covered, named by the tag at offset 8: @code{vid2},
+which carries MOC5-style chunk headers with an explicit chunk and video size;
+and @code{fla2} and @code{gvi3}, which are a raw bitstream whose frame
+boundaries have to be recovered by scanning. The header size is not fixed --
+64 bytes on MOC2, 240, 284, 288 or 292 on MOC3 -- so it is read from the
+header field, never assumed.
+
+Seeking works on @code{fla2} and @code{gvi3}; @code{vid2} seeking is not
+implemented. There is no MOC2/MOC3 muxer -- new files are written in the
+@code{mo} layout.
+
+@subsection Options
+@table @option
+@item fla2_whole @var{bool}
+Emit the whole @code{fla2} payload from payload offset 2 as one
+pre-byteswapped packet instead of splitting it into frames. Experimental,
+for inspecting a stream whose frame scan comes out wrong. Default is
+@code{false}.
+@end table
+
 @section mov/mp4/3gp
 
 Demuxer for Quicktime File Format & ISO/IEC Base Media File Format (ISO/IEC 14496-12 or MPEG-4 Part 12, ISO/IEC 15444-12 or JPEG 2000 Part 12).
@@ -1106,6 +1134,21 @@ ffmpeg -i CC.rcwt.bin -c:s copy CC.scc
 Note that the SCC format does not support all of the possible CC extensions
 that can be stored in RCWT (such as EIA-708).
 @end itemize
+
+@section rwav, fwav, cwav
+
+Nintendo single-sample wave demuxers: RWAV (Wii), FWAV (Wii U and Switch) and
+CWAV (3DS).
+
+One demuxer reads all three. The byte order comes from the @code{0xFEFF} /
+@code{0xFFFE} BOM at offset 4 rather than from the magic, so a little-endian
+@file{.brwav} and a big-endian @file{.bcwav} both decode. The sample data is
+DSP-ADPCM (@code{adpcm_thp}, or @code{adpcm_thp_le} for a little-endian
+file), planar PCM16 or planar PCM8, with each channel stored as its own block
+referenced from the INFO chunk.
+
+When the header's loop flag is set, the loop point is exported as the
+@code{loop_start} metadata key, in microseconds.
 
 @section sbg
 

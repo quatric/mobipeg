@@ -11,6 +11,8 @@ version <next>:
 - DVD-Audio LPCM decoder and demuxing support
 - AVFoundation input device selection by unique ID and USB serial number
 - NVIDIA optical flow accelerated interpolation filter (vf_fruc_vulkan)
+- RWAV/BRWAV, FWAV/BFWAV and CWAV/BCWAV demuxers and muxers
+- MobiClip MOC2/MOC3 demuxer
 
 
 version 9.0:
