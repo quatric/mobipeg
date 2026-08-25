@@ -329,10 +329,12 @@ static int rwav_write_trailer(AVFormatContext *s)
         wr32(s, file_size);
         wr16(s, 2);            /* block count */
         wr16(s, 0);
-        wr32(s, 0x70000000);   /* INFO block marker */
+        wr16(s, 0x7000);       /* INFO SizedReference type id */
+        wr16(s, 0);            /* padding */
         wr32(s, info_off);
         wr32(s, info_chunk_size);
-        wr32(s, 0x70010000);   /* DATA block marker */
+        wr16(s, 0x7001);       /* DATA SizedReference type id */
+        wr16(s, 0);            /* padding */
         wr32(s, data_off);
         wr32(s, data_chunk_size);
         if ((ret = pad_to(s, info_off)) < 0)
