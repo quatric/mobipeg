@@ -225,13 +225,19 @@ static int rwav_read_header(AVFormatContext *s)
         avio_skip(s->pb, 2); /* pad */
 
         for (int i = 0; i < block_count; i++) {
-            uint32_t marker = read32(s);
-            uint32_t off    = read32(s);
-            uint32_t sz     = read32(s);
-            if (marker == 0x70000000) {
+            /* NW4C SizedReference: u16 type id, u16 padding, u32 offset,
+             * u32 size. Reading the id and its padding together as one u32
+             * happens to work on a big-endian FWAV and silently fails on a
+             * little-endian CWAV, which is why it is split here. */
+            unsigned type_id = read16(s);
+            uint32_t off, sz;
+            avio_skip(s->pb, 2);
+            off = read32(s);
+            sz  = read32(s);
+            if (type_id == 0x7000) {
                 info_offset = off;
                 info_size   = sz;
-            } else if (marker == 0x70010000) {
+            } else if (type_id == 0x7001) {
                 data_offset = off;
                 data_size   = sz;
             }
