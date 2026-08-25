@@ -967,6 +967,63 @@ G.729 (.bit) file format muxer.
 
 It accepts a single G.729 audio stream.
 
+@section bns
+Nintendo Wii banner sound muxer.
+
+BNS is the audio a Wii channel's banner plays. It accepts a single audio
+stream, written as DSP-ADPCM (@code{adpcm_thp}).
+
+@subsection Options
+@table @option
+@item compress @var{bool}
+Wrap the finished file in Nintendo LZ10, the way banner archives store it.
+Default is @code{false}; the demuxer unwraps LZ10 and IMD5 either way.
+
+@item loop @var{bool}
+Set the header's loop flag. Default is @code{false}.
+
+@item loop_start @var{samples}
+Loop point, in samples, honoured by players that read the flag. Default
+is @code{0}.
+@end table
+
+@section brstm, bfstm, bcstm
+Nintendo sound-stream muxers: BRSTM (Wii), BFSTM (Wii U) and BCSTM (3DS).
+
+The three share one layout and differ in magic and default byte order. They
+accept a single audio stream, as DSP-ADPCM (@code{adpcm_thp}) or planar
+PCM16.
+
+@subsection Options
+@table @option
+@item block_size @var{bytes}
+Bytes of one channel's audio per interleave block, from @code{8} to
+@code{1048576}. Default is @code{8192}.
+
+@item endian @var{mode}
+Byte order of the header fields. One of @code{default} (the variant's usual
+order), @code{be} or @code{le}.
+
+@item loop @var{bool}
+Set the header's loop flag. Default is @code{false}.
+
+@item loop_start @var{samples}
+Loop point, in samples, honoured by players that read the flag. Default
+is @code{0}.
+@end table
+
+@section btsnd
+Nintendo Wii U boot-sound muxer.
+
+The console's boot-sound player reads no format fields at all, so the muxer
+only accepts 48 kHz stereo big-endian PCM (@code{pcm_s16be}).
+
+@subsection Options
+@table @option
+@item loop_start @var{samples}
+Loop point, in samples; @code{0} plays the sound once. Default is @code{0}.
+@end table
+
 @section caf
 Apple CAF (Core Audio Format) muxer.
 
@@ -1429,6 +1486,43 @@ For ffmpeg versions before 7.0 you might have to use the @samp{asetnsamples}
 filter to limit the muxed packet size, because this format does not support
 muxing packets larger than 65535 bytes (3640 samples). For newer ffmpeg
 versions audio is automatically packetized to 36000 byte (2000 sample) packets.
+
+@section dpg
+Nintendo DS DPG (nDs-mPeG) muxer, the format MoonShell plays.
+
+@subsection Options
+@table @option
+@item dpg_version @var{n}
+DPG version to write, @code{0} to @code{4}. Default is @code{4}.
+
+@item pixel_format @var{n}
+The MoonShell pixel-format field, @code{0} to @code{3}; DPG2 and later only.
+Default is @code{3}.
+
+@item thumbnail @var{file}
+Path to a raw 256x192 16-bit image for the DPG4 thumbnail slot.
+@end table
+
+@section dsp
+Nintendo DSP-ADPCM muxer, the loose @file{.dsp} stream used across GameCube,
+Wii and 3DS.
+
+@subsection Options
+@table @option
+@item interleave @var{frames}
+Frames per channel in each interleave block; multi-channel output only.
+Default is @code{1024}.
+
+@item loop @var{bool}
+Set the header's loop flag. Default is @code{false}.
+
+@item loop_start @var{samples}
+Loop start, in samples. Default is @code{0}.
+
+@item loop_end @var{samples}
+Loop end, in samples; @code{-1} means the end of the stream. Default is
+@code{-1}.
+@end table
 
 @section dv
 DV (Digital Video) muxer.
@@ -3068,6 +3162,41 @@ assistants.
 
 This muxer accepts a single @samp{adpcm_yamaha} audio stream.
 
+@section mobiclip_mo, mods, moflex
+MobiClip movie muxers: @code{mobiclip_mo} writes the Wii @file{.mo} layout,
+@code{mods} the Nintendo DS one and @code{moflex} the Nintendo 3DS one.
+
+Video is written with the @code{mobiclip} encoder, which is a fork of x264,
+so these muxers are only useful in a build configured with
+@code{--enable-libx264} against that fork.
+
+@subsection Options
+@table @option
+@item mo_audio @var{codec}
+Which MobiClip audio codec to write. @code{mobiclip_mo} accepts
+@code{fastaudio}, @code{adpcm}, @code{pcm}, @code{vorbis} and @code{none};
+@code{moflex} accepts @code{fastaudio}, @code{adpcm} and @code{pcm};
+@code{mods} accepts @code{fastaudio}, @code{adpcm}, @code{pcm}, @code{none}
+and @code{codebook} (the SX codebook codec, paired with @code{-c:a
+vx_audio}).
+
+@item mo_block @var{bytes}
+@code{moflex} only. Fixed block size, zero-padded, from @code{512} to
+@code{65536}. @code{4096} matches retail files and is the default;
+@code{2048} is what the 3DS SDK muxer wrote.
+
+@item mo_layout @var{n}
+@itemx mo_layout2 @var{n}
+@code{moflex} only. The @code{ImageLayout} descriptor for the first and
+second video stream: @code{0}-@code{1} interleaved stereoscopic (left-first
+and right-first), @code{2}-@code{3} top/bottom, @code{4}-@code{5}
+side-by-side, @code{6} plain 2D. Default is @code{6}.
+
+@item mo_vdesc @var{n}
+@code{moflex} only. Video descriptor type: @code{3} carries the layout and
+matches retail files (the default), @code{1} is the plain SDK form.
+@end table
+
 @section mp3
 
 The MP3 muxer writes a raw MP3 stream with the following optional features:
@@ -3401,6 +3530,40 @@ ffmpeg -f lavfi -i "movie=INPUT.mkv[out+subcc]" -map 0:s:0 -c:s copy -f rcwt CC.
 @end itemize
 
 @anchor{segment}
+@section rwav, fwav, cwav
+Nintendo single-sample wave muxers: RWAV (Wii, @file{.brwav}/@file{.rwav}),
+FWAV (Wii U and Switch, @file{.bfwav}/@file{.fwav}) and CWAV (3DS,
+@file{.bcwav}/@file{.cwav}).
+
+The three share one layout and differ in magic and default byte order. They
+accept a single audio stream as DSP-ADPCM (@code{adpcm_thp}), planar PCM16
+or planar PCM8, and store each channel as its own block rather than
+interleaving them.
+
+These are the individual samples that RWAR / FWAR / CWAR wave archives and
+RBNK / BRSAR instrument banks reference.
+
+@example
+ffmpeg -i input.wav -c:a adpcm_thp out.brwav
+ffmpeg -i sound.bcwav out.wav
+@end example
+
+@subsection Options
+@table @option
+@item endian @var{mode}
+Byte order of the header fields, written into the BOM at offset 4. One of
+@code{default} (the variant's usual order: big-endian for RWAV and FWAV,
+little-endian for CWAV), @code{be} or @code{le}. The demuxer reads the BOM
+rather than assuming from the magic, so either order round-trips.
+
+@item loop @var{bool}
+Set the header's loop flag. Default is @code{false}.
+
+@item loop_start @var{samples}
+Loop point, in samples, honoured by players that read the flag. Default
+is @code{0}.
+@end table
+
 @section segment, stream_segment, ssegment
 
 Basic stream segmenter.

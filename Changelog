@@ -12,6 +12,8 @@ version <next>:
 - AVFoundation input device selection by unique ID and USB serial number
 - NVIDIA optical flow accelerated interpolation filter (vf_fruc_vulkan)
 - H.264 data partitioning support
+- RWAV/BRWAV, FWAV/BFWAV and CWAV/BCWAV demuxers and muxers
+- MobiClip MOC2/MOC3 demuxer
 
 
 version 9.0:
