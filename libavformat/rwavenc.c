@@ -49,6 +49,7 @@ typedef struct RWAVMuxContext {
     int          have_coefs;
     int64_t      nb_samples;
     int          is_adpcm;
+    int          extradata_le;       /* DSP coefficients in extradata are LE */
     int          bytes_per_sample;   /* PCM only */
 } RWAVMuxContext;
 
@@ -112,6 +113,11 @@ static int rwav_common_init(AVFormatContext *s)
     case AV_CODEC_ID_ADPCM_THP:
     case AV_CODEC_ID_ADPCM_THP_LE:
         c->is_adpcm = 1;
+        /* The byte order of the coefficient table in extradata belongs to
+         * the codec that produced it, not to the container it is going
+         * into: adpcm_thp writes it big-endian and adpcm_thp_le little-
+         * endian, and either may be muxed into either variant. */
+        c->extradata_le = (par->codec_id == AV_CODEC_ID_ADPCM_THP_LE);
         break;
     case AV_CODEC_ID_PCM_S8:
     case AV_CODEC_ID_PCM_S8_PLANAR:
@@ -138,6 +144,24 @@ static int rwav_common_init(AVFormatContext *s)
 
     if (c->little_endian < 0)
         c->little_endian = (c->variant == RWAV_VARIANT_CWAV);
+
+    /* PCM16 sample data is written through verbatim, so the encoder's byte
+     * order has to be the container's. Mismatched, the file would carry
+     * byte-swapped samples under a header that says otherwise -- readable,
+     * and wrong. Refuse rather than write that. */
+    if (c->bytes_per_sample == 2) {
+        int pcm_le = (par->codec_id == AV_CODEC_ID_PCM_S16LE ||
+                      par->codec_id == AV_CODEC_ID_PCM_S16LE_PLANAR);
+        if (pcm_le != !!c->little_endian) {
+            av_log(s, AV_LOG_ERROR,
+                   "this file is %s-endian, so PCM16 must be encoded as %s; "
+                   "use -c:a %s\n",
+                   c->little_endian ? "little" : "big",
+                   c->little_endian ? "pcm_s16le_planar" : "pcm_s16be_planar",
+                   c->little_endian ? "pcm_s16le_planar" : "pcm_s16be_planar");
+            return AVERROR(EINVAL);
+        }
+    }
 
     for (int ch = 0; ch < channels; ch++) {
         int ret = avio_open_dyn_buf(&c->ch_buf[ch]);
@@ -173,7 +197,7 @@ static int rwav_write_packet(AVFormatContext *s, AVPacket *pkt)
     if (side && side_size >= 32 * (size_t)channels) {
         for (int ch = 0; ch < channels; ch++) {
             for (int i = 0; i < 16; i++) {
-                if (c->little_endian)
+                if (c->extradata_le)
                     c->coefs[ch][i] = (int16_t)AV_RL16(side + ch * 32 + i * 2);
                 else
                     c->coefs[ch][i] = (int16_t)AV_RB16(side + ch * 32 + i * 2);
@@ -281,12 +305,12 @@ static int rwav_write_trailer(AVFormatContext *s)
         if (c->is_adpcm) {
             for (int ch = 0; ch < channels; ch++) {
                 for (int i = 0; i < 16; i++)
-                    avio_wb16(s->pb, (uint16_t)c->coefs[ch][i]);
-                avio_wb16(s->pb, 0); /* gain */
-                avio_wb16(s->pb, ch_bytes[ch] ? ch_data[ch][0] : 0); /* ps */
-                avio_wb16(s->pb, 0); avio_wb16(s->pb, 0); /* yn1, yn2 */
-                avio_wb16(s->pb, 0); avio_wb16(s->pb, 0); avio_wb16(s->pb, 0); /* loop ps, yn1, yn2 */
-                avio_wb16(s->pb, 0); /* pad */
+                    wr16(s, (uint16_t)c->coefs[ch][i]);
+                wr16(s, 0); /* gain */
+                wr16(s, ch_bytes[ch] ? ch_data[ch][0] : 0); /* ps */
+                wr16(s, 0); wr16(s, 0); /* yn1, yn2 */
+                wr16(s, 0); wr16(s, 0); wr16(s, 0); /* loop ps, yn1, yn2 */
+                wr16(s, 0); /* pad */
             }
         }
 
