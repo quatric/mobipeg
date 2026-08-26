@@ -379,7 +379,7 @@ def main():
     parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.ty, or 'play' to play one back without writing a file")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
-    parser.add_argument("input2", nargs="?", default="", help="Second input file (right eye for moflex3d / 3ds_camera3d)")
+    parser.add_argument("input2", nargs="?", default="", help="Second input file (right eye for moflex3d / 3ds_camera3d). moflex3d: omit this to auto-split a single packed stereoscopic source (e.g. a BD3D MKV with StereoMode set) using --stereo or its detected layout.")
 
     parser.add_argument("--scale", default="", help="Override scale (e.g. 320x240)")
     parser.add_argument("--layout", default="4", help="MO3D layout (default 4)")
@@ -756,26 +756,55 @@ def main():
 
     if mode == "vid3d":
         inp = input_file or "stupi.mp4"
-        inp2 = input2 or inp
         if not os.path.isfile(inp):
             print(f"left input not found: {inp}")
             sys.exit(2)
-        if not os.path.isfile(inp2):
-            print(f"right input not found: {inp2}")
-            sys.exit(2)
-        inp = preprocess_input(inp, OUTDIR)
-        inp2 = preprocess_input(inp2, OUTDIR)
+        # Two files given (classic mode): left + right eye supplied separately.
+        # One file given: treat it as a single packed stereoscopic source (the
+        # common shape for a BD3D MKV remux -- one video track carrying both
+        # eyes side-by-side/top-bottom, tagged via MKV's StereoMode) and split
+        # it into eyes ourselves, the same way decode/play already do.
+        dual_file = bool(input2) and os.path.abspath(input2) != os.path.abspath(inp)
+        if dual_file:
+            inp2 = input2
+            if not os.path.isfile(inp2):
+                print(f"right input not found: {inp2}")
+                sys.exit(2)
+            inp = preprocess_input(inp, OUTDIR)
+            inp2 = preprocess_input(inp2, OUTDIR)
+        else:
+            inp = preprocess_input(inp, OUTDIR)
+            ifmt = input_fmt(inp)
+            kind, inverted = resolve_stereo(inp, ifmt, parsed.stereo)
+            if not kind:
+                print(f"error: {inp} has no detectable stereoscopic layout (no MKV "
+                      "StereoMode / stereo3d side data found), and only one input "
+                      "was given.\n"
+                      "Either pass --stereo (sbs, sbs-r, tb, tb-r, frameseq, "
+                      "frameseq-r) to state the packing, or pass a second input "
+                      "file as the right eye.")
+                sys.exit(2)
 
         layout = layout_arg
         stem = f"{OUTDIR}/roundtrip_moflex3d_{audio}"
         container = f"{stem}.moflex"
         watch = f"{stem}.mp4"
-        
+
         eyew, eyeh = scale.split(":")
-        
-        print(f">> encoding 3D  L={inp}  R={inp2}  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})")
-        
-        filter_str = f"[0:v:0]scale={eyew}:{eyeh}[l];[1:v:0]scale={eyew}:{eyeh}[r];[l][r]hstack=inputs=2[v]"
+
+        if dual_file:
+            print(f">> encoding 3D  L={inp}  R={inp2}  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})")
+            filter_str = f"[0:v:0]scale={eyew}:{eyeh}[l];[1:v:0]scale={eyew}:{eyeh}[r];[l][r]hstack=inputs=2[v]"
+            in_args = input_fmt(inp) + ["-i", inp] + input_fmt(inp2) + ["-i", inp2]
+        else:
+            left_mode, right_mode = eye_filters(kind, inverted)
+            print(f">> encoding 3D  {inp}  ({kind}{', eyes swapped' if inverted else ''})  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})")
+            filter_str = (f"[0:v:0]split=2[sl][sr];"
+                           f"[sl]stereo3d={left_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[l];"
+                           f"[sr]stereo3d={right_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[r];"
+                           f"[l][r]hstack=inputs=2[v]")
+            in_args = input_fmt(inp) + ["-i", inp]
+
         kf_opts = []
         kf = even_gop(inp, probe_fps(inp), n_keyframes, limit=MOBICLIP_KEYINT_MAX)
         if kf:
@@ -788,7 +817,7 @@ def main():
             aud_opts = ["-an"]
         else:
             aud_opts = ["-map", "0:a:0?", "-mo_audio", audio]
-        cmd = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + input_fmt(inp2) + ["-i", inp2, "-filter_complex", filter_str, "-map", "[v]"] + aud_opts + ["-c:v", cvc, "-mo_layout", str(layout)] + kf_opts + extra_args + [container]
+        cmd = [FFENC, "-nostdin", "-y"] + in_args + ["-filter_complex", filter_str, "-map", "[v]"] + aud_opts + ["-c:v", cvc, "-mo_layout", str(layout)] + kf_opts + extra_args + [container]
         run_cmd(cmd) or sys.exit(1)
         
         if roundtrip:
