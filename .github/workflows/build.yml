@@ -37,13 +37,24 @@ jobs:
       - name: Download upstream x264 and diff the MobiClip fork
         run: |
           git clone https://github.com/quatric/x264.git x264-src
-          curl --fail --location --retry 3 --retry-all-errors \
-            'https://code.videolan.org/videolan/x264/-/archive/master/x264-master.zip?ref_type=heads' \
-            --output x264-upstream.zip
-          unzip -q x264-upstream.zip
           # The archive sidesteps VideoLAN's Anubis protection, which blocks
           # unauthenticated HTTPS Git fetches in CI. This artifact is for
           # review/applying elsewhere, so a source-tree diff is sufficient.
+          # Anubis can respond 200 with an HTML challenge page instead of the
+          # zip, which `curl --fail` won't catch — verify it's a real zip
+          # before unzipping, retrying a few times if it isn't.
+          for attempt in 1 2 3 4 5; do
+            curl --fail --location --retry 3 --retry-all-errors \
+              'https://code.videolan.org/videolan/x264/-/archive/master/x264-master.zip?ref_type=heads' \
+              --output x264-upstream.zip
+            if unzip -tq x264-upstream.zip >/dev/null 2>&1; then
+              break
+            fi
+            echo "Attempt $attempt: download was not a valid zip (Anubis challenge page?), retrying..."
+            rm -f x264-upstream.zip
+            sleep $((attempt * 5))
+          done
+          unzip -q x264-upstream.zip
           diff -urN --exclude=.git x264-master x264-src > x264.patch || test $? -eq 1
           echo "x264.patch: $(wc -l < x264.patch) lines"
 
