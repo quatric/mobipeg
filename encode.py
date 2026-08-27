@@ -71,6 +71,14 @@ if getattr(sys, 'frozen', False):
         ]
         for c in candidates:
             if os.path.isfile(c):
+                # PyInstaller's --add-binary copy has, on some platforms/
+                # versions, dropped the executable bit on the bundled file;
+                # a non-executable ffmpeg makes every encode/decode silently
+                # fail with "Permission denied" instead of doing anything.
+                try:
+                    os.chmod(c, os.stat(c).st_mode | 0o111)
+                except OSError:
+                    pass
                 return c
         return candidates[0]
 
@@ -305,6 +313,37 @@ def probe_duration(inp):
         return None
 
 
+def resolve_output_stem(output, default_name, outdir):
+    """Return the output path (without extension) to encode to.
+
+    -o/--output lets the caller pick an exact file instead of always landing
+    on the generated roundtrip_<fmt>_<audio> name inside --outdir; the
+    extension is still supplied by the caller (it depends on the format, not
+    on what the user typed), matching how -o already works for decode."""
+    if output:
+        base = os.path.splitext(os.path.basename(output))[0]
+        out_dir = os.path.dirname(output) or outdir
+        return os.path.join(out_dir, base)
+    return os.path.join(outdir, default_name)
+
+
+def detect_moflex_block_size(inp):
+    """Read the fixed block size a .moflex file was written with.
+
+    The 4C32 sync header at offset 0 stores it as BE16(block_size - 1)
+    starting at byte 12 (2 magic + 2 unused/flags + 8 timestamp). Returns
+    None if the file doesn't look like moflex, so callers can fall back to
+    the retail default instead of guessing."""
+    try:
+        with open(inp, "rb") as f:
+            head = f.read(14)
+        if len(head) < 14 or head[0:2] != b"\x4C\x32":
+            return None
+        return int.from_bytes(head[12:14], "big") + 1
+    except Exception:
+        return None
+
+
 def probe_fps(inp):
     """Return the source average frame rate as a float, or None."""
     try:
@@ -403,6 +442,7 @@ def main():
     parser.add_argument("--mobi-intra-only", dest="mobi_intra_only", action="store_true", help="Force every frame to be encoded as an I-frame (keyframe only).")
     parser.add_argument("--mobi-skip", type=int, default=int(os.environ.get("MOBI_SKIP", 512)), help="Macroblock skip decision error threshold (default 512). 0 keeps every residual, which is slightly better at low QP; higher values freeze near-static blocks to stop dither flicker.")
     parser.add_argument("--hq", "--highest-quality", dest="highest_quality", action="store_true", help="Highest quality MobiClip settings: QP 12 (the format's floor), subme 9, and no skip threshold.")
+    parser.add_argument("--mo-block", dest="mo_block", type=int, default=0, help="moflex/moflex3d: fixed block size in bytes that every chunk is zero-padded out to (retail=4096, 3DS SDK encoder=2048). Default 0 = auto: when the input file is itself a .moflex, match its own block size so a decode+encode round trip reproduces the original framing byte-for-byte; otherwise 4096.")
 
     # --- MobiClip rate control, named after the retail encoder's settings ---
     parser.add_argument("--bitrate", dest="bitrate", default="", help="MobiClip: target bitrate for average-bitrate mode, e.g. 700k. Overrides --qp. (Retail 'Bitrate'.)")
@@ -417,7 +457,7 @@ def main():
     parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
     parser.add_argument("--ffmpeg-args", dest="ffmpeg_args", default="", help="Extra parameters appended verbatim to the ffmpeg command line, just before the output file. Parsed like a shell word list, so quoting works: --ffmpeg-args '-t 5 -af volume=0.5'. Because ffmpeg lets the last occurrence of an option win, these override the format preset. Applies to encode, decode and play; internal analysis passes (the mods keyframe probe and --roundtrip validation) are left alone.")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
-    parser.add_argument("-o", "--output", dest="output", default="", help="Output filename (decode mode). Default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4.")
+    parser.add_argument("-o", "--output", dest="output", default="", help="Output filename. Decode mode: default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4. Encode mode: the extension is still chosen by the target format (this only picks the directory and base name), overriding the generated roundtrip_<fmt>_<audio> name; --outdir is ignored when this is set.")
     parser.add_argument("--stereo", dest="stereo", default="auto", choices=["auto", "none", "frameseq", "frameseq-r", "tb", "tb-r", "sbs", "sbs-r"], help="Decode/play mode: force the stereoscopic layout instead of reading it from the file. Use this when a 3D file carries no layout descriptor (nothing to detect) so --eyes still splits it. The '-r' variants mean the right eye is stored first. 'none' treats the input as 2D.")
     parser.add_argument("--eyes", dest="eyes", default="both", choices=["both", "left", "right", "packed"], help="Stereoscopic 3DS input: which eye to use. Decode mode: 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Play mode: 'both' shows the eyes side by side in one window, 'left'/'right' plays a single eye full-window, 'packed' plays the stream as stored (eyes alternating). Ignored for 2D input.")
 
@@ -438,6 +478,7 @@ def main():
     input2 = parsed.input2
     scale_ovr = parsed.scale
     roundtrip = parsed.roundtrip
+    mo_block = parsed.mo_block
     layout_arg = parsed.layout
     n_keyframes = parsed.keyframes
     fast_audio = parsed.fast_audio
@@ -786,7 +827,7 @@ def main():
                 sys.exit(2)
 
         layout = layout_arg
-        stem = f"{OUTDIR}/roundtrip_moflex3d_{audio}"
+        stem = resolve_output_stem(parsed.output, f"roundtrip_moflex3d_{audio}", OUTDIR)
         container = f"{stem}.moflex"
         watch = f"{stem}.mp4"
 
@@ -851,7 +892,7 @@ def main():
             sys.exit(2)
         inp = preprocess_input(inp, OUTDIR)
         inp2 = preprocess_input(inp2, OUTDIR)
-        stem = f"{OUTDIR}/roundtrip_3ds_camera3d_{audio}"
+        stem = resolve_output_stem(parsed.output, f"roundtrip_3ds_camera3d_{audio}", OUTDIR)
         container = f"{stem}.avi"
         watch = f"{stem}.mp4"
         print(f">> encoding 3DS Camera 3D  L={inp}  R={inp2}  ->  {container}")
@@ -893,8 +934,9 @@ def main():
             print(f"   ({fmt} has no '{audio}' audio; using '{choice}')")
 
         out_ext = AUDIO_FORMAT_EXTENSIONS.get(fmt, fmt)
-        container = f"{OUTDIR}/roundtrip_{fmt}_{choice}.{out_ext}"
-        watch     = f"{OUTDIR}/roundtrip_{fmt}_{choice}.wav"
+        stem = resolve_output_stem(parsed.output, f"roundtrip_{fmt}_{choice}", OUTDIR)
+        container = f"{stem}.{out_ext}"
+        watch     = f"{stem}.wav"
 
         enc_opts = ["-vn"] + list(codecs[choice])
         # -ar after the codec so it overrides a rate the format pins itself.
@@ -933,7 +975,7 @@ def main():
         sys.exit(2)
     inp = preprocess_input(inp, OUTDIR)
 
-    stem = f"{OUTDIR}/roundtrip_{fmt}_{audio}"
+    stem = resolve_output_stem(parsed.output, f"roundtrip_{fmt}_{audio}", OUTDIR)
     # The hvqm4 muxer's registered extension is .h4m (the retail extension),
     # not .hvqm4, and the fastvideo muxer is named "fv" not "fastvideo" --
     # ffmpeg picks the muxer from the output filename, so the container name
@@ -993,6 +1035,14 @@ def main():
             gop, count = kf
             enc_opts.extend(["-g", str(gop)])
             print(f"   keyframes: ~{count} evenly spaced (-g {gop}, scene cuts kept)")
+
+        if fmt in ("moflex", "moflex3d"):
+            # Preserve the source's chunk-padding block size on round trip
+            # (2048 = 3DS SDK encoder, 4096 = retail) instead of always
+            # falling back to retail's 4096, which would re-pad every chunk
+            # to a different boundary than the original file used.
+            block = mo_block or detect_moflex_block_size(inp) or 4096
+            enc_opts.extend(["-mo_block", str(block)])
     elif fmt == "vx":
         # Same audio codec as .mods codebook/SX (VXDS AFrame == SX bitstream);
         # -an skips it entirely, otherwise it's the muxer's default -c:a.

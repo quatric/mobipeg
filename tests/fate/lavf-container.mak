@@ -7,6 +7,7 @@ FATE_LAVF_CONTAINER-$(call ENCDEC2, MPEG2VIDEO, PCM_S16LE, GXF)                +
 FATE_LAVF_CONTAINER-$(call ENCDEC2, MPEG4,      MP2,       MATROSKA)           += mkv mkv_attachment
 FATE_LAVF_CONTAINER-$(call ENCDEC2, MPEG4,      PCM_ALAW,  MOV)                += mov mov_rtphint mov_hybrid_frag ismv
 FATE_LAVF_CONTAINER-$(call ENCDEC,  MPEG4,                 MP4 MOV)            += mp4
+FATE_LAVF_CONTAINER-$(call ENCDEC2, MPEG1VIDEO, MP2,       DPG)                += dpg
 FATE_LAVF_CONTAINER-$(call ENCDEC2, MPEG1VIDEO, MP2,       MPEG1SYSTEM MPEGPS) += mpg
 FATE_LAVF_CONTAINER-$(call ENCDEC , FFV1,                  MXF)                += mxf_ffv1
 FATE_LAVF_CONTAINER-$(call ENCDEC2, MPEG2VIDEO, PCM_S16LE, MXF)                += mxf
@@ -20,7 +21,7 @@ FATE_LAVF_CONTAINER-$(call ENCDEC,  FLV,                   SWF)                +
 FATE_LAVF_CONTAINER-$(call ENCDEC2, MPEG2VIDEO, MP2,       MPEGTS)             += ts
 FATE_LAVF_CONTAINER-$(call ENCDEC,  MP2,                   WTV)                += wtv
 
-FATE_LAVF_CONTAINER_RESAMPLE := asf avi dv_pal dv_ntsc gxf_pal gxf_ntsc  \
+FATE_LAVF_CONTAINER_RESAMPLE := asf avi dpg dv_pal dv_ntsc gxf_pal gxf_ntsc  \
                                 mkv mkv_attachment mpg mxf nut rm ts wtv
 FATE_LAVF_CONTAINER-$(!CONFIG_ARESAMPLE_FILTER) := $(filter-out $(FATE_LAVF_CONTAINER_RESAMPLE),$(FATE_LAVF_CONTAINER-yes))
 

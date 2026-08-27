@@ -34,6 +34,7 @@ typedef struct ASTMuxContext {
     int64_t  loopstart;
     int64_t  loopend;
     int      fbs;
+    int64_t  nb_samples;   /* as reported by the encoder, not derived from bytes */
 } ASTMuxContext;
 
 #define CHECK_LOOP(type) \
@@ -106,6 +107,9 @@ static int ast_write_packet(AVFormatContext *s, AVPacket *pkt)
     if (s->streams[0]->nb_frames == 0)
         ast->fbs = size;
 
+    if (pkt->duration > 0)
+        ast->nb_samples += pkt->duration;
+
     ffio_wfourcc(pb, "BLCK");
     avio_wb32(pb, size); /* Block size */
 
@@ -124,12 +128,18 @@ static int ast_write_trailer(AVFormatContext *s)
     AVCodecParameters *par = s->streams[0]->codecpar;
     int64_t file_size = avio_tell(pb);
     int64_t audio = file_size - 64 - (32 * s->streams[0]->nb_frames);
-    /* Sample count from the audio actually written. AFC packs 16 samples into
-     * 9 bytes per channel; PCM_S16BE_PLANAR spends block_align on one sample
-     * across all channels. */
-    int64_t samples = par->codec_id == AV_CODEC_ID_ADPCM_AFC
-                    ? audio / (9 * par->ch_layout.nb_channels) * 16
-                    : audio / par->block_align;
+    /* Prefer the count the encoder reported. Deriving it from the byte count
+     * rounds up to whole frames, which for AFC (16 samples per 9 bytes) can
+     * overstate the length by up to 15 samples of padding -- the header would
+     * then tell a player to play past the end of the audio. Falling back to
+     * the byte arithmetic keeps stream copies working, where packets may
+     * arrive without durations. */
+    int64_t samples = ast->nb_samples;
+
+    if (samples <= 0)
+        samples = par->codec_id == AV_CODEC_ID_ADPCM_AFC
+                ? audio / (9 * par->ch_layout.nb_channels) * 16
+                : audio / par->block_align;
 
     av_log(s, AV_LOG_DEBUG, "total samples: %"PRId64"\n", samples);
 
