@@ -96,7 +96,6 @@
     TAG(QOI,             qoi      ) \
     TAG(RADIANCE_HDR,    hdr      ) \
     TAG(WBMP,            wbmp     ) \
-    TAG(ODH,             odh      ) \
     TAG(NONE,                     )
 
 #define LENGTH_CHECK(CODECID, STR) \
