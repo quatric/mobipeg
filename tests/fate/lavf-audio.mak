@@ -14,6 +14,19 @@ FATE_LAVF_AUDIO-$(call ENCDEC,  PCM_S16LE,    W64)              += w64
 FATE_LAVF_AUDIO-$(call ENCDEC,  TTA,          TTA)              += tta
 FATE_LAVF_AUDIO-$(call ENCMUX,  TTA,          MATROSKA_AUDIO)   += mka
 FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  PCM_S16BE_PLANAR, AST) += ast
+# Nintendo DSP-ADPCM containers. adpcm_thp takes planar samples, so like the
+# AST test above these need the auto-inserted conversion filter.
+FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  ADPCM_AFC,      AST)   += ast_adpcm
+FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  ADPCM_THP,      DSP)   += dsp
+FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  ADPCM_THP,      BRSTM) += brstm
+FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  ADPCM_THP,      BFSTM) += bfstm
+FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  ADPCM_THP,      BNS)   += bns
+FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  PCM_S16BE,      BTSND) += btsnd
+# BCSTM is written by a muxer of its own but read back by the bfstm demuxer,
+# and being little-endian it decodes through adpcm_thp_le -- so ENCDEC, which
+# assumes the muxer and demuxer share a name, cannot express it.
+FATE_LAVF_AUDIO_RESAMPLE-$(call ALLYES,  ADPCM_THP_ENCODER ADPCM_THP_LE_DECODER \
+                                         BCSTM_MUXER BFSTM_DEMUXER FILE_PROTOCOL) += bcstm
 FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  DFPWM,          DFPWM) += dfpwm
 FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  PCM_U8,           RSO) += rso
 FATE_LAVF_AUDIO_RESAMPLE-$(call ENCDEC,  PCM_S16LE,        SOX) += sox
@@ -35,6 +48,14 @@ fate-lavf-dfpwm: CMD = lavf_audio "" "" "-sample_rate 44100"
 fate-lavf-ogg: CMD = lavf_audio "" "-frame_size 4608 -c:a flac"
 fate-lavf-s16.voc: CMD = lavf_audio "-ac 2" "-c:a pcm_s16le"
 fate-lavf-ast: CMD = lavf_audio "-ac 2" "-loopstart 1 -loopend 10"
+# The output is named lavf.ast_adpcm to keep it distinct from the PCM test
+# above, which leaves it without an extension ffmpeg recognises -- hence -f.
+fate-lavf-ast_adpcm: CMD = lavf_audio "-ac 2" "-c:a adpcm_afc -f ast"
+fate-lavf-dsp fate-lavf-brstm fate-lavf-bfstm fate-lavf-bcstm fate-lavf-bns: \
+    CMD = lavf_audio "-ac 2" "-c:a adpcm_thp"
+# The Wii U boot-sound player reads no format fields at all, so 48 kHz stereo
+# is not a preference here, it is the format.
+fate-lavf-btsnd: CMD = lavf_audio "-ac 2" "-ar 48000 -ac 2"
 fate-lavf-mka: CMD = lavf_audio "" "-c:a tta"
 fate-lavf-voc: CMD = lavf_audio "" "-c:a pcm_u8"
 fate-lavf-peak.wav: CMD = lavf_audio "" "-write_peak on"
