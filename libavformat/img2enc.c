@@ -395,7 +395,7 @@ const FFOutputFormat ff_image2_muxer = {
     .p.long_name    = NULL_IF_CONFIG_SMALL("image2 sequence"),
     .p.extensions   = "bmp,dpx,exr,jls,jpeg,jpg,jxs,jxl,ljpg,pam,pbm,pcx,pfm,pgm,pgmyuv,phm,"
                       "png,ppm,sgi,tga,tif,tiff,jp2,j2c,j2k,xwd,sun,ras,rs,im1,im8,"
-                      "im24,sunras,vbn,xbm,xface,pix,y,avif,qoi,hdr,wbmp",
+                      "im24,sunras,vbn,xbm,xface,pix,y,avif,qoi,hdr,wbmp,odh",
     .priv_data_size = sizeof(VideoMuxData),
     .p.video_codec  = AV_CODEC_ID_MJPEG,
     .write_header   = write_header,

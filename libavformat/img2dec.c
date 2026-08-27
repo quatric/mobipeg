@@ -889,6 +889,26 @@ static int pictor_probe(const AVProbeData *p)
     return 0;
 }
 
+static int odh_probe(const AVProbeData *p)
+{
+    /*
+     * "AJPG", then an 11+11+1+1+8 bit field packing width, height, the two
+     * sampling ratios and the quality.  Both dimensions must be non-zero and
+     * the quality can only run to 100, which together make the magic alone
+     * far less likely to false-positive.
+     */
+    uint32_t desc;
+
+    if (p->buf_size < 16 || memcmp(p->buf, "AJPG", 4))
+        return 0;
+
+    desc = AV_RB32(p->buf + 4);
+    if (!(desc & 0x7ff) || !((desc >> 11) & 0x7ff) || ((desc >> 24) & 0xff) > 100)
+        return 0;
+
+    return AVPROBE_SCORE_MAX - 1;
+}
+
 static int png_probe(const AVProbeData *p)
 {
     const uint8_t *b = p->buf;
@@ -1240,6 +1260,7 @@ IMAGEAUTO_DEMUXER(png,       PNG)
 IMAGEAUTO_DEMUXER(ppm,       PPM)
 IMAGEAUTO_DEMUXER(psd,       PSD)
 IMAGEAUTO_DEMUXER(qdraw,     QDRAW)
+IMAGEAUTO_DEMUXER(odh,       ODH)
 IMAGEAUTO_DEMUXER(qoi,       QOI)
 IMAGEAUTO_DEMUXER(sgi,       SGI)
 IMAGEAUTO_DEMUXER(sunrast,   SUNRAST)
