@@ -26,6 +26,10 @@
 #include "internal.h"
 #include "ast.h"
 
+typedef struct ASTDemuxContext {
+    int64_t samples_left;
+} ASTDemuxContext;
+
 static int ast_probe(const AVProbeData *p)
 {
     if (AV_RL32(p->buf) != MKTAG('S','T','R','M'))
@@ -76,7 +80,19 @@ static int ast_read_header(AVFormatContext *s)
     avio_skip(s->pb, 40);
     avpriv_set_pts_info(st, 64, 1, st->codecpar->sample_rate);
 
+    ((ASTDemuxContext *)s->priv_data)->samples_left = st->duration;
+
     return 0;
+}
+
+/* Samples one channel's worth of @p size bytes decodes to. ADPCM AFC packs 16
+ * samples into 9 bytes; PCM is 16-bit, which read_header has already
+ * checked is the only depth this demuxer accepts. */
+static int64_t ast_block_samples(const AVCodecParameters *par, uint32_t size)
+{
+    if (par->codec_id == AV_CODEC_ID_ADPCM_AFC)
+        return (int64_t)size / 9 * 16;
+    return (int64_t)size / 2;
 }
 
 static int ast_read_packet(AVFormatContext *s, AVPacket *pkt)
@@ -100,9 +116,28 @@ static int ast_read_packet(AVFormatContext *s, AVPacket *pkt)
         return ret;
 
     if (type == MKTAG('B','L','C','K')) {
+        ASTDemuxContext *c = s->priv_data;
+        AVCodecParameters *par = s->streams[0]->codecpar;
+        int64_t produced = ast_block_samples(par, size / par->ch_layout.nb_channels);
+
         ret = av_get_packet(s->pb, pkt, size);
         pkt->stream_index = 0;
         pkt->pos = pos;
+
+        /* A block holds whole frames, so the last one runs past the end of
+         * the stream by up to 15 samples of padding. The header's sample
+         * count is what bounds the audio, so discard the overshoot rather
+         * than letting it reach the output. */
+        if (ret >= 0 && c->samples_left > 0 && produced > c->samples_left) {
+            uint8_t *side = av_packet_new_side_data(pkt,
+                                                    AV_PKT_DATA_SKIP_SAMPLES, 10);
+            if (!side)
+                return AVERROR(ENOMEM);
+            AV_WL32(side,     0);
+            AV_WL32(side + 4, produced - c->samples_left);
+            side[8] = side[9] = 0;
+        }
+        c->samples_left -= produced;
     } else {
         av_log(s, AV_LOG_ERROR, "unknown chunk %"PRIx32"\n", type);
         avio_skip(s->pb, size);
@@ -118,6 +153,7 @@ const FFInputFormat ff_ast_demuxer = {
     .p.extensions   = "ast",
     .p.flags        = AVFMT_GENERIC_INDEX,
     .p.codec_tag    = ff_ast_codec_tags_list,
+    .priv_data_size = sizeof(ASTDemuxContext),
     .read_probe     = ast_probe,
     .read_header    = ast_read_header,
     .read_packet    = ast_read_packet,
