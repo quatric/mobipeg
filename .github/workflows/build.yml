@@ -881,9 +881,10 @@ jobs:
         run: |
           # Only the CLI's dependencies (nnc, libdarc) -- NOT the GUI's
           # wxWidgets, which we don't build or need here.
+          cd third_party/VidInjector9000
           git submodule update --init \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+            VidInjector9002-CLI/extern/nnc \
+            VidInjector9002-CLI/extern/libdarc
 
       - name: Cache mbedTLS
         id: cache-mbedtls
@@ -974,9 +975,10 @@ jobs:
 
       - name: Init VidInjector9002-CLI's own submodules
         run: |
+          cd third_party/VidInjector9000
           git submodule update --init \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+            VidInjector9002-CLI/extern/nnc \
+            VidInjector9002-CLI/extern/libdarc
 
       - name: Install build tools
         run: |
@@ -1043,9 +1045,10 @@ jobs:
       - name: Init VidInjector9002-CLI's own submodules
         shell: bash
         run: |
+          cd third_party/VidInjector9000
           git submodule update --init \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+            VidInjector9002-CLI/extern/nnc \
+            VidInjector9002-CLI/extern/libdarc
 
       - name: Cache mbedTLS
         id: cache-mbedtls
@@ -1112,9 +1115,10 @@ jobs:
       - name: Init VidInjector9002-CLI's own submodules
         shell: bash
         run: |
+          cd third_party/VidInjector9000
           git submodule update --init \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+            VidInjector9002-CLI/extern/nnc \
+            VidInjector9002-CLI/extern/libdarc
 
       - name: Cache mbedTLS
         id: cache-mbedtls
@@ -1180,9 +1184,10 @@ jobs:
       - name: Init VidInjector9002-CLI's own submodules
         shell: bash
         run: |
+          cd third_party/VidInjector9000
           git submodule update --init \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+            VidInjector9002-CLI/extern/nnc \
+            VidInjector9002-CLI/extern/libdarc
 
       - name: Cache mbedTLS
         id: cache-mbedtls
@@ -1247,9 +1252,10 @@ jobs:
 
       - name: Init VidInjector9002-CLI's own submodules
         run: |
+          cd third_party/VidInjector9000
           git submodule update --init \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
-            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+            VidInjector9002-CLI/extern/nnc \
+            VidInjector9002-CLI/extern/libdarc
 
       - name: Install build tools
         run: |
