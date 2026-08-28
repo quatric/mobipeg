@@ -467,12 +467,21 @@ static int mo_write_header(AVFormatContext *s)
 
     mo->first_video_written = 0;
 
-    int no_audio = (mo->audio_codec == 4);
     int num_audio_streams = 0;
     for (unsigned int i = 1; i < s->nb_streams; i++) {
         if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
             num_audio_streams++;
     }
+
+    /* Source has no audio track: silently drop into no-audio mode even if
+     * -mo_audio requested a codec, rather than erroring out. */
+    if (num_audio_streams == 0 && mo->audio_codec != 4) {
+        av_log(s, AV_LOG_WARNING,
+               "No audio stream in input; encoding without audio.\n");
+        mo->audio_codec = 4;
+    }
+
+    int no_audio = (mo->audio_codec == 4);
     mo->num_tracks = num_audio_streams;
     int min_streams = no_audio ? 1 : 2;
 
