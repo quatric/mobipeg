@@ -8,6 +8,7 @@ import math
 import shlex
 import shutil
 import struct
+import tempfile
 from fractions import Fraction
 
 # The mobiclip libx264 wrapper hard-caps the keyframe interval at 90 frames
@@ -88,10 +89,19 @@ if getattr(sys, 'frozen', False):
     FFPROBE = os.environ.get("FFPROBE", _find_frozen_binary(ffprobe_name))
     ffplay_name = "ffplay.exe" if os.name == 'nt' else "ffplay"
     FFPLAY = os.environ.get("FFPLAY", _find_frozen_binary(ffplay_name))
+    vidinjector_name = "VidInjector9002-CLI.exe" if os.name == 'nt' else "VidInjector9002-CLI"
+    VIDINJECTOR = os.environ.get("VIDINJECTOR", _find_frozen_binary(vidinjector_name))
 else:
     FFENC = os.environ.get("FFMPEG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg"))
     FFPROBE = os.environ.get("FFPROBE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe"))
     FFPLAY = os.environ.get("FFPLAY", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffplay"))
+    # Dev tree: the CLI lives in its vendored submodule's own build dir, not
+    # alongside encode.py (it's only copied next to ffmpeg for the packaged
+    # app, via the CI step that builds third_party/VidInjector9000).
+    VIDINJECTOR = os.environ.get("VIDINJECTOR", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "third_party", "VidInjector9000", "VidInjector9002-CLI", "build",
+        "VidInjector9002-CLI"))
 DEFAULT_OUTDIR = os.environ.get("OUTDIR", "/Volumes/SSD/tmp")
 
 
@@ -413,9 +423,100 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
         gop = min(gop, limit)
     return gop, count
 
+
+def package_cia(parsed):
+    """Package an already-encoded .moflex into a 3DS video CIA.
+
+    A separate, explicit step from encoding — build the .moflex first with
+    fmt=moflex, then package it here. Wraps the vendored VidInjector9002-CLI
+    (third_party/VidInjector9000): writes a throwaway .vi9p parameter file
+    pointing at the .moflex, then asks the CLI to build the .cia from it."""
+    # fmt=cia has no audio codec, so the natural invocation
+    # `encode.py cia clip.moflex -o clip.cia` puts the .moflex path in the
+    # "audio" positional slot; fall back to input_file for anyone who passes
+    # a placeholder there instead.
+    cia_input = parsed.audio if parsed.audio != "adpcm" else parsed.input_file
+    if not cia_input:
+        print("cia: input .moflex file required, e.g.:\n"
+              "  encode.py cia clip.moflex -o clip.cia", file=sys.stderr)
+        sys.exit(1)
+    if not os.path.isfile(cia_input):
+        print(f"input not found: {cia_input}", file=sys.stderr)
+        sys.exit(1)
+    if not cia_input.lower().endswith(".moflex"):
+        print(f"warning: {cia_input} doesn't look like a .moflex file — "
+              f"the CIA will still build, but 3DS may refuse to play it")
+
+    if not os.path.isfile(VIDINJECTOR):
+        print(f"VidInjector9002-CLI not found at:\n  {VIDINJECTOR}\n"
+              f"Build it once:\n"
+              f"  git submodule update --init --recursive third_party/VidInjector9000\n"
+              f"  cd third_party/VidInjector9000/VidInjector9002-CLI && ./build.sh\n"
+              f"(needs cmake and, on macOS, `brew install mbedtls` visible to CMAKE_PREFIX_PATH)",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        os.chmod(VIDINJECTOR, os.stat(VIDINJECTOR).st_mode | 0o111)
+    except OSError:
+        pass
+
+    out_stem = resolve_output_stem(parsed.output, "package_cia", parsed.outdir)
+    out_cia = os.path.abspath(out_stem + ".cia")
+    os.makedirs(os.path.dirname(out_cia) or ".", exist_ok=True)
+
+    # VidInjector9002-CLI dumps its own working files (romfs/exefs staging,
+    # a "VidInjector9000Resources" dir) relative to the process cwd instead
+    # of a real temp directory -- run it from an isolated tempdir so it
+    # doesn't litter wherever encode.py happened to be launched from.
+    cia_input = os.path.abspath(cia_input)
+    icon_abs = os.path.abspath(parsed.cia_icon) if parsed.cia_icon else ""
+    banner_abs = os.path.abspath(parsed.cia_banner) if parsed.cia_banner else ""
+
+    workdir = tempfile.mkdtemp(prefix="mobipeg_cia_")
+    vi9p = os.path.join(workdir, "project.vi9p")
+
+    def vi(*args):
+        cmd = [VIDINJECTOR] + [str(a) for a in args]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
+        except FileNotFoundError as e:
+            print(f"Command failed: {cmd[0]}: {e}", file=sys.stderr)
+            sys.exit(1)
+        if r.returncode != 0:
+            print(f"VidInjector9002-CLI failed: {' '.join(cmd)}\n{r.stdout}{r.stderr}",
+                  file=sys.stderr)
+            sys.exit(1)
+        return r.stdout
+
+    try:
+        print(f">> packaging  {cia_input}  ->  {out_cia}")
+        vi("-new", vi9p)
+        vi("-sp", vi9p, 13, cia_input, vi9p)                    # STR:MOFLEX(0)
+        sname = parsed.cia_title or os.path.splitext(os.path.basename(cia_input))[0]
+        lname = parsed.cia_long_title or sname
+        vi("-sp", vi9p, 4, sname, vi9p)                         # STR:SNAME
+        vi("-sp", vi9p, 5, lname, vi9p)                         # STR:LNAME
+        vi("-sp", vi9p, 6, parsed.cia_publisher, vi9p)          # STR:PUBLISHER
+        if icon_abs:
+            vi("-sp", vi9p, 2, icon_abs, vi9p)                  # STR:ICON
+        if banner_abs:
+            vi("-sp", vi9p, 1, banner_abs, vi9p)                # STR:BANNER
+
+        if parsed.cia_unique_id:
+            vi("-bc", vi9p, parsed.cia_unique_id, sname,
+               parsed.cia_product_code, out_cia)
+        else:
+            vi("-bc", vi9p, out_cia)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    print("\npackage complete:")
+    subprocess.run(["ls", "-la", out_cia])
+
+
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.ty, or 'play' to play one back without writing a file")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
     parser.add_argument("input2", nargs="?", default="", help="Second input file (right eye for moflex3d / 3ds_camera3d). moflex3d: omit this to auto-split a single packed stereoscopic source (e.g. a BD3D MKV with StereoMode set) using --stereo or its detected layout.")
@@ -456,6 +557,19 @@ def main():
     parser.add_argument("--me", dest="me_method", default="", choices=["dia", "hex", "umh", "esa"], help="MobiClip: motion search method (retail 'MeMethod'). Default is the preset's (hex).")
     parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
     parser.add_argument("--ffmpeg-args", dest="ffmpeg_args", default="", help="Extra parameters appended verbatim to the ffmpeg command line, just before the output file. Parsed like a shell word list, so quoting works: --ffmpeg-args '-t 5 -af volume=0.5'. Because ffmpeg lets the last occurrence of an option win, these override the format preset. Applies to encode, decode and play; internal analysis passes (the mods keyframe probe and --roundtrip validation) are left alone.")
+
+    # --- fmt=cia: package an already-encoded .moflex into a 3DS video CIA. ---
+    # A separate, explicit step from encoding on purpose — you build the
+    # .moflex first with fmt=moflex, then package it here. Wraps the vendored
+    # VidInjector9002-CLI (third_party/VidInjector9000); see VIDINJECTOR above.
+    parser.add_argument("--cia-title", dest="cia_title", default="", help="cia only: short title shown on the HOME Menu tile (retail SNAME).")
+    parser.add_argument("--cia-long-title", dest="cia_long_title", default="", help="cia only: long title shown in the applet's title bar (retail LNAME). Defaults to --cia-title.")
+    parser.add_argument("--cia-publisher", dest="cia_publisher", default="mobipeg", help="cia only: publisher name shown under the title (retail PUBLISHER).")
+    parser.add_argument("--cia-icon", dest="cia_icon", default="", help="cia only: path to a PNG/JPEG for the HOME Menu icon (retail ICON). Omit to use VidInjector's built-in placeholder.")
+    parser.add_argument("--cia-banner", dest="cia_banner", default="", help="cia only: path to a PNG/JPEG for the applet banner (retail BANNER). Omit to use VidInjector's built-in placeholder.")
+    parser.add_argument("--cia-unique-id", dest="cia_unique_id", default="", help="cia only: hex title-ID unique portion, must be C0000-EFFFF to avoid clashing with other titles. Default: VidInjector picks a random one in range.")
+    parser.add_argument("--cia-product-code", dest="cia_product_code", default="VDIJ", help="cia only: 4-letter product code suffix (retail default 'VDIJ').")
+
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
     parser.add_argument("-o", "--output", dest="output", default="", help="Output filename. Decode mode: default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4. Encode mode: the extension is still chosen by the target format (this only picks the directory and base name), overriding the generated roundtrip_<fmt>_<audio> name; --outdir is ignored when this is set.")
     parser.add_argument("--stereo", dest="stereo", default="auto", choices=["auto", "none", "frameseq", "frameseq-r", "tb", "tb-r", "sbs", "sbs-r"], help="Decode/play mode: force the stereoscopic layout instead of reading it from the file. Use this when a 3D file carries no layout descriptor (nothing to detect) so --eyes still splits it. The '-r' variants mean the right eye is stored first. 'none' treats the input as 2D.")
@@ -476,6 +590,11 @@ def main():
     audio = parsed.audio
     input_file = parsed.input_file
     input2 = parsed.input2
+
+    if fmt == "cia":
+        package_cia(parsed)
+        return
+
     scale_ovr = parsed.scale
     roundtrip = parsed.roundtrip
     mo_block = parsed.mo_block
