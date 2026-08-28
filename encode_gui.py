@@ -226,7 +226,7 @@ class EncodeGUI(tk.Tk):
         
         # Row 1: Audio Codec
         ttk.Label(self.encode_frame, text="Audio Codec:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-        self.enc_audio_var = tk.StringVar(value="adpcm")
+        self.enc_audio_var = tk.StringVar(value="pcm")
         self.enc_audio_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_audio_var, state="readonly")
         self.enc_audio_cb.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
         
@@ -283,7 +283,7 @@ class EncodeGUI(tk.Tk):
         # Row 8: Quantizer / QP (0=default)
         self.enc_quant_label = ttk.Label(self.encode_frame, text="Quantizer / QP (0=default):")
         self.enc_quant_label.grid(row=9, column=0, sticky="e", padx=5, pady=5)
-        self.enc_quant_var = tk.StringVar(value="0")
+        self.enc_quant_var = tk.StringVar(value="12")
         self.enc_quant_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_quant_var, width=8)
         self.enc_quant_entry.grid(row=9, column=1, sticky="w", padx=5, pady=5)
 
@@ -324,7 +324,7 @@ class EncodeGUI(tk.Tk):
             variable=self.enc_roundtrip_var)
         self.enc_roundtrip_chk.grid(row=14, column=1, sticky="w", padx=5, pady=2)
 
-        self.enc_hq_var = tk.BooleanVar(value=False)
+        self.enc_hq_var = tk.BooleanVar(value=True)
         self.enc_hq_chk = ttk.Checkbutton(
             self.encode_frame,
             text="Use Highest Quality (Largest Filesize)",
@@ -379,12 +379,12 @@ class EncodeGUI(tk.Tk):
 
         # MOBI_SUBME
         ttk.Label(self.enc_adv_frame, text="Subpel/RD refine 2-9 (blank = preset):").grid(row=2, column=0, sticky="e", padx=5, pady=2)
-        self.enc_mobi_subme_var = tk.StringVar(value="")
+        self.enc_mobi_subme_var = tk.StringVar(value="9")
         ttk.Entry(self.enc_adv_frame, textvariable=self.enc_mobi_subme_var, width=6).grid(row=2, column=1, sticky="w", padx=5, pady=2)
 
         # MOBI_SKIP
         ttk.Label(self.enc_adv_frame, text="MOBI_SKIP (MB Skip Threshold, default 512):").grid(row=3, column=0, sticky="e", padx=5, pady=2)
-        self.enc_mobi_skip_var = tk.StringVar(value="512")
+        self.enc_mobi_skip_var = tk.StringVar(value="0")
         ttk.Entry(self.enc_adv_frame, textvariable=self.enc_mobi_skip_var, width=6).grid(row=3, column=1, sticky="w", padx=5, pady=2)
 
         # MOBI_INTRA_ONLY
