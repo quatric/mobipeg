@@ -886,6 +886,20 @@ jobs:
             VidInjector9002-CLI/extern/nnc \
             VidInjector9002-CLI/extern/libdarc
 
+      - name: Patch upstream static_assert(false) build failure
+        shell: bash
+        run: |
+          # include/fs.hpp's UTF16fileToUTF8str<T>() has
+          # `static_assert(false, ...)` in an untaken `if constexpr` branch.
+          # That's ill-formed even when never instantiated (the condition
+          # doesn't depend on T), so it's a hard error on compilers that
+          # diagnose it eagerly (GCC, Xcode 15.4's Clang) -- MSVC tolerates
+          # it. Fix: make the condition template-dependent (the standard
+          # idiom for this exact situation) so it's genuinely deferred to
+          # instantiation, without touching the submodule's pinned commit.
+          FILE="third_party/VidInjector9000/VidInjector9002-CLI/include/fs.hpp"
+          sed -i '' 's/static_assert(false, "Invalid use of UTF16fileToUTF8str/static_assert(sizeof(T*) == 0, "Invalid use of UTF16fileToUTF8str/' "$FILE"
+
       - name: Cache mbedTLS
         id: cache-mbedtls
         uses: actions/cache@v6
@@ -980,6 +994,20 @@ jobs:
             VidInjector9002-CLI/extern/nnc \
             VidInjector9002-CLI/extern/libdarc
 
+      - name: Patch upstream static_assert(false) build failure
+        shell: bash
+        run: |
+          # include/fs.hpp's UTF16fileToUTF8str<T>() has
+          # `static_assert(false, ...)` in an untaken `if constexpr` branch.
+          # That's ill-formed even when never instantiated (the condition
+          # doesn't depend on T), so it's a hard error on compilers that
+          # diagnose it eagerly (GCC, Xcode 15.4's Clang) -- MSVC tolerates
+          # it. Fix: make the condition template-dependent (the standard
+          # idiom for this exact situation) so it's genuinely deferred to
+          # instantiation, without touching the submodule's pinned commit.
+          FILE="third_party/VidInjector9000/VidInjector9002-CLI/include/fs.hpp"
+          sed -i 's/static_assert(false, "Invalid use of UTF16fileToUTF8str/static_assert(sizeof(T*) == 0, "Invalid use of UTF16fileToUTF8str/' "$FILE"
+
       - name: Install build tools
         run: |
           sudo apt-get update -qq
@@ -1049,6 +1077,20 @@ jobs:
           git submodule update --init \
             VidInjector9002-CLI/extern/nnc \
             VidInjector9002-CLI/extern/libdarc
+
+      - name: Patch upstream static_assert(false) build failure
+        shell: bash
+        run: |
+          # include/fs.hpp's UTF16fileToUTF8str<T>() has
+          # `static_assert(false, ...)` in an untaken `if constexpr` branch.
+          # That's ill-formed even when never instantiated (the condition
+          # doesn't depend on T), so it's a hard error on compilers that
+          # diagnose it eagerly (GCC, Xcode 15.4's Clang) -- MSVC tolerates
+          # it. Fix: make the condition template-dependent (the standard
+          # idiom for this exact situation) so it's genuinely deferred to
+          # instantiation, without touching the submodule's pinned commit.
+          FILE="third_party/VidInjector9000/VidInjector9002-CLI/include/fs.hpp"
+          sed -i 's/static_assert(false, "Invalid use of UTF16fileToUTF8str/static_assert(sizeof(T*) == 0, "Invalid use of UTF16fileToUTF8str/' "$FILE"
 
       - name: Cache mbedTLS
         id: cache-mbedtls
@@ -1120,6 +1162,20 @@ jobs:
             VidInjector9002-CLI/extern/nnc \
             VidInjector9002-CLI/extern/libdarc
 
+      - name: Patch upstream static_assert(false) build failure
+        shell: bash
+        run: |
+          # include/fs.hpp's UTF16fileToUTF8str<T>() has
+          # `static_assert(false, ...)` in an untaken `if constexpr` branch.
+          # That's ill-formed even when never instantiated (the condition
+          # doesn't depend on T), so it's a hard error on compilers that
+          # diagnose it eagerly (GCC, Xcode 15.4's Clang) -- MSVC tolerates
+          # it. Fix: make the condition template-dependent (the standard
+          # idiom for this exact situation) so it's genuinely deferred to
+          # instantiation, without touching the submodule's pinned commit.
+          FILE="third_party/VidInjector9000/VidInjector9002-CLI/include/fs.hpp"
+          sed -i 's/static_assert(false, "Invalid use of UTF16fileToUTF8str/static_assert(sizeof(T*) == 0, "Invalid use of UTF16fileToUTF8str/' "$FILE"
+
       - name: Cache mbedTLS
         id: cache-mbedtls
         uses: actions/cache@v6
@@ -1189,6 +1245,20 @@ jobs:
             VidInjector9002-CLI/extern/nnc \
             VidInjector9002-CLI/extern/libdarc
 
+      - name: Patch upstream static_assert(false) build failure
+        shell: bash
+        run: |
+          # include/fs.hpp's UTF16fileToUTF8str<T>() has
+          # `static_assert(false, ...)` in an untaken `if constexpr` branch.
+          # That's ill-formed even when never instantiated (the condition
+          # doesn't depend on T), so it's a hard error on compilers that
+          # diagnose it eagerly (GCC, Xcode 15.4's Clang) -- MSVC tolerates
+          # it. Fix: make the condition template-dependent (the standard
+          # idiom for this exact situation) so it's genuinely deferred to
+          # instantiation, without touching the submodule's pinned commit.
+          FILE="third_party/VidInjector9000/VidInjector9002-CLI/include/fs.hpp"
+          sed -i 's/static_assert(false, "Invalid use of UTF16fileToUTF8str/static_assert(sizeof(T*) == 0, "Invalid use of UTF16fileToUTF8str/' "$FILE"
+
       - name: Cache mbedTLS
         id: cache-mbedtls
         uses: actions/cache@v6
@@ -1256,6 +1326,20 @@ jobs:
           git submodule update --init \
             VidInjector9002-CLI/extern/nnc \
             VidInjector9002-CLI/extern/libdarc
+
+      - name: Patch upstream static_assert(false) build failure
+        shell: bash
+        run: |
+          # include/fs.hpp's UTF16fileToUTF8str<T>() has
+          # `static_assert(false, ...)` in an untaken `if constexpr` branch.
+          # That's ill-formed even when never instantiated (the condition
+          # doesn't depend on T), so it's a hard error on compilers that
+          # diagnose it eagerly (GCC, Xcode 15.4's Clang) -- MSVC tolerates
+          # it. Fix: make the condition template-dependent (the standard
+          # idiom for this exact situation) so it's genuinely deferred to
+          # instantiation, without touching the submodule's pinned commit.
+          FILE="third_party/VidInjector9000/VidInjector9002-CLI/include/fs.hpp"
+          sed -i 's/static_assert(false, "Invalid use of UTF16fileToUTF8str/static_assert(sizeof(T*) == 0, "Invalid use of UTF16fileToUTF8str/' "$FILE"
 
       - name: Install build tools
         run: |
