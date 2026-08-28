@@ -772,16 +772,16 @@ jobs:
             cd dav1d-$ARCH
             MESON_CROSS_ARGS=()
             if [ "$ARCH" = "x86_64" ]; then
-              cat > cross-x86_64.txt <<EOF
-[binaries]
-c = ['clang', '-target', 'x86_64-apple-macos11.0']
-
-[host_machine]
-system = 'darwin'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
-endian = 'little'
-EOF
+              printf '%s\n' \
+                "[binaries]" \
+                "c = ['clang', '-target', 'x86_64-apple-macos11.0']" \
+                "" \
+                "[host_machine]" \
+                "system = 'darwin'" \
+                "cpu_family = 'x86_64'" \
+                "cpu = 'x86_64'" \
+                "endian = 'little'" \
+                > cross-x86_64.txt
               MESON_CROSS_ARGS=(--cross-file cross-x86_64.txt)
             fi
             meson setup build --prefix="$PREFIX" --default-library=static --buildtype=release -Denable_tools=false -Denable_tests=false "${MESON_CROSS_ARGS[@]}"
