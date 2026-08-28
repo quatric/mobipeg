@@ -1097,11 +1097,213 @@ jobs:
           path: mobipeg-vidinjector-windows-x86_64.zip
           retention-days: 7
 
+  # VidInjector9002-CLI, Windows x86 (32-bit). Same windows-latest host as
+  # the x86_64 job -- MSVC cross-targets 32-bit natively via -A Win32, no
+  # separate runner needed.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-vidinjector-windows-x86:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Init VidInjector9002-CLI's own submodules
+        shell: bash
+        run: |
+          git submodule update --init \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+
+      - name: Cache mbedTLS
+        id: cache-mbedtls
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/deps-mbedtls
+          key: deps-mbedtls-v3.6.2-windows-x86
+
+      - name: Build mbedTLS (mbedcrypto only — that's all VidInjector links)
+        if: steps.cache-mbedtls.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls"
+          git clone --depth=1 --branch v3.6.2 https://github.com/Mbed-TLS/mbedtls.git mbedtls-src
+          cd mbedtls-src
+          git submodule update --init framework
+          cmake -B build -A Win32 -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DMBEDTLS_FATAL_WARNINGS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS"
+          cmake --build build --config Release -j"$(nproc || echo 4)"
+          cmake --install build --config Release
+
+      - name: Build VidInjector9002-CLI
+        shell: bash
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls"
+          CLI_DIR="third_party/VidInjector9000/VidInjector9002-CLI"
+          cmake -B "$CLI_DIR/build" -S "$CLI_DIR" -A Win32 \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$DEPS"
+          cmake --build "$CLI_DIR/build" --config Release
+          mkdir -p dist
+          if [ -f "$CLI_DIR/build/Release/VidInjector9002-CLI.exe" ]; then
+            cp "$CLI_DIR/build/Release/VidInjector9002-CLI.exe" dist/
+          else
+            cp "$CLI_DIR/build/VidInjector9002-CLI.exe" dist/
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          7z a ../mobipeg-vidinjector-windows-x86.zip VidInjector9002-CLI.exe
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mobipeg-vidinjector-windows-x86
+          path: mobipeg-vidinjector-windows-x86.zip
+          retention-days: 7
+
+  # VidInjector9002-CLI, Windows arm64. Native windows-11-arm runner (same
+  # host build-gui already uses for windows-arm64) -- the default generator
+  # there targets ARM64 already, no extra flag needed.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-vidinjector-windows-arm64:
+    runs-on: windows-11-arm
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Init VidInjector9002-CLI's own submodules
+        shell: bash
+        run: |
+          git submodule update --init \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+
+      - name: Cache mbedTLS
+        id: cache-mbedtls
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/deps-mbedtls
+          key: deps-mbedtls-v3.6.2-windows-arm64
+
+      - name: Build mbedTLS (mbedcrypto only — that's all VidInjector links)
+        if: steps.cache-mbedtls.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls"
+          git clone --depth=1 --branch v3.6.2 https://github.com/Mbed-TLS/mbedtls.git mbedtls-src
+          cd mbedtls-src
+          git submodule update --init framework
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DMBEDTLS_FATAL_WARNINGS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS"
+          cmake --build build --config Release -j"$(nproc || echo 4)"
+          cmake --install build --config Release
+
+      - name: Build VidInjector9002-CLI
+        shell: bash
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls"
+          CLI_DIR="third_party/VidInjector9000/VidInjector9002-CLI"
+          cmake -B "$CLI_DIR/build" -S "$CLI_DIR" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$DEPS"
+          cmake --build "$CLI_DIR/build" --config Release
+          mkdir -p dist
+          if [ -f "$CLI_DIR/build/Release/VidInjector9002-CLI.exe" ]; then
+            cp "$CLI_DIR/build/Release/VidInjector9002-CLI.exe" dist/
+          else
+            cp "$CLI_DIR/build/VidInjector9002-CLI.exe" dist/
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          7z a ../mobipeg-vidinjector-windows-arm64.zip VidInjector9002-CLI.exe
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mobipeg-vidinjector-windows-arm64
+          path: mobipeg-vidinjector-windows-arm64.zip
+          retention-days: 7
+
+  # VidInjector9002-CLI, Linux arm64. Native ubuntu-22.04-arm runner (same
+  # host build-gui already uses for linux-arm64, not the docker/QEMU path
+  # used by linux-x86 and linux-armhf) -- plain native cmake + g++.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-vidinjector-linux-arm64:
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Init VidInjector9002-CLI's own submodules
+        run: |
+          git submodule update --init \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential cmake git
+
+      - name: Cache mbedTLS
+        id: cache-mbedtls
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/deps-mbedtls
+          key: deps-mbedtls-v3.6.2-linux-arm64
+
+      - name: Build mbedTLS (mbedcrypto only — that's all VidInjector links)
+        if: steps.cache-mbedtls.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls"
+          git clone --depth=1 --branch v3.6.2 https://github.com/Mbed-TLS/mbedtls.git mbedtls-src
+          cd mbedtls-src
+          git submodule update --init framework
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DMBEDTLS_FATAL_WARNINGS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$DEPS"
+          cmake --build build -j"$(nproc)"
+          cmake --install build
+
+      - name: Build VidInjector9002-CLI
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls"
+          CLI_DIR="third_party/VidInjector9000/VidInjector9002-CLI"
+          cmake -B "$CLI_DIR/build" -S "$CLI_DIR" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$DEPS"
+          cmake --build "$CLI_DIR/build" --config Release -j"$(nproc)"
+          mkdir -p dist
+          cp "$CLI_DIR/build/VidInjector9002-CLI" dist/
+          chmod +x dist/VidInjector9002-CLI
+
+      - name: Package
+        run: tar -czf mobipeg-vidinjector-linux-arm64.tar.gz -C dist VidInjector9002-CLI
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mobipeg-vidinjector-linux-arm64
+          path: mobipeg-vidinjector-linux-arm64.tar.gz
+          retention-days: 7
+
   # Build GUI App using PyInstaller
   # ─────────────────────────────────────────────────────────────────────────
   build-gui:
     needs: [build-linux, build-windows, build-macos, build-vidinjector-macos,
-            build-vidinjector-linux-x86_64, build-vidinjector-windows-x86_64]
+            build-vidinjector-linux-x86_64, build-vidinjector-windows-x86_64,
+            build-vidinjector-windows-x86, build-vidinjector-windows-arm64,
+            build-vidinjector-linux-arm64]
     strategy:
       fail-fast: false
       matrix:
@@ -1178,18 +1380,20 @@ jobs:
             unzip mobipeg-*.zip
           fi
 
-      # Only built for macos-universal, linux-x86_64, and windows-x86_64
-      # (see the build-vidinjector-* jobs) — every other target skips this
-      # and the GUI just won't have the Package CIA step wired to a binary.
+      # Built for every target except 32-bit/ARMv7 Linux (linux-x86,
+      # linux-armhf), which go through the Docker/QEMU cross path in
+      # build-vidinjector-* -- not worth the risk of an unverifiable
+      # emulated cmake+mbedTLS+C++20 cross-build. Those two just won't have
+      # the Package CIA step wired to a binary.
       - name: Download VidInjector9002-CLI artifact
-        if: contains(fromJSON('["macos-universal", "linux-x86_64", "windows-x86_64"]'), matrix.target)
+        if: contains(fromJSON('["macos-universal", "linux-x86_64", "linux-arm64", "windows-x86_64", "windows-x86", "windows-arm64"]'), matrix.target)
         uses: actions/download-artifact@v6
         with:
           name: mobipeg-vidinjector-${{ matrix.target }}
           path: artifact-vidinjector
 
       - name: Extract VidInjector9002-CLI artifact
-        if: contains(fromJSON('["macos-universal", "linux-x86_64", "windows-x86_64"]'), matrix.target)
+        if: contains(fromJSON('["macos-universal", "linux-x86_64", "linux-arm64", "windows-x86_64", "windows-x86", "windows-arm64"]'), matrix.target)
         shell: bash
         run: |
           cd artifact-vidinjector
