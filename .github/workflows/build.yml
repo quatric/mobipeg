@@ -862,11 +862,107 @@ jobs:
           path: mobipeg-macos-universal.tar.gz
           retention-days: 7
 
+  # Build VidInjector9002-CLI (3DS video-CIA packager), macOS only for now.
+  # Vendored as a submodule rather than ported natively — see
+  # third_party/VidInjector9000. mbedTLS is built from source because
+  # Homebrew's package ships no CMake package config (find_package(MbedTLS)
+  # needs MbedTLSConfig.cmake), and the project's own vendored-mbedtls
+  # fallback path is disabled upstream with no submodule wired for it.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-vidinjector-macos:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Init VidInjector9002-CLI's own submodules
+        run: |
+          # Only the CLI's dependencies (nnc, libdarc) -- NOT the GUI's
+          # wxWidgets, which we don't build or need here.
+          git submodule update --init \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/nnc \
+            third_party/VidInjector9000/VidInjector9002-CLI/extern/libdarc
+
+      - name: Cache mbedTLS
+        id: cache-mbedtls
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/deps-mbedtls
+          key: deps-mbedtls-v3.6.2-macos-universal
+
+      - name: Build mbedTLS (mbedcrypto only — that's all VidInjector links)
+        if: steps.cache-mbedtls.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls"
+          git clone --depth=1 --branch v3.6.2 https://github.com/Mbed-TLS/mbedtls.git mbedtls-src
+          cd mbedtls-src
+          git submodule update --init framework
+
+          build_arch() {
+            local ARCH=$1
+            cmake -B "build-$ARCH" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+              -DMBEDTLS_FATAL_WARNINGS=OFF \
+              -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+              -DCMAKE_INSTALL_PREFIX="$DEPS/$ARCH"
+            cmake --build "build-$ARCH" -j"$(sysctl -n hw.logicalcpu)"
+            cmake --install "build-$ARCH"
+          }
+          build_arch arm64
+          build_arch x86_64
+
+          # Merge into a universal install: headers + CMake config are
+          # identical across arches, only the .a files need lipo.
+          mkdir -p "$DEPS/universal/lib"
+          cp -R "$DEPS/arm64/include" "$DEPS/universal/include"
+          cp -R "$DEPS/arm64/lib/cmake" "$DEPS/universal/lib/cmake"
+          cp -R "$DEPS/arm64/lib/pkgconfig" "$DEPS/universal/lib/pkgconfig"
+          for lib in "$DEPS/arm64/lib/"*.a; do
+            name=$(basename "$lib")
+            lipo -create -output "$DEPS/universal/lib/$name" \
+              "$DEPS/arm64/lib/$name" "$DEPS/x86_64/lib/$name"
+          done
+
+      - name: Build VidInjector9002-CLI
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps-mbedtls/universal"
+          CLI_DIR="third_party/VidInjector9000/VidInjector9002-CLI"
+
+          build_arch() {
+            local ARCH=$1
+            cmake -B "$CLI_DIR/build-$ARCH" -S "$CLI_DIR" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+              -DCMAKE_PREFIX_PATH="$DEPS"
+            cmake --build "$CLI_DIR/build-$ARCH" --config Release \
+              -j"$(sysctl -n hw.logicalcpu)"
+          }
+          build_arch arm64
+          build_arch x86_64
+
+          mkdir -p dist
+          lipo -create -output dist/VidInjector9002-CLI \
+            "$CLI_DIR/build-arm64/VidInjector9002-CLI" \
+            "$CLI_DIR/build-x86_64/VidInjector9002-CLI"
+          chmod +x dist/VidInjector9002-CLI
+          lipo -info dist/VidInjector9002-CLI
+
+      - name: Package
+        run: tar -czf mobipeg-vidinjector-macos-universal.tar.gz -C dist VidInjector9002-CLI
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mobipeg-vidinjector-macos-universal
+          path: mobipeg-vidinjector-macos-universal.tar.gz
+          retention-days: 7
 
   # Build GUI App using PyInstaller
   # ─────────────────────────────────────────────────────────────────────────
   build-gui:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-windows, build-macos, build-vidinjector-macos]
     strategy:
       fail-fast: false
       matrix:
@@ -943,6 +1039,20 @@ jobs:
             unzip mobipeg-*.zip
           fi
 
+      - name: Download VidInjector9002-CLI artifact
+        if: matrix.target == 'macos-universal'
+        uses: actions/download-artifact@v6
+        with:
+          name: mobipeg-vidinjector-macos-universal
+          path: artifact-vidinjector
+
+      - name: Extract VidInjector9002-CLI artifact
+        if: matrix.target == 'macos-universal'
+        run: |
+          cd artifact-vidinjector
+          tar -xzf mobipeg-vidinjector-macos-universal.tar.gz
+          chmod +x VidInjector9002-CLI
+
       - name: Build PyInstaller App (Docker / QEMU)
         if: matrix.docker_platform != ''
         run: |
@@ -995,6 +1105,7 @@ jobs:
             BINARY_ARGS=(--add-binary "$FFMPEG_BIN:." --add-binary "$FFPROBE_BIN:.")
             # ffplay is only present if SDL2 was found during the FFmpeg build
             [ -f "$FFPLAY_BIN" ] && BINARY_ARGS+=(--add-binary "$FFPLAY_BIN:.")
+            BINARY_ARGS+=(--add-binary "artifact-vidinjector/VidInjector9002-CLI:.")
             pyinstaller --name "mobipeg-gui" --windowed \
               "${BINARY_ARGS[@]}" --add-data "logo.png:." \
               --icon=logo.png --distpath pyinst_dist \
