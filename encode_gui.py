@@ -131,6 +131,13 @@ class EncodeGUI(tk.Tk):
         self.decode_frame = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.decode_frame, text="Decode")
         self.setup_decode_tab()
+
+        # --- PACKAGE CIA TAB ---
+        # Deliberately its own step, not chained onto Encode: you build the
+        # .moflex first, then package it here once you're happy with it.
+        self.cia_frame = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.cia_frame, text="Package CIA")
+        self.setup_cia_tab()
         
         # --- CONSOLE ---
         ttk.Label(self, text="Console Output:").pack(anchor="w", pady=(10, 0))
@@ -844,6 +851,122 @@ class EncodeGUI(tk.Tk):
         self.add_ffargs(cmd, self.dec_ffargs_var)
 
         self.execute_cmd(cmd, self.dec_run_btn)
+
+    def setup_cia_tab(self):
+        self.cia_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(self.cia_frame, text="Input .moflex:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        self.cia_input_var = tk.StringVar()
+        ttk.Entry(self.cia_frame, textvariable=self.cia_input_var).grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.cia_frame, text="Browse...",
+                   command=lambda: self.browse_file(
+                       self.cia_input_var,
+                       [("MobiClip MOFLEX", "*.moflex"), ("All files", "*.*")])
+                   ).grid(row=0, column=2, padx=5, pady=5)
+
+        ttk.Label(self.cia_frame, text="Title:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        self.cia_title_var = tk.StringVar()
+        ttk.Entry(self.cia_frame, textvariable=self.cia_title_var).grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Label(self.cia_frame, foreground="grey",
+                  text="shown on the HOME Menu; leave blank to use the file name"
+                  ).grid(row=2, column=1, sticky="w", padx=5)
+
+        ttk.Label(self.cia_frame, text="Publisher:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        self.cia_publisher_var = tk.StringVar(value="mobipeg")
+        ttk.Entry(self.cia_frame, textvariable=self.cia_publisher_var).grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+
+        ttk.Label(self.cia_frame, text="Icon (optional):").grid(row=4, column=0, sticky="e", padx=5, pady=5)
+        self.cia_icon_var = tk.StringVar()
+        ttk.Entry(self.cia_frame, textvariable=self.cia_icon_var).grid(row=4, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.cia_frame, text="Browse...",
+                   command=lambda: self.browse_file(
+                       self.cia_icon_var,
+                       [("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")])
+                   ).grid(row=4, column=2, padx=5, pady=5)
+
+        ttk.Label(self.cia_frame, text="Banner (optional):").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+        self.cia_banner_var = tk.StringVar()
+        ttk.Entry(self.cia_frame, textvariable=self.cia_banner_var).grid(row=5, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.cia_frame, text="Browse...",
+                   command=lambda: self.browse_file(
+                       self.cia_banner_var,
+                       [("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")])
+                   ).grid(row=5, column=2, padx=5, pady=5)
+        ttk.Label(self.cia_frame, foreground="grey", wraplength=440,
+                  text="leave icon/banner blank to use VidInjector's built-in placeholders"
+                  ).grid(row=6, column=1, columnspan=2, sticky="w", padx=5)
+
+        ttk.Label(self.cia_frame, text="Output .cia:").grid(row=7, column=0, sticky="e", padx=5, pady=5)
+        self.cia_output_var = tk.StringVar()
+        ttk.Entry(self.cia_frame, textvariable=self.cia_output_var).grid(row=7, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(self.cia_frame, text="Save As...", command=self.browse_save_cia).grid(row=7, column=2, padx=5, pady=5)
+
+        btns = ttk.Frame(self.cia_frame)
+        btns.grid(row=8, column=1, pady=15, sticky="w")
+        self.cia_run_btn = ttk.Button(btns, text="▶ Package CIA", command=self.run_cia_packaging)
+        self.cia_run_btn.grid(row=0, column=0)
+
+        self.cia_input_var.trace_add("write", lambda *a: self.on_cia_input_changed())
+
+    def on_cia_input_changed(self):
+        """Seed the title field and output path from the chosen .moflex, same
+        courtesy the Encode/Decode tabs give their own inputs."""
+        inp = self.cia_input_var.get()
+        if inp.startswith("{") and inp.endswith("}"):
+            self.cia_input_var.set(inp[1:-1])
+            inp = self.cia_input_var.get()
+        if not inp or not os.path.isfile(inp):
+            return
+        stem = os.path.splitext(os.path.basename(inp))[0]
+        if not self.cia_title_var.get().strip():
+            self.cia_title_var.set(stem)
+        if not self.cia_output_var.get().strip():
+            self.cia_output_var.set(os.path.join(os.path.dirname(inp), stem + ".cia"))
+
+    def browse_save_cia(self):
+        current = self.cia_output_var.get().strip()
+        stem = os.path.splitext(os.path.basename(self.cia_input_var.get()))[0] if self.cia_input_var.get() else "package"
+        initial = os.path.basename(current) if current else stem + ".cia"
+        initialdir = os.path.dirname(current) if current else ""
+        filename = filedialog.asksaveasfilename(
+            title="Save CIA as",
+            initialfile=initial,
+            initialdir=initialdir or None,
+            defaultextension=".cia",
+            filetypes=[("3DS CIA", "*.cia"), ("All files", "*.*")])
+        if filename:
+            self.cia_output_var.set(filename)
+
+    def run_cia_packaging(self):
+        if not getattr(sys, 'frozen', False) and not os.path.exists(ENCODE_SCRIPT):
+            messagebox.showerror("Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}")
+            return
+
+        inp = self.cia_input_var.get().strip()
+        if not inp:
+            messagebox.showwarning("Warning", "Please select a .moflex file to package.")
+            return
+
+        cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
+        cmd.extend(["cia", inp])
+
+        title = self.cia_title_var.get().strip()
+        if title:
+            cmd.extend(["--cia-title", title])
+        publisher = self.cia_publisher_var.get().strip()
+        if publisher:
+            cmd.extend(["--cia-publisher", publisher])
+        icon = self.cia_icon_var.get().strip()
+        if icon:
+            cmd.extend(["--cia-icon", icon])
+        banner = self.cia_banner_var.get().strip()
+        if banner:
+            cmd.extend(["--cia-banner", banner])
+        outfile = self.cia_output_var.get().strip()
+        if outfile:
+            cmd.extend(["-o", outfile])
+
+        self.execute_cmd(cmd, self.cia_run_btn)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--encode-script":
