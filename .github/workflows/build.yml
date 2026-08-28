@@ -682,7 +682,7 @@ jobs:
         run: |
           brew untap aws/tap || true
           brew update
-          brew install yasm pkg-config nasm sdl2
+          brew install yasm pkg-config nasm sdl2 meson ninja
 
       # This cache holds x264 too, so it has to track the upstream x264 commit
       # (see the linux job) — otherwise ffmpeg builds against a stale x264.h.
@@ -695,7 +695,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/deps
-          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}
+          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-dav1d1.5.1-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -766,6 +766,28 @@ jobs:
             ./configure --prefix="$PREFIX" $HOST_FLAG --extra-cflags="$TARGET_FLAG" --extra-ldflags="$TARGET_FLAG" --enable-static --enable-pic --disable-cli --disable-opencl
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
+
+            # dav1d (software AV1 decoder)
+            [ ! -d dav1d-$ARCH ] && curl -fsSL https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz | tar -xz && mv dav1d-1.5.1 dav1d-$ARCH
+            cd dav1d-$ARCH
+            MESON_CROSS_ARGS=()
+            if [ "$ARCH" = "x86_64" ]; then
+              cat > cross-x86_64.txt <<EOF
+[binaries]
+c = ['clang', '-target', 'x86_64-apple-macos11.0']
+
+[host_machine]
+system = 'darwin'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF
+              MESON_CROSS_ARGS=(--cross-file cross-x86_64.txt)
+            fi
+            meson setup build --prefix="$PREFIX" --default-library=static --buildtype=release -Denable_tools=false -Denable_tests=false "${MESON_CROSS_ARGS[@]}"
+            ninja -C build
+            ninja -C build install
+            cd ..
           }
 
           build_arch "arm64" "" ""
@@ -796,6 +818,7 @@ jobs:
               --enable-libspeex \
               --enable-libtheora \
               --enable-libwebp \
+              --enable-libdav1d \
               --disable-doc \
               --disable-debug \
               --disable-outdev=sdl2 \
