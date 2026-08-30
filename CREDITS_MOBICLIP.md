@@ -12,13 +12,17 @@ The implementation of Mobiclip support in this software was made possible thanks
 
 ## MODS encoder reference
 
-* **Helwettpackardenterprise** — `MODS_Encoder_v43_2`, a Codex-assisted C
+* **Helwettpackardenterprise** — `MODS_Encoder_v43_2`, a verified-accurate C
   translation of the retail Mobiclip VfW encoder (`mods.dll`), verified against
   the original under Unicorn. It is the source for the exact transform and
   quantization now used by the Mobiclip encoder in
   [quatric/x264](https://github.com/quatric/x264): the forward integer DCTs,
   the H.264 MF/dequant scale matrices, the single `(1 << shift) / 3` rounding
   bias, and the `shift = 15 + q/6` (4x4) / `16 + q/6` (8x8) quantizer scaling.
+
+## 3DS CIA Video Injection
+
+* [VidInjector9000](https://github.com/FoofooTheGuy/VidInjector9000) by **FoofooTheGuy** — `VidInjector9002-CLI` is vendored and integrated to package converted Moflex and video streams directly into installable Nintendo 3DS `.cia` video titles.
 
 ## HVQM4 (Hudson Soft `.h4m`)
 
