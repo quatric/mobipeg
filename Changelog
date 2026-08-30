@@ -1,6 +1,23 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 2.1:
+- Rebased onto latest upstream FFmpeg master
+- RWAV/BRWAV, FWAV/BFWAV, and CWAV/BCWAV demuxers and muxers with DSP-ADPCM and planar PCM support
+- MobiClip MOC2 and MOC3 container demuxers
+- 3DS CIA Video Injection: Integrated VidInjector9002-CLI for packaging Nintendo 3DS .cia video applications
+- MobiClip moenc: automatic fallback to video-only mode when source has no audio track
+- MobiClip moflex: 64-bit seek-table duration handling and single-track MULTITRACK table fixes
+- MobiClip moflex3d: auto-split packed stereoscopic inputs for 3D encoding
+- GUI: Default to Highest Quality encoding profile (--hq)
+- GUI: Fixed field collapsing on macOS and improved dark mode appearance
+- macOS: Bundled static libdav1d decoder support in CI builds
+- Multi-architecture VidInjector CI builds across Linux, Windows, and macOS
+- Added retry and verification logic for x264 archive downloads to handle CDN challenge pages
+- Updated CI actions, toolchains, and dependency caching to Node 24 runtime
+- Updated format documentation and added VidInjector9000 credits to CREDITS_MOBICLIP.md
+
+
 version <next>:
 - extensively improved AAC encoder
 - APV Vulkan encoder
