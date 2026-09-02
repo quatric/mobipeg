@@ -49,7 +49,8 @@ typedef struct BRSTMDemuxContext {
 
 static int probe(const AVProbeData *p)
 {
-    if (AV_RL32(p->buf) == MKTAG('R','S','T','M') &&
+    if ((AV_RL32(p->buf) == MKTAG('R','S','T','M') ||
+         AV_RL32(p->buf) == MKTAG('R','W','A','V')) &&
         (AV_RL16(p->buf + 4) == 0xFFFE ||
          AV_RL16(p->buf + 4) == 0xFEFF))
         return AVPROBE_SCORE_MAX / 3 * 2;
@@ -59,7 +60,9 @@ static int probe(const AVProbeData *p)
 static int probe_bfstm(const AVProbeData *p)
 {
     if ((AV_RL32(p->buf) == MKTAG('F','S','T','M') ||
-         AV_RL32(p->buf) == MKTAG('C','S','T','M')) &&
+         AV_RL32(p->buf) == MKTAG('C','S','T','M') ||
+         AV_RL32(p->buf) == MKTAG('F','W','A','V') ||
+         AV_RL32(p->buf) == MKTAG('C','W','A','V')) &&
         (AV_RL16(p->buf + 4) == 0xFFFE ||
          AV_RL16(p->buf + 4) == 0xFEFF))
         return AVPROBE_SCORE_MAX / 3 * 2;
@@ -499,7 +502,7 @@ static int read_seek(AVFormatContext *s, int stream_index,
 const FFInputFormat ff_brstm_demuxer = {
     .p.name         = "brstm",
     .p.long_name    = NULL_IF_CONFIG_SMALL("BRSTM (Binary Revolution Stream)"),
-    .p.extensions   = "brstm",
+    .p.extensions   = "brstm,brwav",
     .priv_data_size = sizeof(BRSTMDemuxContext),
     .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe     = probe,
@@ -512,7 +515,7 @@ const FFInputFormat ff_brstm_demuxer = {
 const FFInputFormat ff_bfstm_demuxer = {
     .p.name         = "bfstm",
     .p.long_name    = NULL_IF_CONFIG_SMALL("BFSTM (Binary Cafe Stream)"),
-    .p.extensions   = "bfstm,bcstm",
+    .p.extensions   = "bfstm,bcstm,bfwav,bcwav,bwav",
     .priv_data_size = sizeof(BRSTMDemuxContext),
     .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe     = probe_bfstm,
