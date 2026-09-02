@@ -367,6 +367,8 @@ extern const FFInputFormat  ff_nc_demuxer;
 extern const FFInputFormat  ff_nistsphere_demuxer;
 extern const FFInputFormat  ff_nsp_demuxer;
 extern const FFInputFormat  ff_nsv_demuxer;
+extern const FFInputFormat  ff_nus3bank_demuxer;
+extern const FFOutputFormat ff_nus3bank_muxer;
 extern const FFOutputFormat ff_null_muxer;
 extern const FFInputFormat  ff_nut_demuxer;
 extern const FFOutputFormat ff_nut_muxer;
