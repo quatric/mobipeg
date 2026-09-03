@@ -59,6 +59,9 @@
  */
 
 #include "avformat.h"
+#include "libavutil/avstring.h"
+#include "libavutil/bprint.h"
+#include "libavutil/common.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "mux.h"
@@ -93,6 +96,26 @@ typedef struct MOFLEXMuxContext {
     int video_stream_index;
     int aenc_inited;
     MobiAudioEnc aenc;
+
+    /* Super MOFLEX (CSXTRA01 trailer) */
+    int super_moflex;       /* 0=auto, 1=force */
+    int tr_audio_stream_index;
+    AVIOContext *tr_pcm_dyn;
+    AVIOContext *tr_aud_dyn;
+    int tr_audio_rate;
+    int tr_audio_channels;
+    char tr_audio_lang[5];
+
+    struct {
+        int stream_index;
+        AVIOContext *dyn;
+        int cue_index;
+        char lang[5];
+    } tr_subs[16];
+    int nb_tr_subs;
+
+    int art_stream_index;
+    AVPacket *art_pkt;
 
     /* Multi-video (stereoscopic 3D) support.  MOFLEX can carry more than one
      * video chunk; the 3DS pairs two video streams (left/right eye) into a 3D
@@ -468,10 +491,19 @@ static int moflex_write_header(AVFormatContext *s)
 
     m->video_stream_index = -1;
     m->audio_stream_index = -1;
+    m->tr_audio_stream_index = -1;
+    m->art_stream_index = -1;
     m->nb_video = 0;
+    m->nb_tr_subs = 0;
+
     for (int i = 0; i < s->nb_streams; i++) {
-        enum AVMediaType t = s->streams[i]->codecpar->codec_type;
+        AVStream *st = s->streams[i];
+        enum AVMediaType t = st->codecpar->codec_type;
         if (t == AVMEDIA_TYPE_VIDEO) {
+            if (st->disposition & AV_DISPOSITION_ATTACHED_PIC) {
+                m->art_stream_index = i;
+                continue;
+            }
             if (m->nb_video < 2)
                 m->video_in[m->nb_video++] = i;
             else
@@ -479,9 +511,44 @@ static int moflex_write_header(AVFormatContext *s)
                        "MOFLEX supports at most 2 video streams; ignoring stream %d.\n", i);
             if (m->video_stream_index < 0)
                 m->video_stream_index = i;
-        } else if (t == AVMEDIA_TYPE_AUDIO && m->audio_stream_index < 0)
-            m->audio_stream_index = i;
+        } else if (t == AVMEDIA_TYPE_AUDIO) {
+            if (m->audio_stream_index < 0) {
+                m->audio_stream_index = i;
+            } else if (m->tr_audio_stream_index < 0) {
+                m->tr_audio_stream_index = i;
+            }
+        } else if (t == AVMEDIA_TYPE_SUBTITLE) {
+            if (m->nb_tr_subs < 16) {
+                m->tr_subs[m->nb_tr_subs].stream_index = i;
+                AVDictionaryEntry *le = av_dict_get(st->metadata, "language", NULL, 0);
+                if (le && le->value && le->value[0])
+                    av_strlcpy(m->tr_subs[m->nb_tr_subs].lang, le->value, sizeof(m->tr_subs[m->nb_tr_subs].lang));
+                else
+                    strcpy(m->tr_subs[m->nb_tr_subs].lang, "und");
+                avio_open_dyn_buf(&m->tr_subs[m->nb_tr_subs].dyn);
+                m->nb_tr_subs++;
+            }
+        }
     }
+
+    if (m->tr_audio_stream_index >= 0) {
+        AVStream *ast = s->streams[m->tr_audio_stream_index];
+        m->tr_audio_rate = ast->codecpar->sample_rate > 0 ? ast->codecpar->sample_rate : 44100;
+        m->tr_audio_channels = ast->codecpar->ch_layout.nb_channels > 0 ? ast->codecpar->ch_layout.nb_channels : 2;
+        AVDictionaryEntry *le = av_dict_get(ast->metadata, "language", NULL, 0);
+        if (le && le->value && le->value[0])
+            av_strlcpy(m->tr_audio_lang, le->value, sizeof(m->tr_audio_lang));
+        else
+            strcpy(m->tr_audio_lang, "und");
+
+        if (ast->codecpar->codec_id == AV_CODEC_ID_ADPCM_IMA_MOFLEX)
+            avio_open_dyn_buf(&m->tr_aud_dyn);
+        else
+            avio_open_dyn_buf(&m->tr_pcm_dyn);
+    }
+
+    if (m->tr_audio_stream_index >= 0 || m->nb_tr_subs > 0 || m->art_stream_index >= 0)
+        m->super_moflex = 1;
 
     /* EP stream indices follow descriptor order: video(s), data, audio. */
     m->data_ep  = m->nb_video;
@@ -590,6 +657,37 @@ static int moflex_write_packet(AVFormatContext *s, AVPacket *pkt)
     MOFLEXMuxContext *m = s->priv_data;
     AVStream *st = s->streams[pkt->stream_index];
 
+    if (pkt->stream_index == m->tr_audio_stream_index) {
+        if (m->tr_aud_dyn)
+            avio_write(m->tr_aud_dyn, pkt->data, pkt->size);
+        else if (m->tr_pcm_dyn)
+            avio_write(m->tr_pcm_dyn, pkt->data, pkt->size);
+        return 0;
+    }
+
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+        for (int k = 0; k < m->nb_tr_subs; k++) {
+            if (m->tr_subs[k].stream_index == pkt->stream_index && m->tr_subs[k].dyn && pkt->size > 0) {
+                int64_t start_ms = av_rescale_q(pkt->pts, st->time_base, (AVRational){1, 1000});
+                int64_t end_ms   = start_ms + (pkt->duration > 0 ? av_rescale_q(pkt->duration, st->time_base, (AVRational){1, 1000}) : 3000);
+                int h1 = (int)(start_ms / 3600000); int m1 = (int)((start_ms % 3600000) / 60000); int s1 = (int)((start_ms % 60000) / 1000); int ms1 = (int)(start_ms % 1000);
+                int h2 = (int)(end_ms / 3600000); int m2 = (int)((end_ms % 3600000) / 60000); int s2 = (int)((end_ms % 60000) / 1000); int ms2 = (int)(end_ms % 1000);
+                avio_printf(m->tr_subs[k].dyn, "%d\r\n%02d:%02d:%02d,%03d --> %02d:%02d:%02d,%03d\r\n",
+                            ++m->tr_subs[k].cue_index, h1, m1, s1, ms1, h2, m2, s2, ms2);
+                avio_write(m->tr_subs[k].dyn, pkt->data, pkt->size);
+                avio_printf(m->tr_subs[k].dyn, "\r\n\r\n");
+                break;
+            }
+        }
+        return 0;
+    }
+
+    if (pkt->stream_index == m->art_stream_index) {
+        if (!m->art_pkt)
+            m->art_pkt = av_packet_clone(pkt);
+        return 0;
+    }
+
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
         int nb = pkt->size / (m->aenc.channels * (int)sizeof(int16_t));
         if (nb <= 0)
@@ -695,6 +793,58 @@ static int emit_front(AVFormatContext *s, AVIOContext *pb, const uint8_t *blob,
         while (avio_tell(pb) < block_start + m->block_size) avio_w8(pb, 0x00);
     }
     return 0;
+}
+
+static const int ima_index_table[16] = {
+    -1, -1, -1, -1, 2, 4, 6, 8,
+    -1, -1, -1, -1, 2, 4, 6, 8
+};
+static const int ima_step_table[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+    19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+    130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+    337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+    5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
+
+static inline uint8_t ima_encode_nibble(int *pred, int *step_idx, int sample)
+{
+    int diff = sample - *pred;
+    int step = ima_step_table[*step_idx];
+    int nibble = 0;
+    if (diff < 0) {
+        nibble = 8;
+        diff = -diff;
+    }
+    int vpdiff = step >> 3;
+    if (diff >= step) {
+        nibble |= 4;
+        diff -= step;
+        vpdiff += step;
+    }
+    step >>= 1;
+    if (diff >= step) {
+        nibble |= 2;
+        diff -= step;
+        vpdiff += step;
+    }
+    step >>= 1;
+    if (diff >= step) {
+        nibble |= 1;
+        vpdiff += step;
+    }
+    if (nibble & 8)
+        *pred -= vpdiff;
+    else
+        *pred += vpdiff;
+    *pred = av_clip_int16(*pred);
+    *step_idx += ima_index_table[nibble];
+    *step_idx = av_clip(*step_idx, 0, 88);
+    return (uint8_t)(nibble & 0xF);
 }
 
 static int moflex_write_trailer(AVFormatContext *s)
@@ -823,6 +973,159 @@ static int moflex_write_trailer(AVFormatContext *s)
         avio_write(pb, front, fsz);
     }
     avio_write(pb, media, media_size);
+
+    if (m->super_moflex) {
+        int64_t payload_off = avio_tell(pb);
+
+        /* 1. NFO0: Library metadata */
+        AVDictionaryEntry *title = av_dict_get(s->metadata, "title", NULL, 0);
+        AVDictionaryEntry *date = av_dict_get(s->metadata, "date", NULL, 0);
+        if (!date) date = av_dict_get(s->metadata, "year", NULL, 0);
+        AVDictionaryEntry *genre = av_dict_get(s->metadata, "genre", NULL, 0);
+        if (!genre) genre = av_dict_get(s->metadata, "genres", NULL, 0);
+        AVDictionaryEntry *desc = av_dict_get(s->metadata, "comment", NULL, 0);
+        if (!desc) desc = av_dict_get(s->metadata, "desc", NULL, 0);
+        AVDictionaryEntry *showdesc = av_dict_get(s->metadata, "description", NULL, 0);
+        if (!showdesc) showdesc = av_dict_get(s->metadata, "showdesc", NULL, 0);
+        AVDictionaryEntry *category = av_dict_get(s->metadata, "category", NULL, 0);
+
+        AVBPrint nfo;
+        av_bprint_init(&nfo, 0, AV_BPRINT_SIZE_UNLIMITED);
+        if (title) av_bprintf(&nfo, "title=%s\n", title->value);
+        if (date)  av_bprintf(&nfo, "year=%s\n", date->value);
+        if (category) av_bprintf(&nfo, "category=%s\n", category->value);
+        if (genre) av_bprintf(&nfo, "genres=%s\n", genre->value);
+        if (desc)  av_bprintf(&nfo, "desc=%s\n", desc->value);
+        if (showdesc) av_bprintf(&nfo, "showdesc=%s\n", showdesc->value);
+
+        if (nfo.len > 0) {
+            avio_write(pb, "NFO0", 4);
+            avio_wl32(pb, nfo.len);
+            avio_write(pb, nfo.str, nfo.len);
+        }
+        av_bprint_finalize(&nfo, NULL);
+
+        /* 2. ART5: Poster artwork (132x188 RGB565LE) */
+        if (m->art_pkt && m->art_pkt->size >= 132 * 188 * 2) {
+            avio_write(pb, "ART5", 4);
+            avio_wl32(pb, 4 + 132 * 188 * 2);
+            avio_wl16(pb, 132);
+            avio_wl16(pb, 188);
+            avio_write(pb, m->art_pkt->data, 132 * 188 * 2);
+        }
+
+        /* 3. LNG0: Primary in-band audio language */
+        if (m->audio_stream_index >= 0) {
+            AVDictionaryEntry *in_lang = av_dict_get(s->streams[m->audio_stream_index]->metadata, "language", NULL, 0);
+            if (in_lang && in_lang->value && in_lang->value[0]) {
+                char l4[4] = {0};
+                for (int k = 0; k < 3 && in_lang->value[k]; k++) {
+                    char c = in_lang->value[k];
+                    if (c >= 'a' && c <= 'z') c += 'A' - 'a';
+                    l4[k] = c;
+                }
+                avio_write(pb, "LNG0", 4);
+                avio_wl32(pb, 4);
+                avio_write(pb, l4, 4);
+            }
+        }
+
+        /* 4. SUB1: Subtitle tracks */
+        for (int k = 0; k < m->nb_tr_subs; k++) {
+            if (m->tr_subs[k].dyn) {
+                uint8_t *srt_buf = NULL;
+                int srt_len = avio_close_dyn_buf(m->tr_subs[k].dyn, &srt_buf);
+                m->tr_subs[k].dyn = NULL;
+                if (srt_len > 0) {
+                    char l4[4] = {0};
+                    for (int j = 0; j < 3 && m->tr_subs[k].lang[j]; j++) {
+                        char c = m->tr_subs[k].lang[j];
+                        if (c >= 'a' && c <= 'z') c += 'A' - 'a';
+                        l4[j] = c;
+                    }
+                    avio_write(pb, "SUB1", 4);
+                    avio_wl32(pb, 4 + srt_len);
+                    avio_write(pb, l4, 4);
+                    avio_write(pb, srt_buf, srt_len);
+                }
+                av_free(srt_buf);
+            }
+        }
+
+        /* 5. AUD1: Secondary trailer audio */
+        if (m->tr_audio_stream_index >= 0) {
+            uint8_t *aud_bytes = NULL;
+            int aud_len = 0;
+
+            if (m->tr_aud_dyn) {
+                aud_len = avio_close_dyn_buf(m->tr_aud_dyn, &aud_bytes);
+                m->tr_aud_dyn = NULL;
+            } else if (m->tr_pcm_dyn) {
+                uint8_t *pcm_raw = NULL;
+                int pcm_len = avio_close_dyn_buf(m->tr_pcm_dyn, &pcm_raw);
+                m->tr_pcm_dyn = NULL;
+                if (pcm_len > 0) {
+                    int channels = m->tr_audio_channels > 0 ? m->tr_audio_channels : 2;
+                    if (channels > 2) channels = 2;
+                    int16_t *pcm = (int16_t *)pcm_raw;
+                    int total_samples = pcm_len / (channels * (int)sizeof(int16_t));
+                    AVIOContext *aud_pb = NULL;
+                    if (avio_open_dyn_buf(&aud_pb) >= 0) {
+                        int step_idx[2] = {0, 0};
+                        int pred[2] = {0, 0};
+                        int pos = 0;
+                        while (pos < total_samples) {
+                            int n = total_samples - pos;
+                            if (n > 1024) n = 1024;
+                            n -= n % 256;
+                            if (n <= 0) break;
+                            for (int c = 0; c < channels; c++) {
+                                avio_wl16(aud_pb, (uint16_t)step_idx[c]);
+                                avio_wl16(aud_pb, (uint16_t)(int16_t)pred[c]);
+                            }
+                            for (int sf = 0; sf < n / 256; sf++) {
+                                int base = pos + sf * 256;
+                                for (int c = 0; c < channels; c++) {
+                                    for (int k = 0; k < 256; k += 2) {
+                                        int s_lo = (base + k < total_samples) ? pcm[(base + k) * channels + c] : 0;
+                                        int s_hi = (base + k + 1 < total_samples) ? pcm[(base + k + 1) * channels + c] : 0;
+                                        uint8_t lo = ima_encode_nibble(&pred[c], &step_idx[c], s_lo);
+                                        uint8_t hi = ima_encode_nibble(&pred[c], &step_idx[c], s_hi);
+                                        avio_w8(aud_pb, lo | (hi << 4));
+                                    }
+                                }
+                            }
+                            pos += n;
+                        }
+                        aud_len = avio_close_dyn_buf(aud_pb, &aud_bytes);
+                    }
+                }
+                av_free(pcm_raw);
+            }
+
+            if (aud_len > 0 && aud_bytes) {
+                char l4[4] = {0};
+                for (int j = 0; j < 3 && m->tr_audio_lang[j]; j++) {
+                    char c = m->tr_audio_lang[j];
+                    if (c >= 'a' && c <= 'z') c += 'A' - 'a';
+                    l4[j] = c;
+                }
+                avio_write(pb, "AUD1", 4);
+                avio_wl32(pb, 12 + aud_len);
+                avio_wl32(pb, m->tr_audio_rate > 0 ? m->tr_audio_rate : 44100);
+                avio_wl16(pb, m->tr_audio_channels > 0 ? m->tr_audio_channels : 2);
+                avio_wl16(pb, 1024);
+                avio_write(pb, l4, 4);
+                avio_write(pb, aud_bytes, aud_len);
+                av_free(aud_bytes);
+            }
+        }
+
+        /* 6. Footer */
+        avio_wl64(pb, (uint64_t)payload_off);
+        avio_write(pb, "CSXTRA01", 8);
+    }
+
     ret = 0;
 
 end:
@@ -849,6 +1152,28 @@ static void moflex_deinit(AVFormatContext *s)
         av_free(b);
         m->dyn = NULL;
     }
+    if (m->tr_pcm_dyn) {
+        uint8_t *b;
+        avio_close_dyn_buf(m->tr_pcm_dyn, &b);
+        av_free(b);
+        m->tr_pcm_dyn = NULL;
+    }
+    if (m->tr_aud_dyn) {
+        uint8_t *b;
+        avio_close_dyn_buf(m->tr_aud_dyn, &b);
+        av_free(b);
+        m->tr_aud_dyn = NULL;
+    }
+    for (int k = 0; k < m->nb_tr_subs; k++) {
+        if (m->tr_subs[k].dyn) {
+            uint8_t *b;
+            avio_close_dyn_buf(m->tr_subs[k].dyn, &b);
+            av_free(b);
+            m->tr_subs[k].dyn = NULL;
+        }
+    }
+    if (m->art_pkt)
+        av_packet_free(&m->art_pkt);
 }
 
 /* ----------------------------------------------------------------
@@ -883,6 +1208,8 @@ static const AVOption moflex_options[] = {
      * default; use 1 only to reproduce SDK output byte-for-byte. */
     { "mo_vdesc",   "video descriptor type (3 = with layout/retail, 1 = plain/SDK)", OFFSET(vdesc_type),
       AV_OPT_TYPE_INT, {.i64 = 3}, 1, 3, ENC },
+    { "super_moflex", "Enable Super MOFLEX trailer with extra audio, subtitles and metadata (0=auto, 1=force)", OFFSET(super_moflex), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, ENC },
+    { "smoflex",      "Alias for -super_moflex", OFFSET(super_moflex), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, ENC },
     { "gop_size",   "(ignored) keyframe interval", OFFSET(gop_size), AV_OPT_TYPE_INT,
       {.i64 = 0}, 0, INT_MAX, ENC },
     { "keyint",     "(ignored) keyframe interval", OFFSET(gop_size), AV_OPT_TYPE_INT,
@@ -904,6 +1231,7 @@ const FFOutputFormat ff_moflex_muxer = {
     .priv_data_size = sizeof(MOFLEXMuxContext),
     .p.audio_codec  = AV_CODEC_ID_PCM_S16LE,
     .p.video_codec  = AV_CODEC_ID_MOBICLIP,
+    .p.subtitle_codec = AV_CODEC_ID_SUBRIP,
     .write_header   = moflex_write_header,
     .write_packet   = moflex_write_packet,
     .write_trailer  = moflex_write_trailer,
