@@ -427,7 +427,7 @@ OBJS-$(CONFIG_FV_MUXER)                  += fvenc.o
 OBJS-$(CONFIG_HVQM4_DEMUXER)             += hvqm4.o
 OBJS-$(CONFIG_HVQM4_MUXER)               += hvqm4enc.o
 OBJS-$(CONFIG_RVID_MUXER)                += rvidenc.o
-OBJS-$(CONFIG_MOFLEX_DEMUXER)            += moflex.o
+OBJS-$(CONFIG_MOFLEX_DEMUXER)            += moflex.o subtitles.o
 OBJS-$(CONFIG_MOFLEX_MUXER)              += moflexenc.o
 OBJS-$(CONFIG_MOV_DEMUXER)               += mov.o mov_chan.o mov_esds.o \
                                             qtpalette.o replaygain.o dovi_isom.o \
