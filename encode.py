@@ -575,6 +575,13 @@ def main():
     parser.add_argument("--stereo", dest="stereo", default="auto", choices=["auto", "none", "frameseq", "frameseq-r", "tb", "tb-r", "sbs", "sbs-r"], help="Decode/play mode: force the stereoscopic layout instead of reading it from the file. Use this when a 3D file carries no layout descriptor (nothing to detect) so --eyes still splits it. The '-r' variants mean the right eye is stored first. 'none' treats the input as 2D.")
     parser.add_argument("--eyes", dest="eyes", default="both", choices=["both", "left", "right", "packed"], help="Stereoscopic 3DS input: which eye to use. Decode mode: 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Play mode: 'both' shows the eyes side by side in one window, 'left'/'right' plays a single eye full-window, 'packed' plays the stream as stored (eyes alternating). Ignored for 2D input.")
 
+    parser.add_argument("--super", "--super-moflex", "--smoflex", dest="super_moflex", action="store_true", help="moflex/moflex3d: Enable Super MOFLEX trailer extension (supports secondary audio, multiple subtitles, metadata, poster art)")
+    parser.add_argument("--audio2", dest="audio2", default="", help="Super MOFLEX: second audio track file or stream")
+    parser.add_argument("--lang", dest="lang", default="", help="Primary audio language tag (e.g. eng)")
+    parser.add_argument("--lang2", dest="lang2", default="", help="Second audio language tag (e.g. jpn)")
+    parser.add_argument("--srt", dest="srt", action="append", default=[], help="Super MOFLEX: subtitle track (.srt file, repeatable)")
+    parser.add_argument("--poster", dest="poster", default="", help="Super MOFLEX: poster artwork (image file)")
+
     parsed = parser.parse_args()
     OUTDIR = parsed.outdir
 
@@ -677,10 +684,14 @@ def main():
         cvc = ""
     elif fmt == "mo":
         mode, dmx, scale, moaud, cvc = "vid", "mobiclip_mo", "624:352", 1, "mobiclip"
-    elif fmt == "moflex":
+    elif fmt in ("moflex", "smoflex", "super_moflex"):
         mode, dmx, scale, moaud, cvc = "vid", "moflex", "400:240", 1, "mobiclip"
-    elif fmt == "moflex3d":
+        if fmt in ("smoflex", "super_moflex"):
+            parsed.super_moflex = True
+    elif fmt in ("moflex3d", "smoflex3d", "super_moflex3d"):
         mode, dmx, scale, moaud, cvc = "vid3d", "moflex", "400:240", 1, "mobiclip"
+        if fmt in ("smoflex3d", "super_moflex3d"):
+            parsed.super_moflex = True
     elif fmt == "mods":
         mode, dmx, scale, moaud, cvc = "vid", "mods", "256:192", 1, "mobiclip"
     elif fmt == "vx":
@@ -1102,11 +1113,15 @@ def main():
     out_ext = {"hvqm4": "h4m", "fastvideo": "fv",
                "gba_ads": "mmstr", "gba_hydrogen": "mmstr",
                "wii_photo": "avi", "nintendo_channel": "3gp",
-               "3ds_camera": "avi"}.get(fmt, fmt)
+               "3ds_camera": "avi", "smoflex": "moflex",
+               "super_moflex": "moflex", "smoflex3d": "moflex",
+               "super_moflex3d": "moflex"}.get(fmt, fmt)
     container = f"{stem}.{out_ext}"
     watch = f"{stem}.mp4"
     
     enc_opts = []
+    extra_inputs = []
+    has_super = getattr(parsed, "super_moflex", False) or fmt in ("smoflex", "super_moflex", "smoflex3d", "super_moflex3d")
     if moaud == 1:
         if audio == "none":
             # No audio: drop the input's audio stream so only video is muxed.
@@ -1118,8 +1133,11 @@ def main():
                 enc_opts.extend(["-mo_audio", "none"])
         else:
             enc_opts.extend(["-mo_audio", audio])
-            if fmt in ("mo", "moflex", "moflex3d"):
-                enc_opts.extend(["-map", "0:v", "-map", "0:a?"])
+            if fmt in ("mo", "moflex", "moflex3d", "smoflex", "super_moflex", "smoflex3d", "super_moflex3d"):
+                if not has_super or not (parsed.audio2 or parsed.srt or parsed.poster):
+                    enc_opts.extend(["-map", "0:v", "-map", "0:a?"])
+                else:
+                    enc_opts.extend(["-map", "0:v", "-map", "0:a:0?"])
             # SX/codebook audio is produced by its own encoder (trains a per-file
             # codebook over the whole stream), not the muxer's built-in packing.
             if audio == "codebook":
@@ -1138,7 +1156,7 @@ def main():
         if audio == "fastaudio":
             enc_opts.extend(["-sc_threshold", "0"])
         enc_opts.extend(mobi_rc)
-    elif fmt in ["mo", "moflex", "moflex3d"]:
+    elif fmt in ["mo", "moflex", "moflex3d", "smoflex", "super_moflex", "smoflex3d", "super_moflex3d"]:
         enc_opts.extend(["-mobiclip", "1"])
         if vx_quant > 0 and not mobi_bitrate:
             enc_opts.extend(["-qp", str(vx_quant)])
@@ -1155,13 +1173,35 @@ def main():
             enc_opts.extend(["-g", str(gop)])
             print(f"   keyframes: ~{count} evenly spaced (-g {gop}, scene cuts kept)")
 
-        if fmt in ("moflex", "moflex3d"):
+        if fmt in ("moflex", "moflex3d", "smoflex", "super_moflex", "smoflex3d", "super_moflex3d"):
             # Preserve the source's chunk-padding block size on round trip
             # (2048 = 3DS SDK encoder, 4096 = retail) instead of always
             # falling back to retail's 4096, which would re-pad every chunk
             # to a different boundary than the original file used.
             block = mo_block or detect_moflex_block_size(inp) or 4096
             enc_opts.extend(["-mo_block", str(block)])
+            if has_super:
+                enc_opts.extend(["-super_moflex", "1"])
+                if parsed.lang:
+                    enc_opts.extend(["-metadata:s:a:0", f"language={parsed.lang}"])
+                input_cursor = 1
+                if parsed.audio2:
+                    extra_inputs.extend(["-i", parsed.audio2])
+                    enc_opts.extend(["-map", f"{input_cursor}:a:0", "-c:a:1", "pcm_s16le"])
+                    if parsed.lang2:
+                        enc_opts.extend(["-metadata:s:a:1", f"language={parsed.lang2}"])
+                    input_cursor += 1
+                for srt_path in parsed.srt:
+                    extra_inputs.extend(["-i", srt_path])
+                    enc_opts.extend(["-map", f"{input_cursor}:s:0", "-c:s", "subrip"])
+                    parts = os.path.basename(srt_path).split(".")
+                    if len(parts) >= 3 and len(parts[-2]) in (2, 3):
+                        enc_opts.extend([f"-metadata:s:s:{input_cursor - 1}", f"language={parts[-2]}"])
+                    input_cursor += 1
+                if parsed.poster:
+                    extra_inputs.extend(["-i", parsed.poster])
+                    enc_opts.extend(["-map", f"{input_cursor}:v:0", "-disposition:v:1", "attached_pic"])
+                    input_cursor += 1
     elif fmt == "vx":
         # Same audio codec as .mods codebook/SX (VXDS AFrame == SX bitstream);
         # -an skips it entirely, otherwise it's the muxer's default -c:a.
@@ -1355,7 +1395,7 @@ def main():
     fps_disp = f", {fps_filter}" if fps_filter else ""
     scale_disp = scale if scale else "source"
 
-    base = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + vf + enc_opts
+    base = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + extra_inputs + vf + enc_opts
     if mobi_passes == 2:
         # libx264 keeps its own statistics file (x264's psz_stat_out); ffmpeg's
         # -passlogfile drives avctx->stats_out, which this encoder never fills,
