@@ -1147,7 +1147,7 @@ jobs:
               --icon=logo.png --distpath pyinst_dist \
               --target-architecture universal2 encode_gui.py
             cd pyinst_dist
-            zip -r ../mobipeg-gui-${{ matrix.target }}.zip mobipeg-gui.app
+            ditto -c -k --sequesterRsrc --keepParent mobipeg-gui.app ../mobipeg-gui-${{ matrix.target }}.zip
           else
             # Native Linux (x86_64, arm64)
             sudo apt-get install python3-tk -y || true
