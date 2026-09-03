@@ -67,6 +67,13 @@ static int check_opt_bitexact(void *ctx, const AVDictionary *opts,
     return 0;
 }
 
+static int is_custom_video_source(enum AVCodecID id)
+{
+    return id == AV_CODEC_ID_MOBICLIP ||
+           id == AV_CODEC_ID_THP ||
+           (id >= AV_CODEC_ID_FASTVIDEO && id <= AV_CODEC_ID_CAIMANSPRO);
+}
+
 static int choose_encoder(const OptionsContext *o, AVFormatContext *s,
                           MuxStream *ms, const AVCodec **enc)
 {
@@ -104,10 +111,16 @@ static int choose_encoder(const OptionsContext *o, AVFormatContext *s,
         if (ost->type == AVMEDIA_TYPE_VIDEO &&
             ms->par_in->codec_id == AV_CODEC_ID_H264 &&
             ost->ist && ost->ist->par &&
-            ost->ist->par->codec_id == AV_CODEC_ID_MOBICLIP) {
-            av_log(ost, AV_LOG_WARNING,
-                   "MobiClip source: this build's libx264 cannot encode valid "
-                   "H.264; defaulting video encoder to mpeg4. Pass -c:v to override.\n");
+            is_custom_video_source(ost->ist->par->codec_id)) {
+            if (ost->ist->par->codec_id == AV_CODEC_ID_MOBICLIP)
+                av_log(ost, AV_LOG_WARNING,
+                       "MobiClip source: this build's libx264 cannot encode valid "
+                       "H.264; defaulting video encoder to mpeg4. Pass -c:v to override.\n");
+            else
+                av_log(ost, AV_LOG_WARNING,
+                       "%s source: this build's libx264 cannot encode valid "
+                       "H.264; defaulting video encoder to mpeg4. Pass -c:v to override.\n",
+                       avcodec_get_name(ost->ist->par->codec_id));
             ms->par_in->codec_id = AV_CODEC_ID_MPEG4;
         }
         *enc = avcodec_find_encoder(ms->par_in->codec_id);
@@ -1471,9 +1484,21 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
     }
 
     opt_match_per_stream_dbl(ost, &o->qscale, oc, st, &qscale);
-    if (ost->enc && qscale >= 0) {
-        ost->enc->flags          |= AV_CODEC_FLAG_QSCALE;
-        ost->enc->global_quality  = FF_QP2LAMBDA * qscale;
+    if (ost->enc) {
+        if (qscale >= 0) {
+            ost->enc->flags          |= AV_CODEC_FLAG_QSCALE;
+            ost->enc->global_quality  = FF_QP2LAMBDA * qscale;
+        } else if (ost->type == AVMEDIA_TYPE_VIDEO &&
+                   ost->enc->enc_ctx->codec_id == AV_CODEC_ID_MPEG4 &&
+                   !av_dict_get(ost->enc->encoder_opts, "b", NULL, 0) &&
+                   ost->ist && ost->ist->par &&
+                   is_custom_video_source(ost->ist->par->codec_id)) {
+            ost->enc->flags          |= AV_CODEC_FLAG_QSCALE;
+            ost->enc->global_quality  = FF_QP2LAMBDA * 3;
+            av_log(ost, AV_LOG_INFO,
+                   "Defaulting to high quality MPEG-4 video encoding (-q:v 3) "
+                   "matching encode.py. Pass -q:v or -b:v to override.\n");
+        }
     }
 
     if (ms->sch_idx >= 0) {
