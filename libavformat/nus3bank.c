@@ -20,8 +20,10 @@
 
 #include "config_components.h"
 
+#include "libavutil/avstring.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/macros.h"
 #include "libavutil/mem.h"
 #include "libavutil/dict.h"
 
@@ -48,6 +50,7 @@ typedef struct NUS3Track {
     int64_t  cur_pts;
     int      is_idsp;
     int      channels;
+    int      interleave;
     int      sample_rate;
     int64_t  sample_count;
 } NUS3Track;
@@ -80,15 +83,20 @@ static int nus3bank_read_header(AVFormatContext *s)
     int64_t prop_offset = 0, binf_offset = 0, tone_offset = 0, pack_offset = 0;
     uint32_t binf_size = 0;
 
-    magic     = avio_rl32(pb);
-    avio_rl32(pb); // bank_type
-    avio_rl32(pb); // bank_size
+    uint32_t bank_type;
+    int64_t toc_payload_start, chunk_pos;
+    uint32_t toc_size;
 
-    if (magic != NUS3_MAGIC)
+    magic     = avio_rl32(pb);
+    avio_rl32(pb); // total file size - 8, same convention as NUS3AUDIO
+    bank_type = avio_rl32(pb);
+
+    if (magic != NUS3_MAGIC ||
+        (bank_type != BANK_MAGIC && bank_type != MKTAG('b','a','n','k')))
         return AVERROR_INVALIDDATA;
 
     toc_magic = avio_rl32(pb);
-    avio_rl32(pb); // toc_size
+    toc_size  = avio_rl32(pb);
     if (toc_magic != MKTAG('T','O','C',' '))
         return AVERROR_INVALIDDATA;
 
@@ -96,21 +104,34 @@ static int nus3bank_read_header(AVFormatContext *s)
     if (chunk_count > 64)
         return AVERROR_INVALIDDATA;
 
+    // The TOC's payload (chunk_count field + a "magic,size" pair per chunk)
+    // is a manifest only -- it carries no offsets. The real chunks it
+    // describes are laid out sequentially right after the TOC ends, each
+    // re-announcing its own "magic,size" header in place, so the manifest
+    // itself is redundant: skip straight to where the real chunks start and
+    // walk them directly to recover each one's absolute offset.
+    toc_payload_start = avio_tell(pb) - 4; // position of the chunk_count field
+    chunk_pos = toc_payload_start + toc_size;
+
     for (uint32_t i = 0; i < chunk_count; i++) {
-        uint32_t cid = avio_rl32(pb);
-        uint32_t cofs = avio_rl32(pb);
-        uint32_t csz  = avio_rl32(pb);
+        uint32_t cid, csz;
+
+        avio_seek(pb, chunk_pos, SEEK_SET);
+        cid = avio_rl32(pb);
+        csz = avio_rl32(pb);
 
         if (cid == MKTAG('P','R','O','P')) {
-            prop_offset = cofs;
+            prop_offset = chunk_pos;
         } else if (cid == MKTAG('B','I','N','F')) {
-            binf_offset = cofs;
+            binf_offset = chunk_pos;
             binf_size = csz;
         } else if (cid == MKTAG('T','O','N','E') || cid == MKTAG('T','R','A','C')) {
-            tone_offset = cofs;
+            tone_offset = chunk_pos;
         } else if (cid == MKTAG('P','A','C','K')) {
-            pack_offset = cofs;
+            pack_offset = chunk_pos;
         }
+
+        chunk_pos += 8 + (int64_t)csz;
     }
 
     if (!tone_offset || !pack_offset) {
@@ -119,50 +140,74 @@ static int nus3bank_read_header(AVFormatContext *s)
     }
 
     ctx->pack_start = pack_offset + 8; // skip PACK chunk header (magic + size)
+    (void)prop_offset; (void)binf_offset; (void)binf_size; // unreliable/unused, see below
 
-    // Read PROP chunk for track count and metadata
-    uint32_t nb_tracks = 0;
-    if (prop_offset) {
-        avio_seek(pb, prop_offset + 8, SEEK_SET);
-        nb_tracks = avio_rl32(pb);
-    }
-
-    // Fallback: if PROP not present or count 0, check TONE count
-    if (!nb_tracks) {
-        avio_seek(pb, tone_offset + 8, SEEK_SET);
-        nb_tracks = avio_rl32(pb);
-    }
-
-    if (!nb_tracks || nb_tracks > 1024)
+    // Read TONE chunk: entry count, then one (header_offset, header_size)
+    // pair per entry. Those two fields do NOT point into PACK directly --
+    // each points to a variable-length sub-record inside the TONE chunk
+    // itself (type/flags, then an inline length-prefixed stream name, then
+    // finally the real stream offset+size relative to PACK). Layout
+    // reverse-derived from vgmstream's nus3bank.c (the only known-correct
+    // reference for this format), not guessed from this file alone.
+    int64_t tone_payload = tone_offset + 8; // skip TONE chunk header (magic + size)
+    avio_seek(pb, tone_payload, SEEK_SET);
+    uint32_t tone_count = avio_rl32(pb);
+    if (tone_count > 4096)
         return AVERROR_INVALIDDATA;
 
-    ctx->nb_tracks = nb_tracks;
-    ctx->tracks = av_calloc(nb_tracks, sizeof(NUS3Track));
+    ctx->tracks = av_calloc(tone_count, sizeof(NUS3Track));
     if (!ctx->tracks)
         return AVERROR(ENOMEM);
 
-    // Read BINF names table if available
-    if (binf_offset) {
-        avio_seek(pb, binf_offset + 8, SEEK_SET);
-        uint32_t binf_count = avio_rl32(pb);
-        for (uint32_t i = 0; i < binf_count && i < nb_tracks; i++) {
-            uint8_t slen = avio_r8(pb);
-            if (slen > 0 && slen < sizeof(ctx->tracks[i].name)) {
-                avio_read(pb, ctx->tracks[i].name, slen);
-                ctx->tracks[i].name[slen] = 0;
-            }
-            if (avio_tell(pb) < binf_offset + 8 + binf_size && avio_r8(pb) != 0)
-                avio_seek(pb, -1, SEEK_CUR);
+    uint32_t nb_tracks = 0;
+    for (uint32_t i = 0; i < tone_count; i++) {
+        int64_t entry_pos = tone_payload + 4 + (int64_t)i * 8;
+        uint32_t tone_header_offset, tone_header_size;
+        int64_t pos;
+        uint8_t flags2, name_len;
+        char name_buf[128];
+
+        avio_seek(pb, entry_pos, SEEK_SET);
+        tone_header_offset = avio_rl32(pb);
+        tone_header_size   = avio_rl32(pb);
+
+        if (tone_header_size <= 0x0c)
+            continue; // non-sound entry (cue/marker), no stream here
+
+        pos = tone_payload + tone_header_offset;
+        avio_seek(pb, pos + 0x07, SEEK_SET);
+        flags2 = avio_r8(pb);
+        pos += 0x08;
+        if (flags2 & 0x80)
+            pos += 0x04;
+
+        avio_seek(pb, pos, SEEK_SET);
+        name_len = avio_r8(pb); // includes the trailing NUL
+        name_buf[0] = 0;
+        if (name_len > 1 && name_len <= sizeof(name_buf)) {
+            avio_read(pb, name_buf, name_len);
+            name_buf[name_len - 1] = 0;
         }
+        pos += FFALIGN(1 + name_len, 4);
+
+        if (avio_seek(pb, pos + 0x04, SEEK_SET) < 0 || avio_rl32(pb) != 0x08)
+            continue; // unexpected sub-type, not a plain stream entry
+
+        avio_seek(pb, pos + 0x08, SEEK_SET);
+        uint32_t stream_rel_offset = avio_rl32(pb);
+        uint32_t stream_size       = avio_rl32(pb);
+        if (!stream_size)
+            continue;
+
+        NUS3Track *t = &ctx->tracks[nb_tracks++];
+        t->pack_offset = stream_rel_offset;
+        t->pack_size   = stream_size;
+        av_strlcpy(t->name, name_buf, sizeof(t->name));
     }
 
-    // Read TONE chunk for stream offsets and sizes
-    avio_seek(pb, tone_offset + 8, SEEK_SET);
-    uint32_t tone_count = avio_rl32(pb);
-    for (uint32_t i = 0; i < tone_count && i < nb_tracks; i++) {
-        ctx->tracks[i].pack_offset = avio_rl32(pb);
-        ctx->tracks[i].pack_size   = avio_rl32(pb);
-    }
+    if (!nb_tracks)
+        return AVERROR_INVALIDDATA;
+    ctx->nb_tracks = nb_tracks;
 
     // Create AVStreams for each track
     for (uint32_t i = 0; i < nb_tracks; i++) {
@@ -182,25 +227,34 @@ static int nus3bank_read_header(AVFormatContext *s)
 
         uint32_t inner_magic = avio_rl32(pb);
         if (inner_magic == IDSP_MAGIC) {
-            // Nintendo IDSP stream
+            // Nintendo IDSP stream (Namco variant, see vgmstream's
+            // init_vgmstream_idsp_namco()/ngc_dsp_std.c for the verified
+            // field layout: a null/padding word sits right after the magic
+            // that this used to skip over, shifting every field below it
+            // by 4 bytes).
             t->is_idsp = 1;
+            avio_rb32(pb); // null/padding
             uint32_t channels     = avio_rb32(pb);
             uint32_t sample_rate  = avio_rb32(pb);
             uint32_t num_samples  = avio_rb32(pb);
             uint32_t loop_start   = avio_rb32(pb);
             uint32_t loop_end     = avio_rb32(pb);
-            avio_rb32(pb); // interleave
-            uint32_t header_size  = avio_rb32(pb);
-            uint32_t ch_info_ofs  = avio_rb32(pb);
-            uint32_t ch_info_sz   = avio_rb32(pb);
-            uint32_t data_offset  = avio_rb32(pb);
-            uint32_t data_size    = avio_rb32(pb);
+            uint32_t interleave   = avio_rb32(pb);
+            uint32_t ch_info_ofs  = avio_rb32(pb); // header_offset
+            uint32_t ch_info_sz   = avio_rb32(pb); // header_spacing
+            uint32_t data_offset  = avio_rb32(pb); // start_offset
 
             t->channels     = channels ? channels : 1;
+            // Samples for each channel are stored in alternating blocks of
+            // this many bytes (usually 0x10 = two 8-byte/14-sample ADPCM
+            // frames) rather than fully separated per channel; read_packet()
+            // de-interleaves using this before handing data to the decoder,
+            // which expects one channel's data fully in a row.
+            t->interleave   = interleave ? (int)interleave : 8;
             t->sample_rate  = sample_rate ? sample_rate : 48000;
             t->sample_count = num_samples;
-            t->data_offset  = item_pos + (data_offset ? data_offset : header_size);
-            t->data_size    = data_size ? data_size : (t->pack_size - (t->data_offset - item_pos));
+            t->data_offset  = item_pos + (data_offset ? data_offset : ch_info_ofs);
+            t->data_size    = t->pack_size - (t->data_offset - item_pos);
 
             st->codecpar->codec_id = AV_CODEC_ID_ADPCM_THP;
             st->codecpar->sample_rate = t->sample_rate;
@@ -252,6 +306,7 @@ static int nus3bank_read_header(AVFormatContext *s)
             t->channels = 2;
             t->sample_rate = 48000;
             t->is_idsp = 1;
+            t->interleave = 0; // unknown layout, read_packet() passes bytes through as-is
             t->data_offset = item_pos;
             t->data_size   = t->pack_size;
             avpriv_set_pts_info(st, 64, 1, 48000);
@@ -282,13 +337,59 @@ static int nus3bank_read_packet(AVFormatContext *s, AVPacket *pkt)
 
     NUS3Track *t = &ctx->tracks[stream_idx];
     int64_t remaining = t->data_size - t->bytes_read;
-    int read_size = FFMIN(remaining, 4096);
+    int ret;
 
-    avio_seek(pb, t->data_offset + t->bytes_read, SEEK_SET);
+    if (t->is_idsp && t->channels > 1 && t->interleave > 0) {
+        // On disk, each channel's samples come in alternating blocks of
+        // t->interleave bytes (e.g. ch0's 16 bytes, then ch1's 16 bytes,
+        // repeating) -- but the adpcm_thp decoder reads one channel's data
+        // fully before moving to the next, so it must be de-interleaved
+        // into that layout here first.
+        int64_t row_size = (int64_t)t->channels * t->interleave;
+        int64_t target    = FFMIN(remaining, 4096);
+        int64_t src_size  = FFMAX(row_size, (target / row_size) * row_size);
+        src_size = FFMIN(src_size, remaining);
 
-    int ret = av_get_packet(pb, pkt, read_size);
-    if (ret < 0)
-        return ret;
+        uint8_t *raw = av_malloc(src_size);
+        if (!raw)
+            return AVERROR(ENOMEM);
+
+        avio_seek(pb, t->data_offset + t->bytes_read, SEEK_SET);
+        int got = avio_read(pb, raw, src_size);
+        if (got <= 0) {
+            av_free(raw);
+            return got < 0 ? got : AVERROR_EOF;
+        }
+
+        ret = av_new_packet(pkt, got);
+        if (ret < 0) {
+            av_free(raw);
+            return ret;
+        }
+
+        int64_t full_rows  = got / row_size;
+        int64_t leftover   = got - full_rows * row_size; // only at true EOF
+        int64_t per_channel = full_rows * t->interleave;
+        for (int ch = 0; ch < t->channels; ch++) {
+            uint8_t *dst = pkt->data + ch * per_channel;
+            for (int64_t r = 0; r < full_rows; r++)
+                memcpy(dst + r * t->interleave,
+                       raw + r * row_size + ch * (int64_t)t->interleave,
+                       t->interleave);
+        }
+        if (leftover)
+            memcpy(pkt->data + t->channels * per_channel,
+                   raw + full_rows * row_size, leftover);
+
+        av_free(raw);
+        ret = got;
+    } else {
+        int read_size = FFMIN(remaining, 4096);
+        avio_seek(pb, t->data_offset + t->bytes_read, SEEK_SET);
+        ret = av_get_packet(pb, pkt, read_size);
+        if (ret < 0)
+            return ret;
+    }
 
     pkt->stream_index = stream_idx;
     pkt->pts = t->cur_pts;
@@ -298,7 +399,7 @@ static int nus3bank_read_packet(AVFormatContext *s, AVPacket *pkt)
         pkt->duration = samples;
         t->cur_pts += samples;
     } else {
-        pkt->duration = read_size / 4;
+        pkt->duration = ret / 4;
         t->cur_pts += pkt->duration;
     }
 
