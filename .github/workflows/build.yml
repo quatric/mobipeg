@@ -12,6 +12,7 @@ permissions:
 
 env:
   NASM_VERSION: "2.16.03"
+  SENTRY_VERSION: "0.16.5"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
@@ -189,7 +190,7 @@ jobs:
           # The x264 build now includes its architecture-specific assembly.
           # Keep this marker in the key so a previously cached scalar build
           # cannot be reused for a release artifact.
-          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Install foreign-arch codec headers (cross targets)
         if: matrix.foreign_arch != ''
@@ -296,6 +297,55 @@ jobs:
           make -j$(nproc) && make install
           cd ..
 
+      - name: Build sentry-native
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
+          mkdir -p "$DEPS"
+          curl -fsSL -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
+          unzip -q sentry-native.zip -d sentry-native-src
+          cd sentry-native-src
+
+          CMAKE_EXTRA_ARGS=()
+          if [ "${{ matrix.target }}" = "linux-x86" ]; then
+            CMAKE_EXTRA_ARGS+=("-DCMAKE_C_FLAGS=-m32" "-DCMAKE_CXX_FLAGS=-m32" "-DSENTRY_BUILD_FORCE32=ON")
+          elif [ -n "${{ matrix.cross_prefix }}" ]; then
+            CMAKE_EXTRA_ARGS+=(
+              "-DCMAKE_SYSTEM_NAME=Linux"
+              "-DCMAKE_SYSTEM_PROCESSOR=${{ matrix.ffarch }}"
+              "-DCMAKE_C_COMPILER=${{ matrix.cross_prefix }}gcc"
+              "-DCMAKE_CXX_COMPILER=${{ matrix.cross_prefix }}g++"
+            )
+          fi
+
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$DEPS" \
+            -DSENTRY_BUILD_SHARED_LIBS=OFF \
+            -DSENTRY_BACKEND=inproc \
+            -DSENTRY_TRANSPORT=none \
+            -DSENTRY_BUILD_TESTS=OFF \
+            -DSENTRY_BUILD_EXAMPLES=OFF \
+            "${CMAKE_EXTRA_ARGS[@]}"
+          cmake --build build -j$(nproc)
+          cmake --install build
+
+          mkdir -p "$DEPS/lib/pkgconfig"
+          cat << 'EOF' > "$DEPS/lib/pkgconfig/sentry.pc"
+          prefix=${pcfiledir}/../..
+          exec_prefix=${prefix}
+          libdir=${prefix}/lib
+          includedir=${prefix}/include
+
+          Name: sentry
+          Description: Sentry SDK for C/C++
+          Version: ${{ env.SENTRY_VERSION }}
+          Libs: -L${libdir} -lsentry
+          Cflags: -I${includedir}
+          EOF
+          # Strip leading whitespace from heredoc
+          sed -i 's/^[ \t]*//' "$DEPS/lib/pkgconfig/sentry.pc"
+
       - name: Build x264
         if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
@@ -338,6 +388,7 @@ jobs:
             --enable-libspeex \
             --enable-libtheora \
             --enable-libwebp \
+            --enable-libsentry \
             --pkg-config-flags="--static" \
             $CROSS \
             --extra-cflags="-I$DEPS/include ${{ matrix.target_flag }}" \
@@ -456,7 +507,7 @@ jobs:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # Match the Linux cache marker: these artifacts need an x264 build
           # with platform assembly enabled, not the older scalar-only build.
-          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -598,6 +649,43 @@ jobs:
             --enable-static --disable-shared \
             --disable-gl --disable-png --disable-jpeg --disable-tiff --disable-gif --disable-wic
           make -j$(nproc) && make install
+          cd ..
+
+          # sentry-native
+          curl -fsSL -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
+          unzip -q sentry-native.zip -d sentry-native-src
+          cd sentry-native-src
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.ffarch }} \
+            -DCMAKE_C_COMPILER=${{ matrix.cross_prefix }}-gcc \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cross_prefix }}-g++ \
+            -DCMAKE_RC_COMPILER=${{ matrix.cross_prefix }}-windres \
+            -DCMAKE_INSTALL_PREFIX="$DEPS" \
+            -DSENTRY_BUILD_SHARED_LIBS=OFF \
+            -DSENTRY_BACKEND=inproc \
+            -DSENTRY_TRANSPORT=none \
+            -DSENTRY_BUILD_TESTS=OFF \
+            -DSENTRY_BUILD_EXAMPLES=OFF
+          cmake --build build -j$(nproc)
+          cmake --install build
+          cd ..
+
+          mkdir -p "$DEPS/lib/pkgconfig"
+          cat << 'EOF' > "$DEPS/lib/pkgconfig/sentry.pc"
+          prefix=${pcfiledir}/../..
+          exec_prefix=${prefix}
+          libdir=${prefix}/lib
+          includedir=${prefix}/include
+
+          Name: sentry
+          Description: Sentry SDK for C/C++
+          Version: ${{ env.SENTRY_VERSION }}
+          Libs: -L${libdir} -lsentry
+          Cflags: -I${includedir}
+          EOF
+          sed -i 's/^[ \t]*//' "$DEPS/lib/pkgconfig/sentry.pc"
 
       - name: Create cross pkg-config shim
         run: |
@@ -630,6 +718,7 @@ jobs:
             --enable-libspeex \
             --enable-libtheora \
             --enable-libwebp \
+            --enable-libsentry \
             --enable-static \
             --disable-shared \
             --disable-doc \
@@ -695,7 +784,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/deps
-          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-dav1d1.5.1-x264-${{ steps.x264-rev.outputs.sha }}
+          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-dav1d1.5.1-sentry${{ env.SENTRY_VERSION }}-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -760,6 +849,38 @@ jobs:
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
+            # sentry-native
+            [ ! -f sentry-native.zip ] && curl -fsSL -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
+            rm -rf sentry-native-$ARCH && unzip -q sentry-native.zip -d sentry-native-$ARCH
+            cd sentry-native-$ARCH
+            cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+              -DSENTRY_BUILD_SHARED_LIBS=OFF \
+              -DSENTRY_BACKEND=inproc \
+              -DSENTRY_TRANSPORT=none \
+              -DSENTRY_BUILD_TESTS=OFF \
+              -DSENTRY_BUILD_EXAMPLES=OFF
+            cmake --build build -j$(sysctl -n hw.logicalcpu)
+            cmake --install build
+            cd ..
+
+            mkdir -p "$PREFIX/lib/pkgconfig"
+            cat << 'EOF' > "$PREFIX/lib/pkgconfig/sentry.pc"
+            prefix=${pcfiledir}/../..
+            exec_prefix=${prefix}
+            libdir=${prefix}/lib
+            includedir=${prefix}/include
+
+            Name: sentry
+            Description: Sentry SDK for C/C++
+            Version: ${{ env.SENTRY_VERSION }}
+            Libs: -L${libdir} -lsentry
+            Cflags: -I${includedir}
+            EOF
+            sed -i '' 's/^[ \t]*//' "$PREFIX/lib/pkgconfig/sentry.pc"
+
             # x264
             [ ! -d x264-$ARCH ] && git clone --depth=1 https://github.com/quatric/x264.git x264-$ARCH
             cd x264-$ARCH
@@ -819,6 +940,7 @@ jobs:
               --enable-libtheora \
               --enable-libwebp \
               --enable-libdav1d \
+              --enable-libsentry \
               --disable-doc \
               --disable-debug \
               --disable-outdev=sdl2 \
