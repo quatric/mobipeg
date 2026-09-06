@@ -1097,7 +1097,7 @@ jobs:
               apt-get update -qq
               apt-get install -y --no-install-recommends \
                 python3-tk binutils build-essential zlib1g-dev libjpeg-dev
-              pip install --quiet pyinstaller Pillow
+              pip install --quiet pyinstaller Pillow sentry-sdk
               pyinstaller --name mobipeg-gui --windowed \
                 --add-binary artifact/ffmpeg:. \
                 --add-binary artifact/ffprobe:. \
@@ -1112,7 +1112,7 @@ jobs:
         if: matrix.docker_platform == ''
         shell: bash
         run: |
-          python -m pip install pyinstaller Pillow
+          python -m pip install pyinstaller Pillow sentry-sdk
           if [[ "${{ matrix.target }}" == windows* ]]; then
             FFMPEG_BIN="artifact/ffmpeg.exe"
             FFPROBE_BIN="artifact/ffprobe.exe"
