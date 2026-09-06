@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+try:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn="https://9cff5a454488188a77ee0c3a043d7c94@o107347.ingest.us.sentry.io/4512040240480256",
+        send_default_pii=True,
+    )
+except ImportError:
+    pass
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import subprocess
@@ -7,6 +16,7 @@ import os
 import sys
 
 ENCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode.py")
+
 
 # One source of truth for what the decoder accepts: (family, extensions).
 # The file dialog's type menu and the expandable format list are both derived
