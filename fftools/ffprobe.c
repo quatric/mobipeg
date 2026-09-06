@@ -3760,5 +3760,7 @@ end:
 
     avformat_network_deinit();
 
+    fftools_sentry_close();
+
     return ret < 0;
 }
