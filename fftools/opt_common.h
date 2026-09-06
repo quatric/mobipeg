@@ -196,6 +196,9 @@ int opt_cpuflags(void *optctx, const char *opt, const char *arg);
  */
 int opt_cpucount(void *optctx, const char *opt, const char *arg);
 
+void fftools_sentry_init(void);
+void fftools_sentry_close(void);
+
 #define CMDUTILS_COMMON_OPTIONS                                                                                         \
     { "L",            OPT_TYPE_FUNC, OPT_EXIT,              { .func_arg = show_license },     "show license" },                          \
     { "license",      OPT_TYPE_FUNC, OPT_EXIT,              { .func_arg = show_license },     "show license" },                          \
