@@ -78,6 +78,7 @@
 #include "libavdevice/avdevice.h"
 
 #include "cmdutils.h"
+#include "opt_common.h"
 #if CONFIG_MEDIACODEC
 #include "compat/android/binder.h"
 #endif
@@ -375,6 +376,7 @@ static void ffmpeg_cleanup(int ret)
         av_log(NULL, AV_LOG_INFO, "Conversion failed!\n");
     }
     term_exit();
+    fftools_sentry_close();
     ffmpeg_exited = 1;
 }
 
