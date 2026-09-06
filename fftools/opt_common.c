@@ -21,6 +21,10 @@
 #include "config.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#if CONFIG_LIBSENTRY
+#include <sentry.h>
+#endif
 
 #include "cmdutils.h"
 #include "fopen_utf8.h"
@@ -1515,3 +1519,54 @@ int show_sinks(void *optctx, const char *opt, const char *arg)
     return ret;
 }
 #endif /* CONFIG_AVDEVICE */
+
+void fftools_sentry_init(void)
+{
+#if CONFIG_LIBSENTRY
+    static int sentry_initialized = 0;
+    if (sentry_initialized)
+        return;
+    sentry_initialized = 1;
+
+    sentry_options_t *options = sentry_options_new();
+    const char *dsn = getenv("SENTRY_DSN");
+    if (!dsn || !*dsn)
+        dsn = "https://c099b6e9213f40be315ebb6db89a647a@o107347.ingest.us.sentry.io/4512040237268992";
+    sentry_options_set_dsn(options, dsn);
+    sentry_options_set_database_path(options, ".sentry-native");
+    sentry_options_set_release(options, "mobipeg@" FFMPEG_VERSION);
+    sentry_options_set_debug(options, 1);
+
+    const char *handler_path = getenv("SENTRY_HANDLER_PATH");
+    if (handler_path && *handler_path) {
+        sentry_options_set_handler_path(options, handler_path);
+    } else {
+        static const char * const candidates[] = {
+            "/opt/homebrew/bin/crashpad_handler",
+            "/usr/local/bin/crashpad_handler",
+            "/usr/bin/crashpad_handler"
+        };
+        for (size_t i = 0; i < FF_ARRAY_ELEMS(candidates); i++) {
+            FILE *f = fopen(candidates[i], "r");
+            if (f) {
+                fclose(f);
+                sentry_options_set_handler_path(options, candidates[i]);
+                break;
+            }
+        }
+    }
+
+    sentry_init(options);
+#endif
+}
+
+void fftools_sentry_close(void)
+{
+#if CONFIG_LIBSENTRY
+    static int sentry_closed = 0;
+    if (sentry_closed)
+        return;
+    sentry_closed = 1;
+    sentry_close();
+#endif
+}

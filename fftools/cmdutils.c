@@ -558,6 +558,8 @@ void parse_loglevel(int argc, char **argv, const OptionDef *options)
     int idx;
     char *env;
 
+    fftools_sentry_init();
+
     check_options(options);
 
     idx = locate_option(argc, argv, options, "loglevel");

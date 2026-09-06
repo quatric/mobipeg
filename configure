@@ -277,6 +277,7 @@ External library support:
   --enable-libsmbclient    enable Samba protocol via libsmbclient [no]
   --enable-libsnappy       enable Snappy compression, needed for hap encoding [no]
   --enable-libsoxr         enable Include libsoxr resampling [no]
+  --enable-libsentry       enable crash reporting via sentry-native [no]
   --enable-libspeex        enable Speex de/encoding via libspeex [no]
   --enable-libsrt          enable Haivision SRT protocol via libsrt [no]
   --enable-libssh          enable SFTP protocol via libssh [no]
@@ -2127,6 +2128,7 @@ EXTERNAL_LIBRARY_LIST="
     libsmbclient
     libsnappy
     libsoxr
+    libsentry
     libspeex
     libsrt
     libssh
@@ -4420,12 +4422,12 @@ ffmpeg_deps="avcodec avfilter avformat threads"
 ffmpeg_select="aformat_filter anull_filter atrim_filter crop_filter
                format_filter hflip_filter null_filter rotate_filter
                transpose_filter trim_filter vflip_filter"
-ffmpeg_suggest="ole32 psapi shell32"
+ffmpeg_suggest="ole32 psapi shell32 libsentry"
 ffplay_deps="avcodec avformat avfilter swscale swresample sdl2"
 ffplay_select="crop_filter transpose_filter hflip_filter vflip_filter rotate_filter"
-ffplay_suggest="shell32 libplacebo vulkan"
+ffplay_suggest="shell32 libplacebo vulkan libsentry"
 ffprobe_deps="avcodec avformat"
-ffprobe_suggest="shell32"
+ffprobe_suggest="shell32 libsentry"
 
 # documentation
 podpages_deps="perl"
@@ -7484,6 +7486,8 @@ enabled libvorbis         && require_pkg_config libvorbis vorbis vorbis/codec.h 
                              require_pkg_config libvorbisenc vorbisenc vorbis/vorbisenc.h vorbis_encode_init
 
 enabled whisper           && require_pkg_config whisper "whisper >= 1.7.5" whisper.h whisper_init_from_file_with_params
+enabled libsentry         && { check_pkg_config libsentry "sentry >= 0.7.0" sentry.h sentry_init ||
+                               require libsentry sentry.h sentry_init -lsentry; }
 
 enabled libvpx            && {
     enabled libvpx_vp8_decoder && {
