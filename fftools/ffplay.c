@@ -58,8 +58,8 @@
 #include <SDL_thread.h>
 
 #include "cmdutils.h"
-#include "ffplay_renderer.h"
 #include "opt_common.h"
+#include "ffplay_renderer.h"
 
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
@@ -2007,6 +2007,8 @@ static void do_exit(VideoState *is)
     SDL_Quit();
     av_log(NULL, AV_LOG_QUIET, "%s", "");
     exit(exit_status);
+    fftools_sentry_close();
+    exit(0);
 }
 
 static void sigterm_handler(int sig)
