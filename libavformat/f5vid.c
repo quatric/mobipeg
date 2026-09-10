@@ -38,11 +38,11 @@
  *       mpeg4 decoder accepts the stream. use_intra_dc_vlc is forced on;
  *       time_res = 60000 to match container ts.
  *       I-frame MB data uses standard MPEG-4 VLCs/tables (verified against
- *       the game binary's M4 tables) with one deviation: after an intra DC
- *       with size>8, the encoder emits 1 extra bit which plain MPEG-4 does
- *       not have; the demuxer drops it. Isolated single-bit glitches occur
- *       in some frames (deterministic per frame); the demuxer resyncs past
- *       them (skips to the next valid MB) so the rest of the frame decodes.
+  *       the game binary's M4 tables) with one deviation: after an intra DC
+  *       with size>8, the encoder emits 1 extra bit which plain MPEG-4 does
+  *       not have; the demuxer drops it. A resync scan (skip to the next
+  *       valid MB) guards against damage, but every shipped frame parses
+  *       cleanly without it.
  *       KNOWN GAPS: P-frame motion uses a custom signed VLC, remapped here
  *       to standard magnitude+sign+residual (residual length fwd-1);
  *       B/GMC types (2/3) are asserted unsupported (absent from all
@@ -460,12 +460,24 @@ static int f5_skip_ac_block(F5BitR *r, F5BitW *w)
             if (r->err)
                 return -1;
             if (t == 3) {
-                /* third escape: last(1) run(6) marker(1) level(12) marker(1) */
+                /* third escape: last(1) run(6) marker(1) level(12) marker(1).
+                 * F5's encoder sometimes leaves marker bits zero (its own
+                 * decoder only consumes them, never checks); force them to 1
+                 * so the standard decoder accepts the block. */
                 if (r->pos + 1 + 6 + 1 + 12 + 1 > r->nbits)
                     return -1;
                 last = f5br_get(r, 1);
                 f5bw_put(w, last, 1);
-                f5_copy_bits(r, w, 6 + 1 + 12 + 1);
+                if (f5_copy_bits(r, w, 6) < 0)   /* run */
+                    return -1;
+                f5br_get(r, 1);                   /* F5 marker bit (dropped) */
+                if (f5bw_put(w, 1, 1) < 0)       /* standard marker bit */
+                    return -1;
+                if (f5_copy_bits(r, w, 12) < 0)  /* level */
+                    return -1;
+                f5br_get(r, 1);                   /* F5 marker bit (dropped) */
+                if (f5bw_put(w, 1, 1) < 0)
+                    return -1;
                 if (r->err)
                     return -1;
                 if (last)
@@ -606,7 +618,8 @@ static int f5_filter_mb(F5BitR *r, F5BitW *w)
  * where an MB header plus 3 following MBs validate (max 3000 bits ahead),
  * up to 40 resyncs per frame; then truncates. Always succeeds (possibly
  * with zero MBs); the caller emits what was produced and lets the decoder
- * conceal the rest. */
+ * conceal the rest. I-frames carry no video packet headers (they decode
+ * cleanly either way; the VOL enables markers for P recovery). */
 static void f5_filter_iframe(const uint8_t *in, int in_size,
                              int mb_w, int mb_h, F5BitW *out)
 {
@@ -655,7 +668,16 @@ static void f5_filter_iframe(const uint8_t *in, int in_size,
         r.pos = save_pos + adv;
         r.err = 0;
         resyncs++;
+        /* Re-parse MB m from the new offset and emit it: dropping it would
+         * shorten the stream and shift every later MB into the wrong slot. */
+        if (f5_filter_mb(&r, out) == 0)
+            continue;
+        out->len = save_len;
+        out->cache = save_cache;
+        out->nbits = save_nbits;
+        break;
     }
+    (void)nmb;
 }
 
 static const uint32_t f5ac_e1[112] = {
@@ -820,12 +842,13 @@ static int f5_motion_remap(F5BitR *r, F5BitW *w, int reslen)
     uint32_t bit;
     if (r->pos + 1 > r->nbits)
         return -1;
-    bit = f5br_show(r, 1);
+    bit = f5br_get(r, 1);
     if (r->err)
         return -1;
     if (bit) {
-        /* zero vector: identical '1' in both grammars */
-        f5_copy_bits(r, w, 1);
+        /* zero vector: identical '1' in both grammars (already consumed) */
+        if (f5bw_put(w, 1, 1) < 0)
+            return -1;
         return r->err ? -1 : 0;
     }
     if (r->pos + 12 > r->nbits)
@@ -915,11 +938,24 @@ static int f5_skip_ac_block_inter(F5BitR *r, F5BitW *w)
             if (r->err)
                 return -1;
             if (t == 3) {
+                /* third escape: last(1) run(6) marker(1) level(12) marker(1).
+                 * F5's encoder sometimes leaves marker bits zero (its own
+                 * decoder only consumes them, never checks); force them to 1
+                 * so the standard decoder accepts the block. */
                 if (r->pos + 1 + 6 + 1 + 12 + 1 > r->nbits)
                     return -1;
                 last = f5br_get(r, 1);
                 f5bw_put(w, last, 1);
-                f5_copy_bits(r, w, 6 + 1 + 12 + 1);
+                if (f5_copy_bits(r, w, 6) < 0)   /* run */
+                    return -1;
+                f5br_get(r, 1);                   /* F5 marker bit (dropped) */
+                if (f5bw_put(w, 1, 1) < 0)       /* standard marker bit */
+                    return -1;
+                if (f5_copy_bits(r, w, 12) < 0)  /* level */
+                    return -1;
+                f5br_get(r, 1);                   /* F5 marker bit (dropped) */
+                if (f5bw_put(w, 1, 1) < 0)
+                    return -1;
                 if (r->err)
                     return -1;
                 if (last)
@@ -969,7 +1005,7 @@ static int f5_skip_ac_block_inter(F5BitR *r, F5BitW *w)
  * reslen = motion residual bits (fcode-1). Returns 0 ok, -1 fail. */
 static int f5_filter_pmb(F5BitR *r, F5BitW *w, int reslen)
 {
-    int skip, typ, extra, len, cbpy, leny, cbp, i, dq;
+    int skip, typ, extra, len, cbpy, leny, cbp, i;
     if (r->pos + 1 > r->nbits)
         return -1;
     skip = f5br_get(r, 1);
@@ -1032,8 +1068,6 @@ static int f5_filter_pmb(F5BitR *r, F5BitW *w, int reslen)
         if (r->err)
             return -1;
     }
-    dq = 0;
-    (void)dq;
     cbp = (((15 - cbpy) & 15) << 2) | extra;
     {
         int nmv = (typ == 2) ? 4 : 1;
@@ -1055,7 +1089,6 @@ static int f5_filter_pmb(F5BitR *r, F5BitW *w, int reslen)
     return r->err ? -1 : 0;
 }
 
-#define F5_PRESYNC_STRONG 48
 #define F5_PRESYNC_WEAK    4
 
 /* P-frame MB filter with resync. Mirrors f5_filter_iframe but transcodes
@@ -1071,7 +1104,7 @@ static void f5_filter_pframe(const uint8_t *in, int in_size,
         uint32_t save_cache = out->cache;
         int save_nbits = out->nbits;
         F5BitR t;
-        int ok, adv, k, tier;
+        int ok, adv, k;
         r.err = 0;
         if (f5_filter_pmb(&r, out, reslen) == 0)
             continue;
@@ -1079,42 +1112,52 @@ static void f5_filter_pframe(const uint8_t *in, int in_size,
         out->cache = save_cache;
         out->nbits = save_nbits;
         ok = 0;
-        /* Two-tier resync. A candidate offset is accepted only if a long run of
-         * MBs parses from it; a 4-MB run (the old criterion) accepts far too
-         * many wrong offsets, after which the rest of the frame is garbage and
-         * roughly half the coded bits go unconsumed. Fall back to the short run
-         * so a frame that has no strong candidate still recovers instead of
-         * being truncated. */
-        for (tier = 0; tier < 2 && !ok; tier++) {
-            int win = tier ? F5_PRESYNC_WEAK : F5_PRESYNC_STRONG;
-            for (adv = 1; adv <= 3000; adv++) {
-                if (save_pos + adv >= r.nbits)
-                    break;
-                t.buf = r.buf;
-                t.nbits = r.nbits;
-                t.pos = save_pos + adv;
-                t.err = 0;
-                for (k = 0; k < win; k++) {
-                    F5BitW tmp = { NULL, 0, 0, 0, 0 };
-                    F5BitR c = t;
-                    if (f5_filter_pmb(&c, &tmp, reslen) < 0) {
-                        av_free(tmp.buf);
-                        break;
-                    }
+        for (adv = 1; adv <= 3000; adv++) {
+            if (save_pos + adv >= r.nbits)
+                break;
+            t.buf = r.buf;
+            t.nbits = r.nbits;
+            t.pos = save_pos + adv;
+            t.err = 0;
+            for (k = 0; k < F5_PRESYNC_WEAK; k++) {
+                F5BitW tmp = { NULL, 0, 0, 0, 0 };
+                F5BitR c = t;
+                if (f5_filter_pmb(&c, &tmp, reslen) < 0) {
                     av_free(tmp.buf);
-                    t = c;
-                }
-                if (k == win) {
-                    ok = 1;
                     break;
                 }
+                av_free(tmp.buf);
+                t = c;
+            }
+            if (k == F5_PRESYNC_WEAK) {
+                ok = 1;
+                break;
             }
         }
-        if (!ok || resyncs >= 40)
-            break; /* truncate */
+        if (!ok || resyncs >= 40) {
+            /* Truncate: pad the rest of the frame with skipped MBs so the
+             * decoder still sees a full frame (a short stream makes it
+             * overread into padding). Skipped P-MBs copy the reference. */
+            for (; m < mb_w * mb_h; m++)
+                if (f5bw_put(out, 1, 1) < 0)
+                    break;
+            break;
+        }
         r.pos = save_pos + adv;
         r.err = 0;
         resyncs++;
+        /* Re-parse MB m from the new offset and emit it: dropping it would
+         * shorten the stream and shift every later MB into the wrong slot.
+         * Validated above, so this succeeds barring OOM. */
+        if (f5_filter_pmb(&r, out, reslen) == 0)
+            continue;
+        out->len = save_len;
+        out->cache = save_cache;
+        out->nbits = save_nbits;
+        for (; m < mb_w * mb_h; m++)
+            if (f5bw_put(out, 1, 1) < 0)
+                break;
+        break;
     }
 }
 
@@ -1657,8 +1700,7 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
             }
 
             /* Build packet: VOP start + VOP header (bit-exact, then MB data
-             * follows at bit granularity). VOP tinc uses the monotonic
-             * decode clock (container ts jumps); packet pts below too. */
+             * follows at bit granularity). */
             /* Adopt the container clock whenever it does not move backwards
              * (it never does, once the P-VOP timestamp is unpacked correctly);
              * otherwise keep the synthesized one-frame advance. */
