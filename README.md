@@ -17,6 +17,7 @@ such as audio, video, subtitles and related metadata.
 |--------|-----------|----------|--------|--------|
 | BPK1 | `.bpk`, `.bpk1`, `.apd` | Nintendo 3DS Swapdoodle / Swapnote | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
+| Factor 5 DivX | `.vid` | GameCube (Carmen Sandiego) | — | ✅ |
 | FastVideo DS | `.fv` | Nintendo DS | ✅ | ✅ |
 | Flipnote Studio | `.ppm` | Nintendo DS / DSi | — | ✅ |
 | Flipnote Studio 3D | `.kwz` | Nintendo 3DS | — | ✅ |

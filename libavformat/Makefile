@@ -412,6 +412,7 @@ OBJS-$(CONFIG_MO_MUXER)                  += moenc.o
 OBJS-$(CONFIG_VX_DEMUXER)       += vxdec.o
 OBJS-$(CONFIG_VX_MUXER)         += vxenc.o
 OBJS-$(CONFIG_MOC3_DEMUXER)              += moc3.o
+OBJS-$(CONFIG_F5VID_DEMUXER)              += f5vid.o
 OBJS-$(CONFIG_MODS_DEMUXER)              += mods.o
 OBJS-$(CONFIG_MODS_MUXER)                += modsenc.o
 OBJS-$(CONFIG_GBAVIDEO_DEMUXER)          += gbavideo.o
