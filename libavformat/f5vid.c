@@ -11,10 +11,12 @@
  *                         | u32 max_FRAM_len | u32 fps_num | u16 fps_den | u16 0
  *       e.g. 640x480 display, 2997/100 (29.97 fps). The coded video is the
  *       full VIDH size (640x480 MPEG-4 ASP, DivX 5.02, 40x30 MBs).
- *     AUDH payload (88B): u32 0 | "APCM" | u32 rate_BE (32000)
- *                         | u16 channels_LE (2) | 74 bytes initial audio data
- *       (Bam/LS/River carry zeros here = silence; Demo/A2M carry samples.
- *       The 74 bytes are part of the audio stream, not header.)
+  *     AUDH payload (88B): u32 0 | "APCM" | u32 rate_BE (32000)
+  *                         | u16 channels_LE (2) | 74 bytes footer.
+  *       In Demo/A2M the first 64 footer bytes are nonzero (purpose
+  *       unknown — they are NOT the DSP coef table: feeding them as one
+  *       clips the decoder to full scale; they are not 8-byte-aligned
+  *       audio either); Bam/LS/River carry zeros.
  *   FRAM len variable: 8-byte header + 24 bytes zeros, then VIDD + AUDD.
  *     VIDD: 8-byte header + 12-byte inner header + DivX video MB data.
  *       inner: 00 00 00 00 | 00 01 code sub | 32-bit timestamp (30000 Hz,
@@ -48,17 +50,16 @@
  *       B/GMC types (2/3) are asserted unsupported (absent from all
  *       shipped files).
   *     AUDD: 8-byte header + 8-byte inner header + audio data.
-  *       inner: 00 00 00 00 | BE32 (ALN-32, i.e. audio_len-16).
+  *       inner: 00 00 00 00 | BE32 (AUDD_len - 32).
   *       "APCM" audio at 32000 Hz stereo, ~37 kB/s: DSP-ADPCM with 8-byte
   *       frames (predictor/scale header + 14 nibbles, THP-compatible framing;
   *       14 samples/8 bytes = 4.57 bits/sample = 36.6 kB/s stereo @32kHz).
   *       Frames are interleaved L,R,L,R...; the demuxer deinterleaves to
   *       channel-major for the adpcm_thp decoder. The per-file coef table
-  *       is not present (AUDH carries initial samples, not coefs), so the
-  *       demuxer exposes a zero table (memoryless decode: plausible level
-  *       and duration, harsh spectrum). TODO: recover the true coef table
-  *       (game binary / MusyX docs) and confirm the channel layout for full
-  *       quality. The 74 AUDH bytes are initial audio (skipped here; ~2 ms).
+  *       is not present (AUDH's 64 nonzero bytes are something else — see
+  *       above), so the demuxer exposes a zero table (memoryless decode:
+  *       plausible level and duration, harsh spectrum). TODO: identify the
+  *       footer bytes (game binary audio decoder) for full quality.
   *
   *   Timing: file order is display order and the container clock is strictly
   *   increasing once P-VOP timestamps are unpacked from the right bit offset,
@@ -86,8 +87,10 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/avassert.h"
 #include "libavutil/mem.h"
+#include "config_components.h"
 #include "demux.h"
 #include "internal.h"
+#include "mux.h"
 
 #include "avformat.h"
 
@@ -162,6 +165,8 @@ static int f5bw_flush(F5BitW *w)
     return 0;
 }
 
+#if CONFIG_F5VID_DEMUXER
+
 /* Synthesize a minimal MPEG-4 VOL (Simple, rectangular, progressive,
  * H.263 quant, no resync/partition/sprite). Matches the proven graft VOL. */
 #define F5VID_TIME_RES 60000
@@ -199,6 +204,8 @@ static int f5vid_build_vol(F5BitW *w, int width, int height, uint32_t time_res)
     if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* scalability */
     return f5bw_flush(w);
 }
+
+#endif /* CONFIG_F5VID_DEMUXER */
 
 /* ---- F5 I-frame MB bit filter ----
  * Parses I-frame MB data with F5's exact VLC grammar (all tables verified
@@ -525,6 +532,8 @@ static int f5_skip_ac_block(F5BitR *r, F5BitW *w)
     }
 }
 
+#if CONFIG_F5VID_DEMUXER
+
 /* Parse one I-frame MB header (mcbpc + ac_pred + cbpy [+dquant]).
  * Copies header bits to w. Returns cbp (6-bit coded pattern), or -1 on
  * invalid/overrun. *dquant set if a dquant delta was present (value ignored
@@ -587,6 +596,28 @@ static int f5_filter_dc(F5BitR *r, F5BitW *w, int is_luma)
         }
         r->pos += 1;
     }
+    return 0;
+}
+
+/* Emit a minimal concealment intra MB (no coded blocks, all-DC predicted),
+ * keeping the stream at a full frame when the input truncates. 22 bits:
+ * mcbpc 0 ('1'), ac_pred off, cbpy 0 ('0011'), 4x luma DC size 0 ('011'),
+ * 2x chroma DC size 0 ('11'). */
+static int f5_pad_imb(F5BitW *w)
+{
+    int i, ret;
+    if ((ret = f5bw_put(w, 1, 1)) < 0)
+        return ret;
+    if ((ret = f5bw_put(w, 0, 1)) < 0)
+        return ret;
+    if ((ret = f5bw_put(w, 3, 4)) < 0)
+        return ret;
+    for (i = 0; i < 4; i++)
+        if ((ret = f5bw_put(w, 3, 3)) < 0)
+            return ret;
+    for (i = 0; i < 2; i++)
+        if ((ret = f5bw_put(w, 3, 2)) < 0)
+            return ret;
     return 0;
 }
 
@@ -663,8 +694,14 @@ static void f5_filter_iframe(const uint8_t *in, int in_size,
                 break;
             }
         }
-        if (!ok || resyncs >= 40)
-            break; /* truncate */
+        if (!ok || resyncs >= 40) {
+            /* Truncate: pad the rest of the frame with concealment MBs so
+             * the decoder still sees a full frame. */
+            for (; m < mb_w * mb_h; m++)
+                if (f5_pad_imb(out) < 0)
+                    break;
+            break;
+        }
         r.pos = save_pos + adv;
         r.err = 0;
         resyncs++;
@@ -675,10 +712,15 @@ static void f5_filter_iframe(const uint8_t *in, int in_size,
         out->len = save_len;
         out->cache = save_cache;
         out->nbits = save_nbits;
+        for (; m < mb_w * mb_h; m++)
+            if (f5_pad_imb(out) < 0)
+                break;
         break;
     }
     (void)nmb;
 }
+
+#endif /* CONFIG_F5VID_DEMUXER */
 
 static const uint32_t f5ac_e1[112] = {
     0x000e1081, 0x000e1071, 0x000e1061, 0x000e1051, 0x000e00c1, 0x000e00b1, 0x000e00a1, 0x000e0004 ,
@@ -832,6 +874,8 @@ static const uint8_t f5mv_std[33][2] = {
     { 6, 10 }, { 5, 10 }, { 4, 10 }, { 7, 11 }, { 6, 11 },
     { 5, 11 }, { 4, 11 }, { 3, 11 }, { 2, 11 }, { 3, 12 }, { 2, 12 },
 };
+
+#if CONFIG_F5VID_DEMUXER
 
 /* Parse one F5 motion value, emit standard (mag code + sign + residual).
  * reslen = residual bits (fcode-1). Returns 0 ok, -1 on invalid/overrun. */
@@ -1161,6 +1205,10 @@ static void f5_filter_pframe(const uint8_t *in, int in_size,
     }
 }
 
+#endif /* CONFIG_F5VID_DEMUXER */
+
+#if CONFIG_F5VID_DEMUXER
+
 /* Container timestamp from a 12-byte VIDD inner header, in F5VID_TIME_RES
  * units. The M4 frame header (M4BitstreamParser::parseHeader, 800fca90) is a
  * packed bit header, so the 32-bit timestamp is only byte-aligned when the
@@ -1254,11 +1302,9 @@ static int f5vid_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
     /* APCM is DSP-ADPCM (8-byte frames: predictor/scale + 14 nibbles,
-     * THP-compatible framing). The per-file coef table is not present
-     * (AUDH carries initial samples, not coefs), so expose a zero table
-     * (memoryless decode: plausible level/duration, harsh spectrum).
-     * TODO: recover the true coef table (game binary / MusyX docs) and the
-     * exact channel layout for full quality. */
+     * THP-compatible framing). The per-file coef table is not present,
+     * so expose a zero table (memoryless decode: plausible level and
+     * duration, harsh spectrum). */
     ast->codecpar->codec_id = AV_CODEC_ID_ADPCM_THP;
 
     /* VID1 */
@@ -1331,15 +1377,16 @@ static int f5vid_read_header(AVFormatContext *s)
         vst->codecpar->extradata_size = 0;
         return AVERROR_EOF;
     }
-    /* audh layout: u32 0 | "APCM" | u32 rate_BE | u16 channels + ... */
+    /* audh layout: u32 0 | "APCM" | u32 rate_BE | u16 channels +
+     * 74 bytes footer (see above) */
     if (AV_RB32(audh + 4) != MKBETAG('A','P','C','M'))
         av_log(s, AV_LOG_WARNING, "f5vid: unexpected audio tag %08X\n",
                AV_RB32(audh + 4));
     ast->codecpar->sample_rate = AV_RB32(audh + 8);
     if (!ast->codecpar->sample_rate)
         ast->codecpar->sample_rate = 32000;
-    /* channels are LE u16 at audh+12; the rest of AUDH is initial audio
-     * data, skip the rest of AUDH */
+    /* channels are LE u16 at audh+12; the 74 bytes after it are a footer
+     * of unknown purpose (see above) */
     {
         uint16_t ch = AV_RL16(audh + 12);
         if (ch == 1)
@@ -1824,3 +1871,669 @@ const FFInputFormat ff_f5vid_demuxer = {
     .read_close       = f5vid_read_close,
     .priv_data_size   = sizeof(F5VIDDemuxContext),
 };
+
+#endif /* CONFIG_F5VID_DEMUXER */
+
+#if CONFIG_F5VID_MUXER
+
+/* ---- Factor 5 .vid muxer ----
+ * Inverse of the demuxer above: takes the MPEG-4 packets the f5vid demuxer
+ * emits (synthesized VOL extradata + VOP headers around an otherwise F5
+ * MB stream) and re-packs them into a .vid container (VID1/HEAD/FRAM with
+ * VIDD+AUDD). Only that packet layout is accepted (strict VOP header
+ * checks); there is no MPEG-4 video encoder in this tree, so vid->vid
+ * container work is the only producer of such packets.
+ *
+ * Video inversion per field: COD/MCBPC/CBPY/dquant/ac_pred copied verbatim
+ * (codewords are identical to the standard ones); intra DC re-gains its
+ * F5-only extra bit after sizes > 8 (value lost by the demuxer, emitted 0 —
+ * the game decoder only consumes it); motion is parsed as standard
+ * magnitude+sign+residual and re-emitted in F5's custom signed VLC;
+ * coefficient blocks (all escapes) are verbatim.
+ *
+ * Audio is DSP-ADPCM (adpcm_thp) in channel-major 8-byte frames, as emitted
+ * by the encoder and by the demuxer; it is re-interleaved L,R,L,R per FRAM.
+ *
+ * Everything is buffered and the file is written in write_trailer, so VIDH
+ * frame_count/max_FRAM_len are exact and non-seekable output works.
+ */
+
+typedef struct F5MUXFrame {
+    uint8_t *mb;      /* F5 MB stream for this frame */
+    int mb_size;
+    int is_key;
+    int quant, fwd, rounding;
+    int64_t ts30;     /* container timestamp, 30000 Hz ticks */
+} F5MUXFrame;
+
+typedef struct F5VIDMuxContext {
+    F5MUXFrame *frames;
+    int nb_frames, cap_frames;
+    uint8_t *al;      /* channel-major audio FIFOs, 8-byte DSP frames */
+    int al_len, al_size;
+    uint8_t *ar;
+    int ar_len, ar_size;
+    int channels;     /* 0 = no audio stream */
+    int rate;
+    uint8_t coef[64]; /* DSP-ADPCM table, 32 bytes per channel */
+    int have_coef;
+    int width, height;
+    int fps_num, fps_den;
+} F5VIDMuxContext;
+
+/* Reverse motion map: F5 codeword for a signed mvd (-32..32, never 0),
+ * entry (len<<24)|codeword, 0 = unknown. Built once by scanning all 4096
+ * peeks; the VLC is prefix-consistent so the first hit per value is the
+ * canonical (shortest) code. */
+static uint32_t f5mv_enc[65];
+static int f5mv_enc_done;
+
+static void f5mv_enc_build(void)
+{
+    int pk;
+    if (f5mv_enc_done)
+        return;
+    memset(f5mv_enc, 0, sizeof(f5mv_enc));
+    for (pk = 4; pk < 4096; pk++) {
+        uint32_t e;
+        int ln, v;
+        if (pk < 0x80)
+            e = f5mv_m3[pk - 4];
+        else if (pk < 0x200)
+            e = f5mv_m2[(pk >> 2) - 0x20];
+        else
+            e = f5mv_m1[(pk >> 8) - 2];
+        ln = e >> 17;
+        v = (int)(e & 0xFFFF);
+        if (v & 0x8000)
+            v -= 0x10000;
+        if (ln <= 0 || ln > 12 || v < -32 || v > 32 || v == 0)
+            continue;
+        if (!f5mv_enc[v + 32])
+            f5mv_enc[v + 32] = ((uint32_t)ln << 24) |
+                               (uint32_t)(pk >> (12 - ln));
+    }
+    f5mv_enc_done = 1;
+}
+
+/* Parse our synthesized VOP header. Returns 0 with type (0=I,1=P), quant,
+ * fwd, rounding and the MB-data bit offset, or -1 for anything else. */
+static int f5mux_parse_vop(const uint8_t *data, int size, int *type,
+                           int *quant, int *fwd, int *rounding, int *mb_pos)
+{
+    F5BitR r = { data, size * 8, 0, 0 };
+    int tb = 0;
+    if (size < 8 || AV_RB32(data) != 0x1B6)
+        return -1;
+    r.pos = 32;
+    *type = f5br_get(&r, 2);
+    if (*type != 0 && *type != 1)
+        return -1;
+    while (f5br_get(&r, 1)) {
+        if (++tb > 64)
+            return -1;
+    }
+    if (f5br_get(&r, 1) != 1)   /* marker */
+        return -1;
+    f5br_get(&r, 16);           /* time increment */
+    if (f5br_get(&r, 1) != 1)   /* marker */
+        return -1;
+    if (f5br_get(&r, 1) != 1)   /* vop_coded */
+        return -1;
+    *rounding = 0;
+    if (*type == 1)
+        *rounding = f5br_get(&r, 1);
+    if (f5br_get(&r, 3) != 0)   /* intra_dc_threshold idx must be 0 */
+        return -1;
+    *quant = f5br_get(&r, 5);
+    if (*quant < 1 || *quant > 31)
+        return -1;
+    *fwd = 1;
+    if (*type != 0) {
+        *fwd = f5br_get(&r, 3);
+        if (*fwd < 1 || *fwd > 7)
+            return -1;
+    }
+    if (r.err)
+        return -1;
+    *mb_pos = r.pos;
+    return 0;
+}
+
+/* Parse one standard motion value, emit F5 (leading 0 + signed-VLC codeword
+ * + residual). reslen = fcode-1. Returns 0 ok, -1 fail. */
+static int f5mux_motion(F5BitR *r, F5BitW *w, int reslen)
+{
+    int m, ln, sign, i, flen;
+    uint32_t p, enc, fcode;
+    for (ln = 1; ln <= 12; ln++) {
+        p = f5br_show(r, ln);
+        if (r->err)
+            return -1;
+        for (m = 0; m <= 32; m++)
+            if (f5mv_std[m][0] == p && f5mv_std[m][1] == ln)
+                goto found;
+    }
+    return -1;
+found:
+    r->pos += ln; /* consume standard magnitude code */
+    if (m == 0)
+        return f5bw_put(w, 1, 1); /* zero vector, same in both grammars */
+    sign = f5br_get(r, 1);
+    if (r->err)
+        return -1;
+    enc = f5mv_enc[(sign ? -m : m) + 32];
+    if (!enc)
+        return -1;
+    flen = enc >> 24;
+    fcode = enc & 0xFFFFFF;
+    if (f5bw_put(w, 0, 1) < 0)
+        return -1;
+    if (f5bw_put(w, fcode, flen) < 0)
+        return -1;
+    for (i = 0; i < reslen; i++) {
+        int b = f5br_get(r, 1);
+        if (r->err)
+            return -1;
+        if (f5bw_put(w, b, 1) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Parse one intra DC (standard), re-adding F5's extra bit after sizes > 8
+ * (emitted 0; the value is lost by the demuxer and the game decoder only
+ * consumes it). Returns 0 ok, -1 fail. */
+static int f5mux_dc(F5BitR *r, F5BitW *w, int is_luma)
+{
+    int sz, len;
+    sz = is_luma ? f5_vlc_dc_luma(r, &len) : f5_vlc_dc_chroma(r, &len);
+    if (sz < 0 || r->err)
+        return -1;
+    if (f5_copy_bits(r, w, len + sz) < 0)
+        return -1;
+    if (sz > 8 && f5bw_put(w, 0, 1) < 0)
+        return -1;
+    return 0;
+}
+
+/* Transcode one P-frame MB (standard MPEG-4 in -> F5 out). reslen = motion
+ * residual bits (fcode-1). Returns 0 ok, -1 fail. */
+static int f5mux_pmb(F5BitR *r, F5BitW *w, int reslen)
+{
+    int skip, typ, extra, len, cbpy, leny, cbp, i;
+    if (r->pos + 1 > r->nbits)
+        return -1;
+    skip = f5br_get(r, 1);
+    if (r->err)
+        return -1;
+    if (f5bw_put(w, skip, 1) < 0)
+        return -1;
+    if (skip)
+        return 0;
+    for (;;) {
+        typ = f5_vlc_mcbpc_p(r, &len, &extra);
+        if (typ < 0 || r->err)
+            return -1;
+        if (f5_copy_bits(r, w, len) < 0)
+            return -1;
+        if (typ != 8)
+            break;
+    }
+    if (typ == 8)
+        return -1;
+    if (typ == 3 || typ == 4) {
+        if (f5_copy_bits(r, w, 1) < 0)
+            return -1;
+        cbpy = f5_vlc_cbpy(r, &leny);
+        if (cbpy < 0 || r->err)
+            return -1;
+        if (f5_copy_bits(r, w, leny) < 0)
+            return -1;
+        if (typ == 4 && f5_copy_bits(r, w, 2) < 0)
+            return -1;
+        cbp = (cbpy << 2) | extra;
+        for (i = 0; i < 6; i++) {
+            int coded = (cbp >> 5) & 1;
+            cbp = (cbp << 1) & 0x7f;
+            if (f5mux_dc(r, w, i < 4) < 0)
+                return -1;
+            if (!coded)
+                continue;
+            if (f5_skip_ac_block(r, w) < 0)
+                return -1;
+        }
+        return r->err ? -1 : 0;
+    }
+    cbpy = f5_vlc_cbpy(r, &leny);
+    if (cbpy < 0 || r->err)
+        return -1;
+    if (f5_copy_bits(r, w, leny) < 0)
+        return -1;
+    if (typ == 1 && f5_copy_bits(r, w, 2) < 0)
+        return -1;
+    cbp = (((15 - cbpy) & 15) << 2) | extra;
+    {
+        int nmv = (typ == 2) ? 4 : 1;
+        for (i = 0; i < nmv; i++) {
+            if (f5mux_motion(r, w, reslen) < 0)
+                return -1;
+            if (f5mux_motion(r, w, reslen) < 0)
+                return -1;
+        }
+    }
+    for (i = 0; i < 6; i++) {
+        int coded = (cbp >> 5) & 1;
+        cbp = (cbp << 1) & 0x7f;
+        if (!coded)
+            continue;
+        if (f5_skip_ac_block_inter(r, w) < 0)
+            return -1;
+    }
+    return r->err ? -1 : 0;
+}
+
+/* Transcode one I-frame MB (standard MPEG-4 in -> F5 out).
+ * Returns 0 ok, -1 fail. */
+static int f5mux_imb(F5BitR *r, F5BitW *w)
+{
+    int cbp, i, cbpc, lenc, cbpy, leny;
+    for (;;) {
+        cbpc = f5_vlc_mcbpc_intra(r, &lenc);
+        if (cbpc < 0 || r->err)
+            return -1;
+        if (f5_copy_bits(r, w, lenc) < 0)
+            return -1;
+        if (cbpc != 8)
+            break;
+    }
+    if (f5_copy_bits(r, w, 1) < 0) /* ac_pred_flag */
+        return -1;
+    cbpy = f5_vlc_cbpy(r, &leny);
+    if (cbpy < 0 || r->err)
+        return -1;
+    if (f5_copy_bits(r, w, leny) < 0)
+        return -1;
+    if ((cbpc & 4) && f5_copy_bits(r, w, 2) < 0)
+        return -1;
+    cbp = (cbpc & 3) | (cbpy << 2);
+    for (i = 0; i < 6; i++) {
+        int coded = (cbp >> 5) & 1;
+        cbp = (cbp << 1) & 0x7f;
+        if (f5mux_dc(r, w, i < 4) < 0)
+            return -1;
+        if (!coded)
+            continue;
+        if (f5_skip_ac_block(r, w) < 0)
+            return -1;
+    }
+    return r->err ? -1 : 0;
+}
+
+static void f5mux_free_frames(F5VIDMuxContext *m)
+{
+    int i;
+    for (i = 0; i < m->nb_frames; i++)
+        av_free(m->frames[i].mb);
+    av_freep(&m->frames);
+    m->nb_frames = m->cap_frames = 0;
+}
+
+static void f5mux_free_audio(F5VIDMuxContext *m)
+{
+    av_freep(&m->al);
+    av_freep(&m->ar);
+    m->al_len = m->al_size = m->ar_len = m->ar_size = 0;
+}
+
+static int f5vid_write_header(AVFormatContext *s)
+{
+    F5VIDMuxContext *m = s->priv_data;
+    AVStream *vst = NULL, *ast = NULL;
+    unsigned i;
+    if (s->nb_streams < 1 || s->nb_streams > 2) {
+        av_log(s, AV_LOG_ERROR, "f5vid: need 1 video + 0/1 audio streams\n");
+        return AVERROR(EINVAL);
+    }
+    for (i = 0; i < s->nb_streams; i++) {
+        if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (vst) {
+                av_log(s, AV_LOG_ERROR, "f5vid: only one video stream\n");
+                return AVERROR(EINVAL);
+            }
+            vst = s->streams[i];
+        } else if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            if (ast) {
+                av_log(s, AV_LOG_ERROR, "f5vid: only one audio stream\n");
+                return AVERROR(EINVAL);
+            }
+            ast = s->streams[i];
+        }
+    }
+    if (!vst || vst->codecpar->codec_id != AV_CODEC_ID_MPEG4) {
+        av_log(s, AV_LOG_ERROR,
+               "f5vid: video must be MPEG-4 in the f5vid demuxer layout\n");
+        return AVERROR(EINVAL);
+    }
+    if (ast && ast->codecpar->codec_id != AV_CODEC_ID_ADPCM_THP) {
+        av_log(s, AV_LOG_ERROR, "f5vid: audio must be DSP-ADPCM (adpcm_thp)\n");
+        return AVERROR(EINVAL);
+    }
+    m->width  = vst->codecpar->width;
+    m->height = vst->codecpar->height;
+    if (m->width <= 0 || m->height <= 0) {
+        av_log(s, AV_LOG_ERROR, "f5vid: video dimensions missing\n");
+        return AVERROR(EINVAL);
+    }
+    m->fps_num = 2997;
+    m->fps_den = 100;
+    if (vst->avg_frame_rate.den > 0 && vst->avg_frame_rate.num > 0) {
+        m->fps_num = vst->avg_frame_rate.num;
+        m->fps_den = vst->avg_frame_rate.den;
+    }
+    avpriv_set_pts_info(vst, 1, 1, F5VID_TIME_RES);
+    if (ast) {
+        m->channels = ast->codecpar->ch_layout.nb_channels;
+        if (m->channels != 1 && m->channels != 2)
+            m->channels = 2;
+        m->rate = ast->codecpar->sample_rate;
+        if (m->rate <= 0)
+            m->rate = 32000;
+        avpriv_set_pts_info(ast, 1, 1, m->rate);
+        /* Carry the DSP coef table (stream copy from our demuxer); fresh
+         * encodes supply it per-packet (see write_audio). */
+        if (ast->codecpar->extradata &&
+            ast->codecpar->extradata_size >= 32 * m->channels) {
+            memcpy(m->coef, ast->codecpar->extradata, 32 * m->channels);
+            m->have_coef = 1;
+        }
+    }
+    f5mv_enc_build();
+    return 0;
+}
+
+static int f5vid_write_video(AVFormatContext *s, AVPacket *pkt)
+{
+    F5VIDMuxContext *m = s->priv_data;
+    AVStream *vst = s->streams[pkt->stream_index];
+    F5MUXFrame *fr;
+    F5BitR r;
+    F5BitW w = { NULL, 0, 0, 0, 0 };
+    int type, quant, fwd, rounding, mb_pos, mb_w, mb_h, nmb, i;
+    if (m->nb_frames >= m->cap_frames) {
+        int cap = m->cap_frames ? m->cap_frames * 2 : 256;
+        F5MUXFrame *nf = av_realloc_array(m->frames, cap, sizeof(*nf));
+        if (!nf)
+            return AVERROR(ENOMEM);
+        m->frames = nf;
+        m->cap_frames = cap;
+    }
+    fr = &m->frames[m->nb_frames];
+    memset(fr, 0, sizeof(*fr));
+    if (f5mux_parse_vop(pkt->data, pkt->size, &type, &quant, &fwd,
+                        &rounding, &mb_pos) < 0) {
+        av_log(s, AV_LOG_ERROR,
+               "f5vid: video packet %d is not in the f5vid demuxer layout\n",
+               m->nb_frames);
+        return AVERROR_INVALIDDATA;
+    }
+    if (m->nb_frames == 0 && type != 0) {
+        av_log(s, AV_LOG_ERROR, "f5vid: first frame must be an I-VOP\n");
+        return AVERROR_INVALIDDATA;
+    }
+    fr->is_key   = type == 0;
+    fr->quant    = quant;
+    fr->fwd      = fwd;
+    fr->rounding = rounding;
+    if (pkt->pts != AV_NOPTS_VALUE)
+        fr->ts30 = av_rescale_q(pkt->pts, vst->time_base, (AVRational){ 1, 30000 });
+    else
+        fr->ts30 = (int64_t)m->nb_frames * 1001;
+    mb_w = (m->width + 15) / 16;
+    mb_h = (m->height + 15) / 16;
+    nmb = mb_w * mb_h;
+    /* The stream ends right after the last MB (plus flush zeros), but VLC
+     * peeks look up to 12 bits ahead; pad the tail with zeros (which can
+     * only ever complete the already-validated last MB). */
+    {
+        uint8_t *padded = av_malloc(pkt->size + 2);
+        if (!padded)
+            return AVERROR(ENOMEM);
+        memcpy(padded, pkt->data, pkt->size);
+        padded[pkt->size] = padded[pkt->size + 1] = 0;
+        r.buf = padded;
+        r.nbits = (pkt->size + 2) * 8;
+        r.pos = mb_pos;
+        r.err = 0;
+        for (i = 0; i < nmb; i++) {
+            int ret = type == 0 ? f5mux_imb(&r, &w)
+                                : f5mux_pmb(&r, &w, fwd > 1 ? fwd - 1 : 0);
+            if (ret < 0 || r.err)
+                break;
+        }
+        av_free(padded);
+        if (i != nmb) {
+            av_log(s, AV_LOG_ERROR, "f5vid: MB %d of frame %d does not parse\n",
+                   i, m->nb_frames);
+            av_free(w.buf);
+            return AVERROR_INVALIDDATA;
+        }
+    }
+    if (f5bw_flush(&w) < 0) {
+        av_free(w.buf);
+        return AVERROR(ENOMEM);
+    }
+    /* Trailing pad: shipped files end their MB stream with generous zero
+     * padding, which VLC lookahead peeks rely on past the last consumed
+     * bit. The filter output ends right at the last MB, so add two zero
+     * bytes the same way (ignored by every reader after 1200 MBs). */
+    if (f5bw_put(&w, 0, 16) < 0 || f5bw_flush(&w) < 0) {
+        av_free(w.buf);
+        return AVERROR(ENOMEM);
+    }
+    fr->mb = w.buf;
+    fr->mb_size = w.len;
+    m->nb_frames++;
+    return 0;
+}
+
+static int f5vid_write_audio(AVFormatContext *s, AVPacket *pkt)
+{
+    F5VIDMuxContext *m = s->priv_data;
+    int frames, half, n;
+    uint8_t *nb;
+    size_t side_size;
+    const uint8_t *side;
+    if (!m->have_coef) {
+        side = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA,
+                                       &side_size);
+        if (side && side_size >= 32 * (size_t)m->channels) {
+            memcpy(m->coef, side, 32 * m->channels);
+            m->have_coef = 1;
+        }
+    }
+    if (pkt->size % 8) {
+        av_log(s, AV_LOG_WARNING, "f5vid: audio size %d not a multiple of 8\n",
+               pkt->size);
+    }
+    frames = pkt->size / 8;
+    if (m->channels == 2) {
+        if (frames & 1) {
+            av_log(s, AV_LOG_WARNING, "f5vid: odd DSP frame count %d\n", frames);
+            frames &= ~1;
+        }
+        half = frames / 2 * 8;
+        n = m->al_len + half;
+        if (n > m->al_size) {
+            int ns = FFMAX(m->al_size * 2, n + 64);
+            nb = av_realloc(m->al, ns);
+            if (!nb)
+                return AVERROR(ENOMEM);
+            m->al = nb;
+            m->al_size = ns;
+        }
+        memcpy(m->al + m->al_len, pkt->data, half);
+        m->al_len += half;
+        n = m->ar_len + half;
+        if (n > m->ar_size) {
+            int ns = FFMAX(m->ar_size * 2, n + 64);
+            nb = av_realloc(m->ar, ns);
+            if (!nb)
+                return AVERROR(ENOMEM);
+            m->ar = nb;
+            m->ar_size = ns;
+        }
+        memcpy(m->ar + m->ar_len, pkt->data + half, half);
+        m->ar_len += half;
+    } else {
+        n = m->al_len + frames * 8;
+        if (n > m->al_size) {
+            int ns = FFMAX(m->al_size * 2, n + 64);
+            nb = av_realloc(m->al, ns);
+            if (!nb)
+                return AVERROR(ENOMEM);
+            m->al = nb;
+            m->al_size = ns;
+        }
+        memcpy(m->al + m->al_len, pkt->data, frames * 8);
+        m->al_len += frames * 8;
+    }
+    return 0;
+}
+
+static int f5vid_write_packet(AVFormatContext *s, AVPacket *pkt)
+{
+    enum AVMediaType t = s->streams[pkt->stream_index]->codecpar->codec_type;
+    if (t == AVMEDIA_TYPE_VIDEO)
+        return f5vid_write_video(s, pkt);
+    if (t == AVMEDIA_TYPE_AUDIO)
+        return f5vid_write_audio(s, pkt);
+    return AVERROR(EINVAL);
+}
+
+static void f5vid_write_inner(uint8_t out[12], const F5MUXFrame *fr)
+{
+    uint32_t ts = (uint32_t)fr->ts30;
+    out[0] = out[1] = out[2] = out[3] = 0;
+    out[4] = 0;
+    out[5] = 1;
+    if (fr->is_key) {
+        out[6] = 0x20;
+        out[7] = fr->quant & 31;
+        AV_WB32(out + 8, ts);
+    } else {
+        out[6] = 0x40 | ((fr->rounding & 1) << 4);
+        out[7] = ((fr->quant & 15) << 4) | ((fr->fwd & 7) << 1);
+        AV_WB32(out + 8, ts << 1);
+    }
+}
+
+static int f5vid_write_trailer(AVFormatContext *s)
+{
+    F5VIDMuxContext *m = s->priv_data;
+    AVIOContext *pb = s->pb;
+    int i, maxfram = 0;
+    int al_frames = m->al_len / 8; /* per-channel DSP frames */
+    int aoff = 0;                  /* running per-channel frame offset */
+    /* VID1 */
+    avio_wb32(pb, MKBETAG('V', 'I', 'D', '1'));
+    avio_wb32(pb, 0x20);
+    for (i = 0; i < 6; i++)
+        avio_wb32(pb, i == 1 ? 0x01000013 : 0);
+    /* HEAD */
+    avio_wb32(pb, MKBETAG('H', 'E', 'A', 'D'));
+    avio_wb32(pb, 0xa0);
+    avio_wb32(pb, 0);
+    avio_wb32(pb, MKBETAG('V', 'I', 'D', 'H'));
+    avio_wb32(pb, 0x20);
+    avio_wb32(pb, 1);
+    avio_wb16(pb, m->width);
+    avio_wb16(pb, m->height);
+    avio_wb32(pb, m->nb_frames);
+    {
+        int64_t fpos = avio_tell(pb);
+        avio_wb32(pb, 0); /* max_FRAM_len, patched below */
+        avio_wb32(pb, m->fps_num);
+        avio_wb16(pb, m->fps_den);
+        avio_wb16(pb, 0);
+        avio_wb32(pb, MKBETAG('A', 'U', 'D', 'H'));
+        avio_wb32(pb, 0x60);
+        avio_wb32(pb, 0);
+        avio_wb32(pb, MKBETAG('A', 'P', 'C', 'M'));
+        avio_wb32(pb, m->rate ? m->rate : 32000);
+        avio_wl16(pb, m->channels ? m->channels : 2);
+        if (m->have_coef)
+            avio_write(pb, m->coef, 32 * (m->channels ? m->channels : 2));
+        for (i = 0; i < 74 - (m->have_coef ? 32 * (m->channels ? m->channels : 2) : 0); i++)
+            avio_w8(pb, 0);
+        for (i = 0; i < 20; i++)
+            avio_w8(pb, 0);
+        /* FRAMs */
+        for (i = 0; i < m->nb_frames; i++) {
+            F5MUXFrame *fr = &m->frames[i];
+            int base = al_frames / m->nb_frames;
+            int rem = al_frames % m->nb_frames;
+            int nf = base + (i < rem ? 1 : 0);
+            int k;
+            uint32_t vidd_len = 8 + 12 + fr->mb_size;
+            uint32_t aud_bytes, audd_len, fram_len;
+            uint8_t inner[12];
+            aud_bytes = nf * 8 * (m->channels == 1 ? 1 : 2);
+            audd_len = 8 + 8 + aud_bytes;
+            fram_len = 8 + 24 + vidd_len + audd_len;
+            if ((int)fram_len > maxfram)
+                maxfram = fram_len;
+            avio_wb32(pb, MKBETAG('F', 'R', 'A', 'M'));
+            avio_wb32(pb, fram_len);
+            for (k = 0; k < 24; k++)
+                avio_w8(pb, 0);
+            avio_wb32(pb, MKBETAG('V', 'I', 'D', 'D'));
+            avio_wb32(pb, vidd_len);
+            f5vid_write_inner(inner, fr);
+            avio_write(pb, inner, 12);
+            avio_write(pb, fr->mb, fr->mb_size);
+            avio_wb32(pb, MKBETAG('A', 'U', 'D', 'D'));
+            avio_wb32(pb, audd_len);
+            for (k = 0; k < 4; k++)
+                avio_w8(pb, 0);
+            avio_wb32(pb, audd_len - 32);
+            for (k = 0; k < nf; k++) {
+                avio_write(pb, m->al + aoff * 8, 8);
+                if (m->channels != 1)
+                    avio_write(pb, m->ar + aoff * 8, 8);
+                aoff++;
+            }
+        }
+        if (s->pb->seekable) {
+            int64_t end = avio_tell(pb);
+            avio_seek(pb, fpos, SEEK_SET);
+            avio_wb32(pb, maxfram);
+            avio_seek(pb, end, SEEK_SET);
+        }
+    }
+    f5mux_free_frames(m);
+    f5mux_free_audio(m);
+    return 0;
+}
+
+static void f5vid_write_deinit(AVFormatContext *s)
+{
+    F5VIDMuxContext *m = s->priv_data;
+    f5mux_free_frames(m);
+    f5mux_free_audio(m);
+}
+
+const FFOutputFormat ff_f5vid_muxer = {
+    .p.name           = "f5vid",
+    .p.long_name      = NULL_IF_CONFIG_SMALL("Factor 5 DivX .vid (Carmen Sandiego GC)"),
+    .p.extensions     = "vid",
+    .p.audio_codec    = AV_CODEC_ID_ADPCM_THP,
+    .p.video_codec    = AV_CODEC_ID_MPEG4,
+    .priv_data_size   = sizeof(F5VIDMuxContext),
+    .write_header     = f5vid_write_header,
+    .write_packet     = f5vid_write_packet,
+    .write_trailer    = f5vid_write_trailer,
+    .deinit           = f5vid_write_deinit,
+};
+
+#endif /* CONFIG_F5VID_MUXER */
