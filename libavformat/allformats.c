@@ -124,6 +124,8 @@ extern const FFInputFormat  ff_brstm_demuxer;
 extern const FFOutputFormat ff_brstm_muxer;
 extern const FFInputFormat  ff_btsnd_demuxer;
 extern const FFOutputFormat ff_btsnd_muxer;
+extern const FFInputFormat  ff_bwav_demuxer;
+extern const FFOutputFormat ff_bwav_muxer;
 extern const FFInputFormat  ff_c93_demuxer;
 extern const FFInputFormat  ff_caf_demuxer;
 extern const FFOutputFormat ff_caf_muxer;

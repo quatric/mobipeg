@@ -52,6 +52,7 @@ such as audio, video, subtitles and related metadata.
 | BNS | `.bns` | Nintendo Wii (banner sound) | ✅ | ✅ |
 | BRSTM | `.brstm` | Nintendo Wii | ✅ | ✅ |
 | BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
+| BWAV | `.bwav` | Nintendo Switch (AAL) | ✅ | ✅ |
 | DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
 | RWAV | `.brwav`, `.rwav` | Nintendo Wii | ✅ | ✅ |
 | Wii Photo Channel AAC | `.m4a` | Wii | ✅ | ✅ |
@@ -86,8 +87,18 @@ unpacks those archives into the loose wave files this reads and writes.
 ffmpeg -i input.wav -c:a adpcm_thp out.brwav
 ffmpeg -i input.wav -c:a adpcm_thp out.bfwav
 ffmpeg -i input.wav -c:a pcm_s16be_planar out.bcwav
+ffmpeg -i input.wav -c:a adpcm_thp out.bwav
 ffmpeg -i sound.bcwav out.wav
+ffmpeg -i sound.bwav out.wav
 ```
+
+BWAV (`.bwav`) is the Switch AAL-library wave container — the same
+DSP-ADPCM (`adpcm_thp`) or planar PCM16 channel blocks as above, but
+with a flat absolute-offset header instead of INFO/DATA chunks. The muxer
+writes little-endian files by default (`-endian be` for big-endian) and
+supports `-loop 1 -loop_start <samples>`; the header CRC32 is computed on
+write. Opus-flavoured BWAVs (codec 2, e.g. Zelda: Tears of the Kingdom)
+are recognised and refused rather than misdecoded.
 
 They are FFmpeg-level formats only: `encode.py` and the GUI do not list them
 among their audio targets yet, so use `ffmpeg` directly.
