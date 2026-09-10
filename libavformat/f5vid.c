@@ -972,7 +972,7 @@ static int f5_filter_pmb(F5BitR *r, F5BitW *w, int reslen)
     skip = f5br_get(r, 1);
     if (r->err)
         return -1;
-    if (f5bw_put(w, skip ? 0 : 1, 1) < 0) /* invert COD */
+    if (f5bw_put(w, skip, 1) < 0) /* COD: 1=skipped, same as F5 */
         return -1;
     if (skip)
         return 0; /* skipped MB: nothing else coded */
