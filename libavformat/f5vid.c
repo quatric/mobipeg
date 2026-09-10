@@ -1052,6 +1052,9 @@ static int f5_filter_pmb(F5BitR *r, F5BitW *w, int reslen)
     return r->err ? -1 : 0;
 }
 
+#define F5_PRESYNC_STRONG 48
+#define F5_PRESYNC_WEAK    4
+
 /* P-frame MB filter with resync. Mirrors f5_filter_iframe but transcodes
  * P-MBs (motion remap with reslen residual bits). */
 static void f5_filter_pframe(const uint8_t *in, int in_size,
@@ -1065,7 +1068,7 @@ static void f5_filter_pframe(const uint8_t *in, int in_size,
         uint32_t save_cache = out->cache;
         int save_nbits = out->nbits;
         F5BitR t;
-        int ok, adv, k;
+        int ok, adv, k, tier;
         r.err = 0;
         if (f5_filter_pmb(&r, out, reslen) == 0)
             continue;
@@ -1073,26 +1076,35 @@ static void f5_filter_pframe(const uint8_t *in, int in_size,
         out->cache = save_cache;
         out->nbits = save_nbits;
         ok = 0;
-        for (adv = 1; adv <= 3000; adv++) {
-            if (save_pos + adv >= r.nbits)
-                break;
-            t.buf = r.buf;
-            t.nbits = r.nbits;
-            t.pos = save_pos + adv;
-            t.err = 0;
-            for (k = 0; k < 4; k++) {
-                F5BitW tmp = { NULL, 0, 0, 0, 0 };
-                F5BitR c = t;
-                if (f5_filter_pmb(&c, &tmp, reslen) < 0) {
+        /* Two-tier resync. A candidate offset is accepted only if a long run of
+         * MBs parses from it; a 4-MB run (the old criterion) accepts far too
+         * many wrong offsets, after which the rest of the frame is garbage and
+         * roughly half the coded bits go unconsumed. Fall back to the short run
+         * so a frame that has no strong candidate still recovers instead of
+         * being truncated. */
+        for (tier = 0; tier < 2 && !ok; tier++) {
+            int win = tier ? F5_PRESYNC_WEAK : F5_PRESYNC_STRONG;
+            for (adv = 1; adv <= 3000; adv++) {
+                if (save_pos + adv >= r.nbits)
+                    break;
+                t.buf = r.buf;
+                t.nbits = r.nbits;
+                t.pos = save_pos + adv;
+                t.err = 0;
+                for (k = 0; k < win; k++) {
+                    F5BitW tmp = { NULL, 0, 0, 0, 0 };
+                    F5BitR c = t;
+                    if (f5_filter_pmb(&c, &tmp, reslen) < 0) {
+                        av_free(tmp.buf);
+                        break;
+                    }
                     av_free(tmp.buf);
+                    t = c;
+                }
+                if (k == win) {
+                    ok = 1;
                     break;
                 }
-                av_free(tmp.buf);
-                t = c;
-            }
-            if (k == 4) {
-                ok = 1;
-                break;
             }
         }
         if (!ok || resyncs >= 40)

@@ -76,3 +76,5 @@ __pycache__/
 # FastVideo C# build output (contains absolute paths)
 fastvideo/bin/
 fastvideo/obj/
+.f5research/
+Movies/
