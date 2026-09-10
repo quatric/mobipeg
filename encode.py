@@ -21,7 +21,7 @@ MOBICLIP_KEYINT_MAX = 90
 # DSP-ADPCM except btsnd, which is raw big-endian PCM, and ast, which can do
 # either. They share a code path that skips everything video-shaped.
 AUDIO_FORMATS = ("dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd",
-                 "wii_photo_m4a", "3ds_sound")
+                  "bwav", "wii_photo_m4a", "3ds_sound")
 
 # Audio codec each one is written with, keyed by the GUI's "audio" argument.
 # "adpcm" means the format's native ADPCM; "pcm" its uncompressed form.
@@ -38,6 +38,9 @@ AUDIO_FORMAT_CODECS = {
     # The Wii U boot-sound player has no format negotiation: 48 kHz stereo
     # big-endian PCM or nothing.
     "btsnd": {"pcm": ["-c:a", "pcm_s16be", "-ar", "48000", "-ac", "2"]},
+    # Switch BWAV is little-endian (unlike the Wii-family streams above),
+    # so its uncompressed form is pcm_s16le_planar.
+    "bwav":  {"adpcm": ["-c:a", "adpcm_thp"], "pcm": ["-c:a", "pcm_s16le_planar"]},
     # Wii Photo Channel 1.1 and Nintendo 3DS Sound both accept ordinary
     # AAC-LC M4A. 44.1 kHz / 128 kb/s stereo is inside the 3DS Sound's
     # documented 32-48 kHz and 16-320 kb/s limits.

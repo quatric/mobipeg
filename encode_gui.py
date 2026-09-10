@@ -34,7 +34,7 @@ DECODER_FAMILIES = [
     ("Flipnote", "*.ppm *.kwz"),
     ("DS DPG video", "*.dpg"),
     ("Nintendo DSP-ADPCM", "*.dsp"),
-    ("Nintendo streams", "*.brstm *.bfstm *.bcstm"),
+    ("Nintendo streams", "*.brstm *.bfstm *.bcstm *.bwav"),
     ("Wii BNS / AST", "*.bns *.ast"),
     ("Wii U boot sound", "*.btsnd"),
     ("Wii / 3DS AAC audio", "*.m4a"),
@@ -43,7 +43,7 @@ DECODER_FAMILIES = [
 # Formats with no video stream. The Encode tab hides every video-only control
 # for these, and encode.py decodes them to .wav rather than .mp4.
 AUDIO_ONLY_FORMATS = {"dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd",
-                      "wii_photo_m4a", "3ds_sound"}
+                       "bwav", "wii_photo_m4a", "3ds_sound"}
 
 # Output container extension per format, mirroring encode.py's out_ext map
 # (and AUDIO_FORMAT_EXTENSIONS for the audio-only formats) -- used only to
@@ -197,6 +197,7 @@ class EncodeGUI(tk.Tk):
             "Wii stream .brstm": "brstm",
             "Wii U stream .bfstm": "bfstm",
             "3DS stream .bcstm": "bcstm",
+            "Switch wave .bwav": "bwav",
             "Wii banner sound .bns": "bns",
             "Wii stream .ast": "ast",
             "Wii U boot sound .btsnd": "btsnd",
@@ -233,6 +234,7 @@ class EncodeGUI(tk.Tk):
             "brstm":    ["adpcm", "pcm"],
             "bfstm":    ["adpcm", "pcm"],
             "bcstm":    ["adpcm", "pcm"],
+            "bwav":     ["adpcm", "pcm"],
             "bns":      ["adpcm"],
             "ast":      ["adpcm", "pcm"],
             "btsnd":    ["pcm"],

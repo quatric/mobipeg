@@ -101,7 +101,13 @@ write. Opus-flavoured BWAVs (codec 2, e.g. Zelda: Tears of the Kingdom)
 are recognised and refused rather than misdecoded.
 
 They are FFmpeg-level formats only: `encode.py` and the GUI do not list them
-among their audio targets yet, so use `ffmpeg` directly.
+among their audio targets yet, so use `ffmpeg` directly. BWAV is the
+exception — it is also a first-class `encode.py` / GUI target:
+
+```sh
+python3 encode.py bwav adpcm input.wav
+python3 encode.py bwav pcm input.wav
+```
 
 MOC2 and MOC3 are the two MobiClip container generations that predate the
 `.mo` layout the `mo` demuxer reads, and use the same `.mo` extension. The
