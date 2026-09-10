@@ -17,9 +17,11 @@
  *       The 74 bytes are part of the audio stream, not header.)
  *   FRAM len variable: 8-byte header + 24 bytes zeros, then VIDD + AUDD.
  *     VIDD: 8-byte header + 12-byte inner header + DivX video MB data.
- *       inner: 00 00 00 00 | 00 01 code sub | BE32 timestamp (60000 Hz clock:
- *       0, 2002, 4004, ... = frame*1001*2; some I-frames file out of order,
- *       e.g. Demo f3 ts=3003 after f2 ts=4004).
+ *       inner: 00 00 00 00 | 00 01 code sub | 32-bit timestamp (30000 Hz,
+ *       1001 ticks per frame at 29.97 fps). The timestamp is NOT always
+ *       byte-aligned: the M4 frame header is packed, and a P-VOP's fields
+ *       stop one bit short of a byte, so its timestamp begins at inner bit
+ *       63 rather than 64 (see f5vid_inner_ts).
  *       The inner header is a packed bit header (see M4BitstreamParser::
  *       parseHeader in the game binary): after the 16-bit version (=1):
  *       type = code>>6 (0=I,1=P), X = (code>>5)&1, then if X: flag/acdc/dp/
@@ -58,10 +60,11 @@
   *       (game binary / MusyX docs) and confirm the channel layout for full
   *       quality. The 74 AUDH bytes are initial audio (skipped here; ~2 ms).
   *
-  *   Timing: file order is display order; packet pts/dts are a monotonic
-  *   decode clock (2002 ticks = 1 frame at 29.97 fps in 60000 Hz units).
-  *   Container ts jumps (out-of-order I-frames) are ignored for timing
-  *   (players sort by pts; the jumps would otherwise drop frames).
+  *   Timing: file order is display order and the container clock is strictly
+  *   increasing once P-VOP timestamps are unpacked from the right bit offset,
+  *   so packet pts/dts follow it (doubled into a 60000 Hz stream timebase,
+  *   2002 ticks = 1 frame at 29.97 fps). A file whose clock ever went
+  *   backwards would fall back to a synthesized one-frame advance.
  *
  * This file is part of FFmpeg.
  *
@@ -90,7 +93,7 @@
 
 typedef struct F5VIDIndex {
     int64_t pos;        /* file offset of FRAM tag */
-    uint32_t video_ts;  /* container ts (for reference; timing uses video_dts) */
+    uint32_t video_ts;  /* container ts, F5VID_TIME_RES units */
     uint32_t audio_size;/* AUDD payload bytes in this FRAM */
     int is_key;         /* VIDD code 0x20 (I) */
 } F5VIDIndex;
@@ -1115,6 +1118,28 @@ static void f5_filter_pframe(const uint8_t *in, int in_size,
     }
 }
 
+/* Container timestamp from a 12-byte VIDD inner header, in F5VID_TIME_RES
+ * units. The M4 frame header (M4BitstreamParser::parseHeader, 800fca90) is a
+ * packed bit header, so the 32-bit timestamp is only byte-aligned when the
+ * preceding fields happen to fill a whole byte:
+ *
+ *   version(16) type(2) ext(1) [ext ? 4 bits] rounding(1) dc_thr(3) quant(5)
+ *   [type ? fcode(3)] timestamp(32)
+ *
+ * I-VOPs in these files set ext (4 sub-bits, no fcode) and so reach 32 bits;
+ * P-VOPs clear ext but add fcode and reach only 31, which puts the timestamp
+ * one bit earlier than a plain AV_RB32 of inner+8. Reading it byte-aligned
+ * doubles every P timestamp, which is what made the container clock look
+ * non-monotonic. Ticks are 30000 Hz (1001 per frame at 29.97 fps), doubled
+ * here into the 60000 Hz stream timebase. */
+static uint32_t f5vid_inner_ts(const uint8_t *inner)
+{
+    uint32_t raw = AV_RB32(inner + 8);
+    if ((inner[6] >> 6) != 0)                    /* not an I-VOP: 31-bit header */
+        raw = (raw >> 1) | ((uint32_t)(inner[7] & 1) << 31);
+    return raw * 2;
+}
+
 /* Synthesize a VOP header (verid=1, rectangular, progressive). type: 0=I,1=P,2=B.
  * intra_dc_threshold index 0 (=99, forces intra DC VLC on). tinc is absolute
  * (60000 Hz); emitted as modulo_time_base + remainder. rounding is the P-VOP
@@ -1366,7 +1391,7 @@ static int f5vid_read_header(AVFormatContext *s)
                     m->index = ni;
                 }
                 m->index[m->nb_index].pos = pos;
-                m->index[m->nb_index].video_ts = AV_RB32(inner + 8);
+                m->index[m->nb_index].video_ts = f5vid_inner_ts(inner);
                 m->index[m->nb_index].audio_size = (alen > 16) ? (alen - 8 - 8) : 0;
                 m->index[m->nb_index].is_key = (inner[6] == 0x20);
                 m->nb_index++;
@@ -1544,6 +1569,7 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
             uint32_t mb_size;
             int vop_type; /* 0=I (0x20), 1=P (0x40/0x50) */
             int quant, fwd, rounding;
+            uint32_t frame_ts;
             F5BitW vw = { NULL, 0, 0, 0, 0 };
             uint8_t *out;
             int out_size, hdr_bytes, hdr_bits;
@@ -1559,6 +1585,7 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
              * forward fcode. All shipped files use X=1,I (0x20, all flag
              * bits 0) and X=0,P (0x40/0x50, coded bit = rounding). */
             vop_type = inner[6] >> 6;
+            frame_ts = f5vid_inner_ts(inner);
             if (vop_type == 0) {
                 quant = inner[7] & 31;
                 fwd = 2;
@@ -1632,6 +1659,11 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
             /* Build packet: VOP start + VOP header (bit-exact, then MB data
              * follows at bit granularity). VOP tinc uses the monotonic
              * decode clock (container ts jumps); packet pts below too. */
+            /* Adopt the container clock whenever it does not move backwards
+             * (it never does, once the P-VOP timestamp is unpacked correctly);
+             * otherwise keep the synthesized one-frame advance. */
+            if (frame_ts >= (uint32_t)m->video_dts)
+                m->video_dts = frame_ts;
             if ((ret = f5vid_build_vop(&vw, vop_type, (uint32_t)m->video_dts,
                                        F5VID_TINC_BITS,
                                        quant, fwd, 2, rounding, &hdr_bits)) < 0) {
@@ -1691,9 +1723,13 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (vop_type == 0)
                 pkt->flags |= AV_PKT_FLAG_KEY;
             pkt->stream_index = 0;
-            /* File order is display order; container ts jumps (out-of-order
-             * I-frames) so do not use it for timing. Fixed 1-frame duration
-             * (2002 ticks = 1/29.97s at 60kHz) and monotonic pts/dts. */
+            /* File order is display order and, once the P-VOP timestamp is
+             * unpacked from the right bit offset, the container clock is
+             * strictly increasing by one frame across every shipped file. Use
+             * it, so frames the encoder spaced unevenly keep their real
+             * timing; fall back to the synthesized clock if a file ever
+             * disagrees. (m->video_dts was already advanced to frame_ts
+             * above so the VOP header and the packet carry the same clock.) */
             pkt->pts = pkt->dts = m->video_dts;
             pkt->duration = 2002;
             m->video_dts += 2002;
