@@ -41,9 +41,10 @@
  *       not have; the demuxer drops it. Isolated single-bit glitches occur
  *       in some frames (deterministic per frame); the demuxer resyncs past
  *       them (skips to the next valid MB) so the rest of the frame decodes.
- *       KNOWN GAPS: P-frame motion uses a custom signed VLC (not yet
- *       transcoded, so P with nonzero MVs may misparse); B/GMC types (2/3)
- *       are asserted unsupported (absent from all shipped files).
+ *       KNOWN GAPS: P-frame motion uses a custom signed VLC, remapped here
+ *       to standard magnitude+sign+residual (residual length fwd-1);
+ *       B/GMC types (2/3) are asserted unsupported (absent from all
+ *       shipped files).
   *     AUDD: 8-byte header + 8-byte inner header + audio data.
   *       inner: 00 00 00 00 | BE32 (ALN-32, i.e. audio_len-16).
   *       "APCM" audio at 32000 Hz stereo, ~37 kB/s: DSP-ADPCM with 8-byte
@@ -201,8 +202,8 @@ static int f5vid_build_vol(F5BitW *w, int width, int height, uint32_t time_res)
  * against the game binary; they match MPEG-4) and emits a clean MPEG-4 MB
  * stream: identical bits except (a) the 1 extra bit F5 emits after an intra
  * DC with size>8 is dropped, and (b) on invalid VLC the filter resyncs
- * (skips input bits to the next valid MB) or truncates. P-frames are passed
- * through (motion uses custom tables; transcode TBD).
+ * (skips input bits to the next valid MB) or truncates. P-frames go
+ * through the P transcode below (best-effort; see KNOWN GAPS above).
  */
 
 /* AC VLC tables: 12-bit 3-level lookup, entry (len<<17)|val with
@@ -424,6 +425,8 @@ static int f5_skip_ac_block(F5BitR *r, F5BitW *w)
         peek = f5br_show(r, 12);
         if (r->err)
             return -1;
+        if (peek < 8)
+            return -1; /* 9+ leading zeros: no valid AC codeword */
         if (peek < 0x80)
             e = f5ac_l3[peek - 8];
         else if (peek < 0x200)
@@ -471,6 +474,8 @@ static int f5_skip_ac_block(F5BitR *r, F5BitW *w)
                 return -1;
             p2 = f5br_show(r, 12);
             if (r->err)
+                return -1;
+            if (p2 < 8)
                 return -1;
             if (p2 < 0x80)
                 e2 = f5ac_l3[p2 - 8];
@@ -650,6 +655,454 @@ static void f5_filter_iframe(const uint8_t *in, int in_size,
     }
 }
 
+static const uint32_t f5ac_e1[112] = {
+    0x000e1081, 0x000e1071, 0x000e1061, 0x000e1051, 0x000e00c1, 0x000e00b1, 0x000e00a1, 0x000e0004 ,
+    0x000c1041, 0x000c1041, 0x000c1031, 0x000c1031, 0x000c1021, 0x000c1021, 0x000c1011, 0x000c1011 ,
+    0x000c0091, 0x000c0091, 0x000c0081, 0x000c0081, 0x000c0071, 0x000c0071, 0x000c0061, 0x000c0061 ,
+    0x000c0012, 0x000c0012, 0x000c0003, 0x000c0003, 0x000a0051, 0x000a0051, 0x000a0051, 0x000a0051 ,
+    0x000a0041, 0x000a0041, 0x000a0041, 0x000a0041, 0x000a0031, 0x000a0031, 0x000a0031, 0x000a0031 ,
+    0x00081001, 0x00081001, 0x00081001, 0x00081001, 0x00081001, 0x00081001, 0x00081001, 0x00081001 ,
+    0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001 ,
+    0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001 ,
+    0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001 ,
+    0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001, 0x00040001 ,
+    0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011 ,
+    0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011, 0x00060011 ,
+    0x00080021, 0x00080021, 0x00080021, 0x00080021, 0x00080021, 0x00080021, 0x00080021, 0x00080021 ,
+    0x00080002, 0x00080002, 0x00080002, 0x00080002, 0x00080002, 0x00080002, 0x00080002, 0x00080002 ,
+};
+static const uint32_t f5ac_e2[96] = {
+    0x00140009, 0x00140008, 0x00121181, 0x00121181, 0x00121171, 0x00121171, 0x00121161, 0x00121161 ,
+    0x00121151, 0x00121151, 0x00121141, 0x00121141, 0x00121131, 0x00121131, 0x00121121, 0x00121121 ,
+    0x00121111, 0x00121111, 0x00121002, 0x00121002, 0x00120161, 0x00120161, 0x00120151, 0x00120151 ,
+    0x00120141, 0x00120141, 0x00120131, 0x00120131, 0x00120121, 0x00120121, 0x00120111, 0x00120111 ,
+    0x00120101, 0x00120101, 0x001200f1, 0x001200f1, 0x00120042, 0x00120042, 0x00120032, 0x00120032 ,
+    0x00120007, 0x00120007, 0x00120006, 0x00120006, 0x00101101, 0x00101101, 0x00101101, 0x00101101 ,
+    0x001010f1, 0x001010f1, 0x001010f1, 0x001010f1, 0x001010e1, 0x001010e1, 0x001010e1, 0x001010e1 ,
+    0x001010d1, 0x001010d1, 0x001010d1, 0x001010d1, 0x001010c1, 0x001010c1, 0x001010c1, 0x001010c1 ,
+    0x001010b1, 0x001010b1, 0x001010b1, 0x001010b1, 0x001010a1, 0x001010a1, 0x001010a1, 0x001010a1 ,
+    0x00101091, 0x00101091, 0x00101091, 0x00101091, 0x001000e1, 0x001000e1, 0x001000e1, 0x001000e1 ,
+    0x001000d1, 0x001000d1, 0x001000d1, 0x001000d1, 0x00100022, 0x00100022, 0x00100022, 0x00100022 ,
+    0x00100013, 0x00100013, 0x00100013, 0x00100013, 0x00100005, 0x00100005, 0x00100005, 0x00100005 ,
+};
+static const uint32_t f5ac_e3[120] = {
+    0x00161012, 0x00161012, 0x00161003, 0x00161003, 0x0016000b, 0x0016000b, 0x0016000a, 0x0016000a ,
+    0x001411c1, 0x001411c1, 0x001411c1, 0x001411c1, 0x001411b1, 0x001411b1, 0x001411b1, 0x001411b1 ,
+    0x001411a1, 0x001411a1, 0x001411a1, 0x001411a1, 0x00141191, 0x00141191, 0x00141191, 0x00141191 ,
+    0x00140092, 0x00140092, 0x00140092, 0x00140092, 0x00140082, 0x00140082, 0x00140082, 0x00140082 ,
+    0x00140072, 0x00140072, 0x00140072, 0x00140072, 0x00140062, 0x00140062, 0x00140062, 0x00140062 ,
+    0x00140052, 0x00140052, 0x00140052, 0x00140052, 0x00140033, 0x00140033, 0x00140033, 0x00140033 ,
+    0x00140023, 0x00140023, 0x00140023, 0x00140023, 0x00140014, 0x00140014, 0x00140014, 0x00140014 ,
+    0x0016000c, 0x0016000c, 0x00160015, 0x00160015, 0x00160171, 0x00160171, 0x00160181, 0x00160181 ,
+    0x001611d1, 0x001611d1, 0x001611e1, 0x001611e1, 0x001611f1, 0x001611f1, 0x00161201, 0x00161201 ,
+    0x00180016, 0x00180024, 0x00180043, 0x00180053, 0x00180063, 0x001800a2, 0x00180191, 0x001801a1 ,
+    0x00181211, 0x00181221, 0x00181231, 0x00181241, 0x00181251, 0x00181261, 0x00181271, 0x00181281 ,
+    0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff ,
+    0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff ,
+    0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff ,
+    0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff, 0x000e1bff ,
+};
+static const uint32_t f5mv_m1[14] = {
+    0x00080003, 0x0009fffd, 0x00060002, 0x00060002, 0x0007fffe, 0x0007fffe, 0x00040001, 0x00040001 ,
+    0x00040001, 0x00040001, 0x0005ffff, 0x0005ffff, 0x0005ffff, 0x0005ffff ,
+};
+static const uint32_t f5mv_m2[96] = {
+    0x0014000c, 0x0015fff4, 0x0014000b, 0x0015fff5, 0x0012000a, 0x0012000a, 0x0013fff6, 0x0013fff6 ,
+    0x00120009, 0x00120009, 0x0013fff7, 0x0013fff7, 0x00120008, 0x00120008, 0x0013fff8, 0x0013fff8 ,
+    0x000e0007, 0x000e0007, 0x000e0007, 0x000e0007, 0x000e0007, 0x000e0007, 0x000e0007, 0x000e0007 ,
+    0x000ffff9, 0x000ffff9, 0x000ffff9, 0x000ffff9, 0x000ffff9, 0x000ffff9, 0x000ffff9, 0x000ffff9 ,
+    0x000e0006, 0x000e0006, 0x000e0006, 0x000e0006, 0x000e0006, 0x000e0006, 0x000e0006, 0x000e0006 ,
+    0x000ffffa, 0x000ffffa, 0x000ffffa, 0x000ffffa, 0x000ffffa, 0x000ffffa, 0x000ffffa, 0x000ffffa ,
+    0x000e0005, 0x000e0005, 0x000e0005, 0x000e0005, 0x000e0005, 0x000e0005, 0x000e0005, 0x000e0005 ,
+    0x000ffffb, 0x000ffffb, 0x000ffffb, 0x000ffffb, 0x000ffffb, 0x000ffffb, 0x000ffffb, 0x000ffffb ,
+    0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004 ,
+    0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004, 0x000c0004 ,
+    0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc ,
+    0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc, 0x000dfffc ,
+};
+static const uint32_t f5mv_m3[124] = {
+    0x00180020, 0x0019ffe0, 0x0018001f, 0x0019ffe1, 0x0016001e, 0x0016001e, 0x0017ffe2, 0x0017ffe2 ,
+    0x0016001d, 0x0016001d, 0x0017ffe3, 0x0017ffe3, 0x0016001c, 0x0016001c, 0x0017ffe4, 0x0017ffe4 ,
+    0x0016001b, 0x0016001b, 0x0017ffe5, 0x0017ffe5, 0x0016001a, 0x0016001a, 0x0017ffe6, 0x0017ffe6 ,
+    0x00160019, 0x00160019, 0x0017ffe7, 0x0017ffe7, 0x00140018, 0x00140018, 0x00140018, 0x00140018 ,
+    0x0015ffe8, 0x0015ffe8, 0x0015ffe8, 0x0015ffe8, 0x00140017, 0x00140017, 0x00140017, 0x00140017 ,
+    0x0015ffe9, 0x0015ffe9, 0x0015ffe9, 0x0015ffe9, 0x00140016, 0x00140016, 0x00140016, 0x00140016 ,
+    0x0015ffea, 0x0015ffea, 0x0015ffea, 0x0015ffea, 0x00140015, 0x00140015, 0x00140015, 0x00140015 ,
+    0x0015ffeb, 0x0015ffeb, 0x0015ffeb, 0x0015ffeb, 0x00140014, 0x00140014, 0x00140014, 0x00140014 ,
+    0x0015ffec, 0x0015ffec, 0x0015ffec, 0x0015ffec, 0x00140013, 0x00140013, 0x00140013, 0x00140013 ,
+    0x0015ffed, 0x0015ffed, 0x0015ffed, 0x0015ffed, 0x00140012, 0x00140012, 0x00140012, 0x00140012 ,
+    0x0015ffee, 0x0015ffee, 0x0015ffee, 0x0015ffee, 0x00140011, 0x00140011, 0x00140011, 0x00140011 ,
+    0x0015ffef, 0x0015ffef, 0x0015ffef, 0x0015ffef, 0x00140010, 0x00140010, 0x00140010, 0x00140010 ,
+    0x0015fff0, 0x0015fff0, 0x0015fff0, 0x0015fff0, 0x0014000f, 0x0014000f, 0x0014000f, 0x0014000f ,
+    0x0015fff1, 0x0015fff1, 0x0015fff1, 0x0015fff1, 0x0014000e, 0x0014000e, 0x0014000e, 0x0014000e ,
+    0x0015fff2, 0x0015fff2, 0x0015fff2, 0x0015fff2, 0x0014000d, 0x0014000d, 0x0014000d, 0x0014000d ,
+    0x0015fff3, 0x0015fff3, 0x0015fff3, 0x0015fff3 ,
+};
+
+/* ---- F5 P-frame MB transcode ----
+ * Parses P-frame MBs with F5's exact grammar and emits standard MPEG-4
+ * P-MB bits. P-mcbpc codewords are bit-identical to H.263 inter MCBPC
+ * (verified); only motion uses F5's custom signed VLC, remapped here to
+ * standard magnitude+sign+residual. Resync driver mirrors the I path.
+ */
+
+/* P-MCBPC VLC (peek-only). Returns type 0..4, or 8 for 9-bit stuffing,
+ * or -1. *len = codeword bits, *extra = chroma-cbp bits (0..3). */
+static int f5_vlc_mcbpc_p(F5BitR *r, int *len, int *extra)
+{
+    uint32_t p;
+    if (r->pos + 9 > r->nbits)
+        return -1;
+    p = f5br_show(r, 9);
+    if (r->err)
+        return -1;
+    if (p == 1) { *len = 9; *extra = 0; return 8; }                  /* stuffing */
+    if ((p >> 8) & 1) { *len = 1; *extra = 0; return 0; }            /* 1 */
+    switch ((p >> 6) & 7) {
+    case 2: *len = 3; *extra = 0; return 2;                          /* 010 */
+    case 3: *len = 3; *extra = 0; return 1;                          /* 011 */
+    default: break;
+    }
+    switch ((p >> 5) & 15) {
+    case 2: *len = 4; *extra = 2; return 0;                          /* 0010 */
+    case 3: *len = 4; *extra = 1; return 0;                          /* 0011 */
+    default: break;
+    }
+    if (((p >> 4) & 31) == 3) { *len = 5; *extra = 0; return 3; }    /* 00011 */
+    switch ((p >> 3) & 63) {
+    case 4: *len = 6; *extra = 0; return 4;                          /* 000100 */
+    case 5: *len = 6; *extra = 3; return 0;                          /* 000101 */
+    default: break;
+    }
+    switch ((p >> 2) & 127) {
+    case  3: *len = 7; *extra = 3; return 3;                         /* 0000011 */
+    case  4: *len = 7; *extra = 2; return 2;                         /* 0000100 */
+    case  5: *len = 7; *extra = 1; return 2;                         /* 0000101 */
+    case  6: *len = 7; *extra = 2; return 1;                         /* 0000110 */
+    case  7: *len = 7; *extra = 1; return 1;                         /* 0000111 */
+    default: break;
+    }
+    switch ((p >> 1) & 255) {
+    case  3: *len = 8; *extra = 2; return 3;                         /* 00000011 */
+    case  4: *len = 8; *extra = 1; return 3;                         /* 00000100 */
+    case  5: *len = 8; *extra = 3; return 2;                         /* 00000101 */
+    default: break;
+    }
+    switch (p & 511) {
+    case  2: *len = 9; *extra = 3; return 4;                         /* 000000010 */
+    case  3: *len = 9; *extra = 2; return 4;                         /* 000000011 */
+    case  4: *len = 9; *extra = 1; return 4;                         /* 000000100 */
+    case  5: *len = 9; *extra = 3; return 1;                         /* 000000101 */
+    default: return -1;
+    }
+}
+
+/* Standard H.263 motion magnitude -> (code, len). Index = magnitude 0..32
+ * (0 = zero vector '1'). From ff_mvtab. */
+static const uint8_t f5mv_std[33][2] = {
+    { 1, 1 }, { 1, 2 }, { 1, 3 }, { 1, 4 }, { 3, 6 }, { 5, 7 },
+    { 4, 7 }, { 3, 7 }, { 11, 9 }, { 10, 9 }, { 9, 9 }, { 17, 10 },
+    { 16, 10 }, { 15, 10 }, { 14, 10 }, { 13, 10 }, { 12, 10 },
+    { 11, 10 }, { 10, 10 }, { 9, 10 }, { 8, 10 }, { 7, 10 },
+    { 6, 10 }, { 5, 10 }, { 4, 10 }, { 7, 11 }, { 6, 11 },
+    { 5, 11 }, { 4, 11 }, { 3, 11 }, { 2, 11 }, { 3, 12 }, { 2, 12 },
+};
+
+/* Parse one F5 motion value, emit standard (mag code + sign + residual).
+ * reslen = residual bits (fcode-1). Returns 0 ok, -1 on invalid/overrun. */
+static int f5_motion_remap(F5BitR *r, F5BitW *w, int reslen)
+{
+    uint32_t pk, e;
+    int ln, v, m, code, clen, i;
+    uint32_t bit;
+    if (r->pos + 1 > r->nbits)
+        return -1;
+    bit = f5br_show(r, 1);
+    if (r->err)
+        return -1;
+    if (bit) {
+        /* zero vector: identical '1' in both grammars */
+        f5_copy_bits(r, w, 1);
+        return r->err ? -1 : 0;
+    }
+    if (r->pos + 12 > r->nbits)
+        return -1;
+    pk = f5br_show(r, 12);
+    if (r->err)
+        return -1;
+    if (pk < 4)
+        return -1;
+    if (pk < 0x80)
+        e = f5mv_m3[pk - 4];
+    else if (pk < 0x200)
+        e = f5mv_m2[(pk >> 2) - 0x20];
+    else
+        e = f5mv_m1[(pk >> 8) - 2];
+    ln = e >> 17;
+    v = (int)(e & 0xFFFF);
+    if (v & 0x8000)
+        v -= 0x10000;
+    if (ln > 16 || ln <= 0 || v == 0)
+        return -1;
+    r->pos += ln; /* consume F5 codeword (not emitted) */
+    m = v < 0 ? -v : v;
+    if (m > 32)
+        return -1;
+    if (reslen > 0) {
+        if (r->pos + reslen > r->nbits)
+            return -1;
+    }
+    code = f5mv_std[m][0];
+    clen = f5mv_std[m][1];
+    if (f5bw_put(w, code, clen) < 0)
+        return -1;
+    if (f5bw_put(w, v < 0 ? 1 : 0, 1) < 0)
+        return -1;
+    for (i = 0; i < reslen; i++) {
+        int b;
+        if (r->pos + 1 > r->nbits)
+            return -1;
+        b = f5br_get(r, 1);
+        if (r->err)
+            return -1;
+        if (f5bw_put(w, b, 1) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Inter AC block copy (E-tables, last flag at bit 12). Mirrors
+ * f5_skip_ac_block but for the inter packing. Returns 0 ok, -1 fail. */
+static int f5_skip_ac_block_inter(F5BitR *r, F5BitW *w)
+{
+    for (;;) {
+        uint32_t peek, e, v;
+        int ln, last;
+        if (r->pos + 12 > r->nbits)
+            return -1;
+        peek = f5br_show(r, 12);
+        if (r->err)
+            return -1;
+        if (peek < 8)
+            return -1; /* 9+ leading zeros: no valid AC codeword */
+        if (peek < 0x80)
+            e = f5ac_e3[peek - 8];
+        else if (peek < 0x200)
+            e = f5ac_e2[(peek >> 2) - 0x20];
+        else
+            e = f5ac_e1[(peek >> 5) - 0x10];
+        ln = e >> 17;
+        v = e & 0x1ffff;
+        if (ln > 16 || v == 0x1bff) {
+            int t, nb;
+            uint32_t p2, e2;
+            int ln2, v2;
+            if (v != 0x1bff || ln > 16)
+                return -1;
+            f5_copy_bits(r, w, ln);
+            if (r->err)
+                return -1;
+            if (r->pos + 2 > r->nbits)
+                return -1;
+            t = f5br_show(r, 2);
+            if (r->err)
+                return -1;
+            nb = (t == 3 || t == 2) ? 2 : 1;
+            f5_copy_bits(r, w, nb);
+            if (r->err)
+                return -1;
+            if (t == 3) {
+                if (r->pos + 1 + 6 + 1 + 12 + 1 > r->nbits)
+                    return -1;
+                last = f5br_get(r, 1);
+                f5bw_put(w, last, 1);
+                f5_copy_bits(r, w, 6 + 1 + 12 + 1);
+                if (r->err)
+                    return -1;
+                if (last)
+                    return 0;
+                continue;
+            }
+            if (r->pos + 12 > r->nbits)
+                return -1;
+            p2 = f5br_show(r, 12);
+            if (r->err)
+                return -1;
+            if (p2 < 8)
+                return -1;
+            if (p2 < 0x80)
+                e2 = f5ac_e3[p2 - 8];
+            else if (p2 < 0x200)
+                e2 = f5ac_e2[(p2 >> 2) - 0x20];
+            else
+                e2 = f5ac_e1[(p2 >> 5) - 0x10];
+            ln2 = e2 >> 17;
+            v2 = e2 & 0x1ffff;
+            if (ln2 > 16 || v2 == 0x1bff)
+                return -1;
+            f5_copy_bits(r, w, ln2);
+            if (r->err)
+                return -1;
+            f5_copy_bits(r, w, 1);
+            if (r->err)
+                return -1;
+            if ((v2 >> 12) & 1)
+                return 0;
+            continue;
+        }
+        last = (v >> 12) & 1;
+        f5_copy_bits(r, w, ln);
+        if (r->err)
+            return -1;
+        f5_copy_bits(r, w, 1); /* sign */
+        if (r->err)
+            return -1;
+        if (last)
+            return 0;
+    }
+}
+
+/* Transcode one P-frame MB (F5 in -> standard MPEG-4 out).
+ * reslen = motion residual bits (fcode-1). Returns 0 ok, -1 fail. */
+static int f5_filter_pmb(F5BitR *r, F5BitW *w, int reslen)
+{
+    int skip, typ, extra, len, cbpy, leny, cbp, i, dq;
+    if (r->pos + 1 > r->nbits)
+        return -1;
+    skip = f5br_get(r, 1);
+    if (r->err)
+        return -1;
+    if (f5bw_put(w, skip ? 0 : 1, 1) < 0) /* invert COD */
+        return -1;
+    if (skip)
+        return 0; /* skipped MB: nothing else coded */
+    for (;;) {
+        typ = f5_vlc_mcbpc_p(r, &len, &extra);
+        if (typ < 0 || r->err)
+            return -1;
+        f5_copy_bits(r, w, len);
+        if (r->err)
+            return -1;
+        if (typ != 8)
+            break;
+    }
+    if (typ == 8)
+        return -1; /* unreachable: loop above retries stuffing */
+    if (typ == 3 || typ == 4) {
+        /* intra path (same as I): ac_pred + cbpy + dquant(iff 4) + blocks */
+        f5_copy_bits(r, w, 1);
+        if (r->err)
+            return -1;
+        cbpy = f5_vlc_cbpy(r, &leny);
+        if (cbpy < 0 || r->err)
+            return -1;
+        f5_copy_bits(r, w, leny);
+        if (r->err)
+            return -1;
+        if (typ == 4) {
+            f5_copy_bits(r, w, 2);
+            if (r->err)
+                return -1;
+        }
+        cbp = (cbpy << 2) | extra;
+        for (i = 0; i < 6; i++) {
+            int coded = (cbp >> 5) & 1;
+            cbp = (cbp << 1) & 0x7f;
+            if (f5_filter_dc(r, w, i < 4) < 0)
+                return -1;
+            if (!coded)
+                continue;
+            if (f5_skip_ac_block(r, w) < 0)
+                return -1;
+        }
+        return r->err ? -1 : 0;
+    }
+    /* inter path: cbpy, dquant(iff type 1), motion, inter blocks */
+    cbpy = f5_vlc_cbpy(r, &leny);
+    if (cbpy < 0 || r->err)
+        return -1;
+    f5_copy_bits(r, w, leny);
+    if (r->err)
+        return -1;
+    if (typ == 1) {
+        f5_copy_bits(r, w, 2);
+        if (r->err)
+            return -1;
+    }
+    dq = 0;
+    (void)dq;
+    cbp = (((15 - cbpy) & 15) << 2) | extra;
+    {
+        int nmv = (typ == 2) ? 4 : 1;
+        for (i = 0; i < nmv; i++) {
+            if (f5_motion_remap(r, w, reslen) < 0)
+                return -1;
+            if (f5_motion_remap(r, w, reslen) < 0)
+                return -1;
+        }
+    }
+    for (i = 0; i < 6; i++) {
+        int coded = (cbp >> 5) & 1;
+        cbp = (cbp << 1) & 0x7f;
+        if (!coded)
+            continue;
+        if (f5_skip_ac_block_inter(r, w) < 0)
+            return -1;
+    }
+    return r->err ? -1 : 0;
+}
+
+/* P-frame MB filter with resync. Mirrors f5_filter_iframe but transcodes
+ * P-MBs (motion remap with reslen residual bits). */
+static void f5_filter_pframe(const uint8_t *in, int in_size,
+                             int mb_w, int mb_h, int reslen, F5BitW *out)
+{
+    F5BitR r = { in, in_size * 8, 0, 0 };
+    int m, resyncs = 0;
+    for (m = 0; m < mb_w * mb_h; m++) {
+        int save_pos = r.pos;
+        size_t save_len = out->len;
+        uint32_t save_cache = out->cache;
+        int save_nbits = out->nbits;
+        F5BitR t;
+        int ok, adv, k;
+        r.err = 0;
+        if (f5_filter_pmb(&r, out, reslen) == 0)
+            continue;
+        out->len = save_len;
+        out->cache = save_cache;
+        out->nbits = save_nbits;
+        ok = 0;
+        for (adv = 1; adv <= 3000; adv++) {
+            if (save_pos + adv >= r.nbits)
+                break;
+            t.buf = r.buf;
+            t.nbits = r.nbits;
+            t.pos = save_pos + adv;
+            t.err = 0;
+            for (k = 0; k < 4; k++) {
+                F5BitW tmp = { NULL, 0, 0, 0, 0 };
+                F5BitR c = t;
+                if (f5_filter_pmb(&c, &tmp, reslen) < 0) {
+                    av_free(tmp.buf);
+                    break;
+                }
+                av_free(tmp.buf);
+                t = c;
+            }
+            if (k == 4) {
+                ok = 1;
+                break;
+            }
+        }
+        if (!ok || resyncs >= 40)
+            break; /* truncate */
+        r.pos = save_pos + adv;
+        r.err = 0;
+        resyncs++;
+    }
+}
+
 /* Synthesize a VOP header (verid=1, rectangular, progressive). type: 0=I,1=P,2=B.
  * intra_dc_threshold index 0 (=99, forces intra DC VLC on). tinc is absolute
  * (60000 Hz); emitted as modulo_time_base + remainder. rounding is the P-VOP
@@ -674,11 +1127,11 @@ static int f5vid_build_vop(F5BitW *w, int type, uint32_t tinc, int nbits,
     if ((ret = f5bw_put(w, trem, nbits)) < 0) return ret;
     if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
     if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* vop_coded */
+    if (type == 1 && (ret = f5bw_put(w, rounding, 1)) < 0) return ret; /* vop_rounding_type */
     if ((ret = f5bw_put(w, 0, 3))  < 0) return ret; /* intra_dc_threshold idx 0 */
     if ((ret = f5bw_put(w, quant, 5)) < 0) return ret; /* vop_quant */
     if (type != 0 && (ret = f5bw_put(w, fwd, 3)) < 0) return ret;
     if (type == 2 && (ret = f5bw_put(w, bwd, 3)) < 0) return ret;
-    if (type == 1 && (ret = f5bw_put(w, rounding, 1)) < 0) return ret;
     *hdr_bits = (w->len * 8 + w->nbits) - start;
     return 0; /* NOTE: no flush here; MB data follows at bit granularity.
                * Bit-exactness with the byte-aligned MB payload is handled
@@ -1060,8 +1513,7 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
         return AVERROR_EOF;
 
     /* FRAM */
-    if (avio_rb32(pb) != MKBETAG('F','R','A','M'))
-        return AVERROR_EOF;
+    { uint32_t _ft = avio_rb32(pb); if (_ft != MKBETAG('F','R','A','M')) return AVERROR_EOF; }
     {
         uint32_t fram_len = avio_rb32(pb);
         int64_t fram_pos = avio_tell(pb) - 8;
@@ -1130,19 +1582,25 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             /* I-frames: run the MB bit filter (drops F5's DC extra bits,
              * resyncs past isolated bad bits, truncates on persistent
-             * failure) so the mpeg4 decoder gets a clean stream. P-frames
-             * pass through (motion transcode TBD). */
+             * failure) so the mpeg4 decoder gets a clean stream. P-frames:
+             * transcode MBs (motion remap to standard magnitude+sign+
+             * residual with fwd-1 residual bits) with the same resync. */
             {
                 F5BitW fw = { NULL, 0, 0, 0, 0 };
                 int use_filtered = 0;
+                int mb_w = (s->streams[0]->codecpar->width + 15) / 16;
+                int mb_h = (s->streams[0]->codecpar->height + 15) / 16;
+                if (mb_w < 1)
+                    mb_w = 40;
+                if (mb_h < 1)
+                    mb_h = 30;
                 if (vop_type == 0) {
-                    int mb_w = (s->streams[0]->codecpar->width + 15) / 16;
-                    int mb_h = (s->streams[0]->codecpar->height + 15) / 16;
-                    if (mb_w < 1)
-                        mb_w = 40;
-                    if (mb_h < 1)
-                        mb_h = 30;
                     f5_filter_iframe(mbdata, mb_size, mb_w, mb_h, &fw);
+                    use_filtered = 1;
+                } else {
+                    int reslen = fwd > 1 ? fwd - 1 : 0;
+                    f5_filter_pframe(mbdata, mb_size, mb_w, mb_h,
+                                     reslen, &fw);
                     use_filtered = 1;
                 }
                 if (use_filtered) {
