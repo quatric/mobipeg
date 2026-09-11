@@ -12,11 +12,12 @@
  *       e.g. 640x480 display, 2997/100 (29.97 fps). The coded video is the
  *       full VIDH size (640x480 MPEG-4 ASP, DivX 5.02, 40x30 MBs).
   *     AUDH payload (88B): u32 0 | "APCM" | u32 rate_BE (32000)
-  *                         | u16 channels_LE (2) | 74 bytes footer.
-  *       In Demo/A2M the first 64 footer bytes are nonzero (purpose
-  *       unknown — they are NOT the DSP coef table: feeding them as one
-  *       clips the decoder to full scale; they are not 8-byte-aligned
-  *       audio either); Bam/LS/River carry zeros.
+  *                         | u16 channels_LE (2) | DSP-ADPCM coef table
+  *                         (32 bytes/channel: 16 BE int16 coefficients,
+  *                         channel-major) | remaining footer bytes.
+  *       Confirmed against the sibling VID1 container's identical APCM
+  *       layout (see niemasd/VID1-Preservation and librempeg's vid1.c,
+  *       which read this same table at this same offset).
  *   FRAM len variable: 8-byte header + 24 bytes zeros, then VIDD + AUDD.
  *     VIDD: 8-byte header + 12-byte inner header + DivX video MB data.
  *       inner: 00 00 00 00 | 00 01 code sub | 32-bit timestamp (30000 Hz,
@@ -35,20 +36,25 @@
  *       MB data starts immediately after inner (no prologue skip, no byte
  *       transform; bytes are fed to the bit reader MSB-first as stored).
  *       The DivX VOP headers (VOL/VOP start codes, type, time, quant, fcode)
- *       are stripped by the container; the demuxer re-synthesizes a minimal
- *       VOL (as extradata, 640x480) and per-packet VOP headers so the native
- *       mpeg4 decoder accepts the stream. use_intra_dc_vlc is forced on;
- *       time_res = 60000 to match container ts.
- *       I-frame MB data uses standard MPEG-4 VLCs/tables (verified against
-  *       the game binary's M4 tables) with one deviation: after an intra DC
-  *       with size>8, the encoder emits 1 extra bit which plain MPEG-4 does
-  *       not have; the demuxer drops it. A resync scan (skip to the next
-  *       valid MB) guards against damage, but every shipped frame parses
-  *       cleanly without it.
- *       KNOWN GAPS: P-frame motion uses a custom signed VLC, remapped here
- *       to standard magnitude+sign+residual (residual length fwd-1);
- *       B/GMC types (2/3) are asserted unsupported (absent from all
- *       shipped files).
+ *       are stripped by the container. This demuxer does NOT re-synthesize
+ *       them: it only extracts the raw F5 MB bitstream for each frame and
+ *       packetizes it behind an 8-byte metadata header (vop_type, quant,
+ *       fwd fcode, rounding) so the "f5vid_mpeg4" bitstream filter
+ *       (libavcodec/bsf/f5vid_mpeg4.c) can do the actual bitstream
+ *       *conversion*: VOL/VOP header synthesis and F5-custom-entropy ->
+ *       standard-MPEG-4-entropy transcoding (I-frame MB filter with
+ *       resync, P-frame MB transcode with motion remap) that the native
+ *       mpeg4 decoder needs. use_intra_dc_vlc is forced on by that filter;
+ *       time_res = 60000 to match container ts. Since this FFmpeg tree has
+ *       no generic mechanism for a demuxer to force a decode-side bsf onto
+ *       every caller, f5vid_read_header() opens an internal AVBSFContext
+ *       for "f5vid_mpeg4" and f5vid_read_packet() drives packets through
+ *       it, so `ffmpeg -i foo.vid` works with no -bsf:v needed; the
+ *       packets the demuxer hands to callers are therefore already clean
+ *       MPEG-4 VOP packets (see f5vid_mpeg4.c's own header comment for the
+ *       transcode details and KNOWN GAPS: P-frame motion uses a custom
+ *       signed VLC remapped to standard magnitude+sign+residual, and
+ *       B/GMC types (2/3) are asserted unsupported).
   *     AUDD: 8-byte header + 8-byte inner header + audio data.
   *       inner: 00 00 00 00 | BE32 (AUDD_len - 32).
   *       "APCM" audio at 32000 Hz stereo, ~37 kB/s: DSP-ADPCM with 8-byte
@@ -56,10 +62,7 @@
   *       14 samples/8 bytes = 4.57 bits/sample = 36.6 kB/s stereo @32kHz).
   *       Frames are interleaved L,R,L,R...; the demuxer deinterleaves to
   *       channel-major for the adpcm_thp decoder. The per-file coef table
-  *       is not present (AUDH's 64 nonzero bytes are something else — see
-  *       above), so the demuxer exposes a zero table (memoryless decode:
-  *       plausible level and duration, harsh spectrum). TODO: identify the
-  *       footer bytes (game binary audio decoder) for full quality.
+  *       read from AUDH (see above) is exposed as codecpar extradata.
   *
   *   Timing: file order is display order and the container clock is strictly
   *   increasing once P-VOP timestamps are unpacked from the right bit offset,
@@ -87,6 +90,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/avassert.h"
 #include "libavutil/mem.h"
+#include "libavcodec/bsf.h"
 #include "config_components.h"
 #include "demux.h"
 #include "internal.h"
@@ -111,6 +115,7 @@ typedef struct F5VIDDemuxContext {
     int64_t video_dts; /* decode-order clock (monotonic; pts may jump) */
     F5VIDIndex *index;
     int nb_index;
+    AVBSFContext *bsf; /* "f5vid_mpeg4": raw F5 MB data -> clean MPEG-4 VOP */
 } F5VIDDemuxContext;
 
 /* ---- minimal MPEG-4 bit writer (VOL/VOP synthesis) ---- */
@@ -165,47 +170,17 @@ static int f5bw_flush(F5BitW *w)
     return 0;
 }
 
-#if CONFIG_F5VID_DEMUXER
-
-/* Synthesize a minimal MPEG-4 VOL (Simple, rectangular, progressive,
- * H.263 quant, no resync/partition/sprite). Matches the proven graft VOL. */
 #define F5VID_TIME_RES 60000
 #define F5VID_TINC_BITS 16 /* bit_length(60000-1) */
-static int f5vid_build_vol(F5BitW *w, int width, int height, uint32_t time_res)
-{
-    int ret;
-    if ((ret = f5bw_put(w, 0x00000120, 32)) < 0) return ret; /* vol_start_code */
-    /* NOTE: start code written raw above; following puts are bit-exact */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* random_accessible_vol */
-    if ((ret = f5bw_put(w, 1, 8))  < 0) return ret; /* video_object_type = Simple */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* is_object_layer_identifier */
-    if ((ret = f5bw_put(w, 1, 4))  < 0) return ret; /* aspect_ratio_info 1:1 */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* vol_control_parameters */
-    if ((ret = f5bw_put(w, 0, 2))  < 0) return ret; /* vol_shape rectangular */
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
-    if ((ret = f5bw_put(w, time_res, 16)) < 0) return ret;
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* fixed_vop_rate */
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
-    if ((ret = f5bw_put(w, width, 13))  < 0) return ret;
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
-    if ((ret = f5bw_put(w, height, 13)) < 0) return ret;
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* interlaced */
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* obmc_disable */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* sprite_enable */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* not_8_bit */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* quant_type H.263 */
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* complexity_estimation_disable */
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* resync_marker_disable */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* data_partitioned */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* newpred_enable */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* reduced_resolution_vop_enable */
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* scalability */
-    return f5bw_flush(w);
-}
 
-#endif /* CONFIG_F5VID_DEMUXER */
+/* NOTE: VOL/VOP synthesis (f5vid_build_vol/f5vid_build_vop) and the F5 ->
+ * standard-MPEG-4 MB filter/transcode (f5_filter_iframe/pframe and their
+ * helpers) used to live here; they now live in the "f5vid_mpeg4" bitstream
+ * filter (libavcodec/bsf/f5vid_mpeg4.c), which this demuxer drives
+ * internally (see f5vid_read_header/f5vid_read_packet). The primitives
+ * below (bit reader/writer, VLC tables, AC block parsing) remain here
+ * because the f5vid *muxer* further down in this file still needs them to
+ * invert a clean MPEG-4 VOP packet back into F5's custom entropy coding. */
 
 /* ---- F5 I-frame MB bit filter ----
  * Parses I-frame MB data with F5's exact VLC grammar (all tables verified
@@ -532,196 +507,6 @@ static int f5_skip_ac_block(F5BitR *r, F5BitW *w)
     }
 }
 
-#if CONFIG_F5VID_DEMUXER
-
-/* Parse one I-frame MB header (mcbpc + ac_pred + cbpy [+dquant]).
- * Copies header bits to w. Returns cbp (6-bit coded pattern), or -1 on
- * invalid/overrun. *dquant set if a dquant delta was present (value ignored
- * for bit filtering; quant only affects dequant values, not bit layout, at
- * the thresholds used here). */
-static int f5_parse_mb_header(F5BitR *r, F5BitW *w, int *dquant)
-{
-    int cbpc, lenc, cbpy, leny;
-    *dquant = 0;
-    for (;;) {
-        cbpc = f5_vlc_mcbpc_intra(r, &lenc);
-        if (cbpc < 0 || r->err)
-            return -1;
-        f5_copy_bits(r, w, lenc);
-        if (r->err)
-            return -1;
-        if (cbpc != 8)
-            break;
-    }
-    /* ac_pred_flag */
-    f5_copy_bits(r, w, 1);
-    if (r->err)
-        return -1;
-    cbpy = f5_vlc_cbpy(r, &leny);
-    if (cbpy < 0 || r->err)
-        return -1;
-    f5_copy_bits(r, w, leny);
-    if (r->err)
-        return -1;
-    if (cbpc & 4) {
-        *dquant = 1;
-        f5_copy_bits(r, w, 2);
-        if (r->err)
-            return -1;
-    }
-    return (cbpc & 3) | (cbpy << 2);
-}
-
-/* Parse one intra block's DC (luma if is_luma else chroma), copying its bits.
- * Drops F5's extra bit after sizes >8 (not part of MPEG-4). Returns 0 ok. */
-static int f5_filter_dc(F5BitR *r, F5BitW *w, int is_luma)
-{
-    int sz, len;
-    sz = is_luma ? f5_vlc_dc_luma(r, &len) : f5_vlc_dc_chroma(r, &len);
-    if (sz < 0 || r->err)
-        return -1;
-    f5_copy_bits(r, w, len);
-    if (r->err)
-        return -1;
-    if (sz > 0) {
-        f5_copy_bits(r, w, sz);
-        if (r->err)
-            return -1;
-    }
-    if (sz > 8) {
-        /* F5-only extra bit: consume from input, do not emit. */
-        if (r->pos + 1 > r->nbits) {
-            r->err = 1;
-            return -1;
-        }
-        r->pos += 1;
-    }
-    return 0;
-}
-
-/* Emit a minimal concealment intra MB (no coded blocks, all-DC predicted),
- * keeping the stream at a full frame when the input truncates. 22 bits:
- * mcbpc 0 ('1'), ac_pred off, cbpy 0 ('0011'), 4x luma DC size 0 ('011'),
- * 2x chroma DC size 0 ('11'). */
-static int f5_pad_imb(F5BitW *w)
-{
-    int i, ret;
-    if ((ret = f5bw_put(w, 1, 1)) < 0)
-        return ret;
-    if ((ret = f5bw_put(w, 0, 1)) < 0)
-        return ret;
-    if ((ret = f5bw_put(w, 3, 4)) < 0)
-        return ret;
-    for (i = 0; i < 4; i++)
-        if ((ret = f5bw_put(w, 3, 3)) < 0)
-            return ret;
-    for (i = 0; i < 2; i++)
-        if ((ret = f5bw_put(w, 3, 2)) < 0)
-            return ret;
-    return 0;
-}
-
-/* Parse+copy one full intra MB (header + 6 blocks). Returns 0 ok, -1 fail.
- * MBs with quant-driven DC skipping are not expected here (quant always
- * below threshold for shipped content); DC is always parsed. */
-static int f5_filter_mb(F5BitR *r, F5BitW *w)
-{
-    int cbp, dq, i;
-    cbp = f5_parse_mb_header(r, w, &dq);
-    if (cbp < 0 || r->err)
-        return -1;
-    for (i = 0; i < 6; i++) {
-        int coded = (cbp >> 5) & 1;
-        cbp = (cbp << 1) & 0x7f;
-        if (f5_filter_dc(r, w, i < 4) < 0)
-            return -1;
-        if (!coded)
-            continue;
-        if (f5_skip_ac_block(r, w) < 0)
-            return -1;
-    }
-    return r->err ? -1 : 0;
-}
-
-/* I-frame MB filter with resync. Copies mb_size input bytes (F5 MB stream)
- * to a clean MPEG-4 MB stream in out (F5BitW, caller frees .buf).
- * Drops DC extra bits; on invalid VLC, skips input to the next position
- * where an MB header plus 3 following MBs validate (max 3000 bits ahead),
- * up to 40 resyncs per frame; then truncates. Always succeeds (possibly
- * with zero MBs); the caller emits what was produced and lets the decoder
- * conceal the rest. I-frames carry no video packet headers (they decode
- * cleanly either way; the VOL enables markers for P recovery). */
-static void f5_filter_iframe(const uint8_t *in, int in_size,
-                             int mb_w, int mb_h, F5BitW *out)
-{
-    F5BitR r = { in, in_size * 8, 0, 0 };
-    int nmb = mb_w * mb_h, m, resyncs = 0;
-    (void)nmb;
-    for (m = 0; m < mb_w * mb_h; m++) {
-        int save_pos = r.pos;
-        size_t save_len = out->len;
-        uint32_t save_cache = out->cache;
-        int save_nbits = out->nbits;
-        F5BitR t;
-        int ok, adv, k;
-        r.err = 0;
-        if (f5_filter_mb(&r, out) == 0)
-            continue;
-        /* rollback partial MB, then resync-scan */
-        out->len = save_len;
-        out->cache = save_cache;
-        out->nbits = save_nbits;
-        ok = 0;
-        for (adv = 1; adv <= 3000; adv++) {
-            if (save_pos + adv >= r.nbits)
-                break;
-            t.buf = r.buf;
-            t.nbits = r.nbits;
-            t.pos = save_pos + adv;
-            t.err = 0;
-            for (k = 0; k < 4; k++) {
-                F5BitW tmp = { NULL, 0, 0, 0, 0 };
-                F5BitR c = t;
-                if (f5_filter_mb(&c, &tmp) < 0) {
-                    av_free(tmp.buf);
-                    break;
-                }
-                av_free(tmp.buf);
-                t = c;
-            }
-            if (k == 4) {
-                ok = 1;
-                break;
-            }
-        }
-        if (!ok || resyncs >= 40) {
-            /* Truncate: pad the rest of the frame with concealment MBs so
-             * the decoder still sees a full frame. */
-            for (; m < mb_w * mb_h; m++)
-                if (f5_pad_imb(out) < 0)
-                    break;
-            break;
-        }
-        r.pos = save_pos + adv;
-        r.err = 0;
-        resyncs++;
-        /* Re-parse MB m from the new offset and emit it: dropping it would
-         * shorten the stream and shift every later MB into the wrong slot. */
-        if (f5_filter_mb(&r, out) == 0)
-            continue;
-        out->len = save_len;
-        out->cache = save_cache;
-        out->nbits = save_nbits;
-        for (; m < mb_w * mb_h; m++)
-            if (f5_pad_imb(out) < 0)
-                break;
-        break;
-    }
-    (void)nmb;
-}
-
-#endif /* CONFIG_F5VID_DEMUXER */
-
 static const uint32_t f5ac_e1[112] = {
     0x000e1081, 0x000e1071, 0x000e1061, 0x000e1051, 0x000e00c1, 0x000e00b1, 0x000e00a1, 0x000e0004 ,
     0x000c1041, 0x000c1041, 0x000c1031, 0x000c1031, 0x000c1021, 0x000c1021, 0x000c1011, 0x000c1011 ,
@@ -875,72 +660,6 @@ static const uint8_t f5mv_std[33][2] = {
     { 5, 11 }, { 4, 11 }, { 3, 11 }, { 2, 11 }, { 3, 12 }, { 2, 12 },
 };
 
-#if CONFIG_F5VID_DEMUXER
-
-/* Parse one F5 motion value, emit standard (mag code + sign + residual).
- * reslen = residual bits (fcode-1). Returns 0 ok, -1 on invalid/overrun. */
-static int f5_motion_remap(F5BitR *r, F5BitW *w, int reslen)
-{
-    uint32_t pk, e;
-    int ln, v, m, code, clen, i;
-    uint32_t bit;
-    if (r->pos + 1 > r->nbits)
-        return -1;
-    bit = f5br_get(r, 1);
-    if (r->err)
-        return -1;
-    if (bit) {
-        /* zero vector: identical '1' in both grammars (already consumed) */
-        if (f5bw_put(w, 1, 1) < 0)
-            return -1;
-        return r->err ? -1 : 0;
-    }
-    if (r->pos + 12 > r->nbits)
-        return -1;
-    pk = f5br_show(r, 12);
-    if (r->err)
-        return -1;
-    if (pk < 4)
-        return -1;
-    if (pk < 0x80)
-        e = f5mv_m3[pk - 4];
-    else if (pk < 0x200)
-        e = f5mv_m2[(pk >> 2) - 0x20];
-    else
-        e = f5mv_m1[(pk >> 8) - 2];
-    ln = e >> 17;
-    v = (int)(e & 0xFFFF);
-    if (v & 0x8000)
-        v -= 0x10000;
-    if (ln > 16 || ln <= 0 || v == 0)
-        return -1;
-    r->pos += ln; /* consume F5 codeword (not emitted) */
-    m = v < 0 ? -v : v;
-    if (m > 32)
-        return -1;
-    if (reslen > 0) {
-        if (r->pos + reslen > r->nbits)
-            return -1;
-    }
-    code = f5mv_std[m][0];
-    clen = f5mv_std[m][1];
-    if (f5bw_put(w, code, clen) < 0)
-        return -1;
-    if (f5bw_put(w, v < 0 ? 1 : 0, 1) < 0)
-        return -1;
-    for (i = 0; i < reslen; i++) {
-        int b;
-        if (r->pos + 1 > r->nbits)
-            return -1;
-        b = f5br_get(r, 1);
-        if (r->err)
-            return -1;
-        if (f5bw_put(w, b, 1) < 0)
-            return -1;
-    }
-    return 0;
-}
-
 /* Inter AC block copy (E-tables, last flag at bit 12). Mirrors
  * f5_skip_ac_block but for the inter packing. Returns 0 ok, -1 fail. */
 static int f5_skip_ac_block_inter(F5BitR *r, F5BitW *w)
@@ -1045,168 +764,6 @@ static int f5_skip_ac_block_inter(F5BitR *r, F5BitW *w)
     }
 }
 
-/* Transcode one P-frame MB (F5 in -> standard MPEG-4 out).
- * reslen = motion residual bits (fcode-1). Returns 0 ok, -1 fail. */
-static int f5_filter_pmb(F5BitR *r, F5BitW *w, int reslen)
-{
-    int skip, typ, extra, len, cbpy, leny, cbp, i;
-    if (r->pos + 1 > r->nbits)
-        return -1;
-    skip = f5br_get(r, 1);
-    if (r->err)
-        return -1;
-    if (f5bw_put(w, skip, 1) < 0) /* COD: 1=skipped, same as F5 */
-        return -1;
-    if (skip)
-        return 0; /* skipped MB: nothing else coded */
-    for (;;) {
-        typ = f5_vlc_mcbpc_p(r, &len, &extra);
-        if (typ < 0 || r->err)
-            return -1;
-        f5_copy_bits(r, w, len);
-        if (r->err)
-            return -1;
-        if (typ != 8)
-            break;
-    }
-    if (typ == 8)
-        return -1; /* unreachable: loop above retries stuffing */
-    if (typ == 3 || typ == 4) {
-        /* intra path (same as I): ac_pred + cbpy + dquant(iff 4) + blocks */
-        f5_copy_bits(r, w, 1);
-        if (r->err)
-            return -1;
-        cbpy = f5_vlc_cbpy(r, &leny);
-        if (cbpy < 0 || r->err)
-            return -1;
-        f5_copy_bits(r, w, leny);
-        if (r->err)
-            return -1;
-        if (typ == 4) {
-            f5_copy_bits(r, w, 2);
-            if (r->err)
-                return -1;
-        }
-        cbp = (cbpy << 2) | extra;
-        for (i = 0; i < 6; i++) {
-            int coded = (cbp >> 5) & 1;
-            cbp = (cbp << 1) & 0x7f;
-            if (f5_filter_dc(r, w, i < 4) < 0)
-                return -1;
-            if (!coded)
-                continue;
-            if (f5_skip_ac_block(r, w) < 0)
-                return -1;
-        }
-        return r->err ? -1 : 0;
-    }
-    /* inter path: cbpy, dquant(iff type 1), motion, inter blocks */
-    cbpy = f5_vlc_cbpy(r, &leny);
-    if (cbpy < 0 || r->err)
-        return -1;
-    f5_copy_bits(r, w, leny);
-    if (r->err)
-        return -1;
-    if (typ == 1) {
-        f5_copy_bits(r, w, 2);
-        if (r->err)
-            return -1;
-    }
-    cbp = (((15 - cbpy) & 15) << 2) | extra;
-    {
-        int nmv = (typ == 2) ? 4 : 1;
-        for (i = 0; i < nmv; i++) {
-            if (f5_motion_remap(r, w, reslen) < 0)
-                return -1;
-            if (f5_motion_remap(r, w, reslen) < 0)
-                return -1;
-        }
-    }
-    for (i = 0; i < 6; i++) {
-        int coded = (cbp >> 5) & 1;
-        cbp = (cbp << 1) & 0x7f;
-        if (!coded)
-            continue;
-        if (f5_skip_ac_block_inter(r, w) < 0)
-            return -1;
-    }
-    return r->err ? -1 : 0;
-}
-
-#define F5_PRESYNC_WEAK    4
-
-/* P-frame MB filter with resync. Mirrors f5_filter_iframe but transcodes
- * P-MBs (motion remap with reslen residual bits). */
-static void f5_filter_pframe(const uint8_t *in, int in_size,
-                             int mb_w, int mb_h, int reslen, F5BitW *out)
-{
-    F5BitR r = { in, in_size * 8, 0, 0 };
-    int m, resyncs = 0;
-    for (m = 0; m < mb_w * mb_h; m++) {
-        int save_pos = r.pos;
-        size_t save_len = out->len;
-        uint32_t save_cache = out->cache;
-        int save_nbits = out->nbits;
-        F5BitR t;
-        int ok, adv, k;
-        r.err = 0;
-        if (f5_filter_pmb(&r, out, reslen) == 0)
-            continue;
-        out->len = save_len;
-        out->cache = save_cache;
-        out->nbits = save_nbits;
-        ok = 0;
-        for (adv = 1; adv <= 3000; adv++) {
-            if (save_pos + adv >= r.nbits)
-                break;
-            t.buf = r.buf;
-            t.nbits = r.nbits;
-            t.pos = save_pos + adv;
-            t.err = 0;
-            for (k = 0; k < F5_PRESYNC_WEAK; k++) {
-                F5BitW tmp = { NULL, 0, 0, 0, 0 };
-                F5BitR c = t;
-                if (f5_filter_pmb(&c, &tmp, reslen) < 0) {
-                    av_free(tmp.buf);
-                    break;
-                }
-                av_free(tmp.buf);
-                t = c;
-            }
-            if (k == F5_PRESYNC_WEAK) {
-                ok = 1;
-                break;
-            }
-        }
-        if (!ok || resyncs >= 40) {
-            /* Truncate: pad the rest of the frame with skipped MBs so the
-             * decoder still sees a full frame (a short stream makes it
-             * overread into padding). Skipped P-MBs copy the reference. */
-            for (; m < mb_w * mb_h; m++)
-                if (f5bw_put(out, 1, 1) < 0)
-                    break;
-            break;
-        }
-        r.pos = save_pos + adv;
-        r.err = 0;
-        resyncs++;
-        /* Re-parse MB m from the new offset and emit it: dropping it would
-         * shorten the stream and shift every later MB into the wrong slot.
-         * Validated above, so this succeeds barring OOM. */
-        if (f5_filter_pmb(&r, out, reslen) == 0)
-            continue;
-        out->len = save_len;
-        out->cache = save_cache;
-        out->nbits = save_nbits;
-        for (; m < mb_w * mb_h; m++)
-            if (f5bw_put(out, 1, 1) < 0)
-                break;
-        break;
-    }
-}
-
-#endif /* CONFIG_F5VID_DEMUXER */
-
 #if CONFIG_F5VID_DEMUXER
 
 /* Container timestamp from a 12-byte VIDD inner header, in F5VID_TIME_RES
@@ -1231,41 +788,6 @@ static uint32_t f5vid_inner_ts(const uint8_t *inner)
     return raw * 2;
 }
 
-/* Synthesize a VOP header (verid=1, rectangular, progressive). type: 0=I,1=P,2=B.
- * intra_dc_threshold index 0 (=99, forces intra DC VLC on). tinc is absolute
- * (60000 Hz); emitted as modulo_time_base + remainder. rounding is the P-VOP
- * no_rounding bit (from the container coded bit). */
-static int f5vid_build_vop(F5BitW *w, int type, uint32_t tinc, int nbits,
-                           int quant, int fwd, int bwd, int rounding,
-                           int *hdr_bits)
-{
-    int ret, start;
-    uint32_t tb, trem;
-    if ((ret = f5bw_put(w, 0x000001B6, 32)) < 0) return ret; /* vop_start_code */
-    start = w->len * 8 + w->nbits; /* == 32 */
-    if ((ret = f5bw_put(w, type, 2)) < 0) return ret; /* vop_coding_type */
-    tb = (F5VID_TIME_RES > 1) ? tinc / F5VID_TIME_RES : 0;
-    trem = (F5VID_TIME_RES > 1) ? tinc % F5VID_TIME_RES : tinc;
-    if (tb > 64)
-        tb = 64; /* sanity cap; container ts stays well below this */
-    for (uint32_t i = 0; i < tb; i++)
-        if ((ret = f5bw_put(w, 1, 1)) < 0) return ret;
-    if ((ret = f5bw_put(w, 0, 1))  < 0) return ret; /* modulo_time_base end */
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
-    if ((ret = f5bw_put(w, trem, nbits)) < 0) return ret;
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* marker */
-    if ((ret = f5bw_put(w, 1, 1))  < 0) return ret; /* vop_coded */
-    if (type == 1 && (ret = f5bw_put(w, rounding, 1)) < 0) return ret; /* vop_rounding_type */
-    if ((ret = f5bw_put(w, 0, 3))  < 0) return ret; /* intra_dc_threshold idx 0 */
-    if ((ret = f5bw_put(w, quant, 5)) < 0) return ret; /* vop_quant */
-    if (type != 0 && (ret = f5bw_put(w, fwd, 3)) < 0) return ret;
-    if (type == 2 && (ret = f5bw_put(w, bwd, 3)) < 0) return ret;
-    *hdr_bits = (w->len * 8 + w->nbits) - start;
-    return 0; /* NOTE: no flush here; MB data follows at bit granularity.
-               * Bit-exactness with the byte-aligned MB payload is handled
-               * by the caller (see read_packet). */
-}
-
 static int f5vid_probe(const AVProbeData *p)
 {
     if (p->buf_size < 0x30)
@@ -1287,9 +809,9 @@ static int f5vid_read_header(AVFormatContext *s)
     F5VIDDemuxContext *m = s->priv_data;
     AVIOContext *pb = s->pb;
     uint32_t vid1_len, head_len, vidh_len, audh_len;
-    uint8_t vidh[24], audh[16];
+    uint8_t vidh[24], audh[14];
     int coded_w, coded_h, ret;
-    F5BitW vw = { NULL, 0, 0, 0, 0 };
+    const AVBitStreamFilter *f5bsf;
 
     AVStream *vst = avformat_new_stream(s, NULL);
     if (!vst)
@@ -1302,9 +824,8 @@ static int f5vid_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
     /* APCM is DSP-ADPCM (8-byte frames: predictor/scale + 14 nibbles,
-     * THP-compatible framing). The per-file coef table is not present,
-     * so expose a zero table (memoryless decode: plausible level and
-     * duration, harsh spectrum). */
+     * THP-compatible framing). The per-file coef table (read from AUDH
+     * below) is exposed as codecpar extradata. */
     ast->codecpar->codec_id = AV_CODEC_ID_ADPCM_THP;
 
     /* VID1 */
@@ -1353,40 +874,49 @@ static int f5vid_read_header(AVFormatContext *s)
     coded_w = vst->codecpar->width;
     coded_h = vst->codecpar->height;
 
-    /* Synthesize VOL extradata (decoder needs it; container strips it). */
-    if ((ret = f5vid_build_vol(&vw, coded_w, coded_h, F5VID_TIME_RES)) < 0)
+    /* Set up the "f5vid_mpeg4" bitstream filter that turns the raw F5 MB
+     * payload this demuxer extracts into a clean MPEG-4 VOP bitstream
+     * (VOL/VOP synthesis + entropy transcode); see f5vid_read_packet().
+     * This is driven internally (rather than left to the caller) because
+     * this FFmpeg tree has no generic "demuxer requires this bsf" hook. */
+    f5bsf = av_bsf_get_by_name("f5vid_mpeg4");
+    if (!f5bsf) {
+        av_log(s, AV_LOG_ERROR, "f5vid: f5vid_mpeg4 bitstream filter not built in\n");
+        return AVERROR_BSF_NOT_FOUND;
+    }
+    if ((ret = av_bsf_alloc(f5bsf, &m->bsf)) < 0)
         return ret;
-    vst->codecpar->extradata = vw.buf;
-    vst->codecpar->extradata_size = vw.len;
-    /* vw.buf ownership transferred; do not free on success */
+    m->bsf->par_in->codec_type = AVMEDIA_TYPE_VIDEO;
+    m->bsf->par_in->codec_id   = AV_CODEC_ID_MPEG4;
+    m->bsf->par_in->width      = coded_w;
+    m->bsf->par_in->height     = coded_h;
+    m->bsf->time_base_in     = (AVRational){ 1, F5VID_TIME_RES };
+    if ((ret = av_bsf_init(m->bsf)) < 0)
+        return ret;
+    /* The filter builds the VOL extradata in par_out on init; copy it to
+     * the stream so muxers/remuxers downstream of this demuxer see it too
+     * (matches what the inline transcoder used to expose directly). */
+    if ((ret = avcodec_parameters_copy(vst->codecpar, m->bsf->par_out)) < 0)
+        return ret;
+    avpriv_set_pts_info(vst, 1, 1, F5VID_TIME_RES);
 
     /* AUDH */
-    if (avio_rb32(pb) != MKBETAG('A','U','D','H')) {
-        av_freep(&vst->codecpar->extradata);
-        vst->codecpar->extradata_size = 0;
+    if (avio_rb32(pb) != MKBETAG('A','U','D','H'))
         return AVERROR_INVALIDDATA;
-    }
     audh_len = avio_rb32(pb);
-    if (audh_len < 16) {
-        av_freep(&vst->codecpar->extradata);
-        vst->codecpar->extradata_size = 0;
+    if (audh_len < 16)
         return AVERROR_INVALIDDATA;
-    }
-    if (avio_read(pb, audh, 16) != 16) {
-        av_freep(&vst->codecpar->extradata);
-        vst->codecpar->extradata_size = 0;
+    if (avio_read(pb, audh, 14) != 14)
         return AVERROR_EOF;
-    }
-    /* audh layout: u32 0 | "APCM" | u32 rate_BE | u16 channels +
-     * 74 bytes footer (see above) */
+    /* audh layout: u32 0 | "APCM" | u32 rate_BE | u16 channels, then the
+     * coef table immediately follows (see below) */
     if (AV_RB32(audh + 4) != MKBETAG('A','P','C','M'))
         av_log(s, AV_LOG_WARNING, "f5vid: unexpected audio tag %08X\n",
                AV_RB32(audh + 4));
     ast->codecpar->sample_rate = AV_RB32(audh + 8);
     if (!ast->codecpar->sample_rate)
         ast->codecpar->sample_rate = 32000;
-    /* channels are LE u16 at audh+12; the 74 bytes after it are a footer
-     * of unknown purpose (see above) */
+    /* channels are LE u16 at audh+12 */
     {
         uint16_t ch = AV_RL16(audh + 12);
         if (ch == 1)
@@ -1395,23 +925,29 @@ static int f5vid_read_header(AVFormatContext *s)
             ast->codecpar->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
         ast->codecpar->block_align = 8; /* one DSP-ADPCM frame */
     }
-    /* Zero coef table (see above); 32 bytes per channel. */
+    /* DSP-ADPCM coef table: 16 BE int16 coefficient pairs per channel
+     * (32 bytes/channel), channel-major, immediately following the header
+     * we just read. Confirmed against the sibling VID1 container format
+     * (same APCM layout) rather than being unknown filler. */
     {
         int nch = ast->codecpar->ch_layout.nb_channels;
+        int tab_size;
         uint8_t *tab;
         if (nch != 1 && nch != 2)
             nch = 2;
-        tab = av_mallocz(32 * nch);
-        if (!tab) {
-            av_freep(&vst->codecpar->extradata);
-            vst->codecpar->extradata_size = 0;
+        tab_size = 32 * nch;
+        tab = av_malloc(tab_size);
+        if (!tab)
             return AVERROR(ENOMEM);
+        if (avio_read(pb, tab, tab_size) != tab_size) {
+            av_free(tab);
+            return AVERROR_EOF;
         }
         ast->codecpar->extradata = tab;
-        ast->codecpar->extradata_size = 32 * nch;
+        ast->codecpar->extradata_size = tab_size;
+        if (audh_len > 8 + 14 + tab_size)
+            avio_skip(pb, audh_len - 8 - 14 - tab_size);
     }
-    if (audh_len > 16)
-        avio_skip(pb, audh_len - 8 - 16);
     /* HEAD trailing padding */
     {
         int64_t cur = avio_tell(pb);
@@ -1473,16 +1009,27 @@ static int f5vid_read_header(AVFormatContext *s)
                 alen = avio_rb32(pb);
                 if (alen < 8 + 8)
                     break;
-                if (m->nb_index >= cap) {
-                    cap = cap ? cap * 2 : 256;
-                    ni = av_realloc_array(m->index, cap, sizeof(*ni));
-                    if (!ni)
-                        break;
-                    m->index = ni;
+                /* AUDD inner header: u32 0 | u32 real payload size (this is
+                 * the size the game itself uses to split L/R, NOT alen-16:
+                 * the chunk is padded and alen-16 overcounts by up to one
+                 * 8-byte DSP-ADPCM frame per channel). */
+                {
+                    uint32_t audd_real_size;
+                    avio_rb32(pb); /* inner zero */
+                    audd_real_size = avio_rb32(pb);
+                    if (audd_real_size > alen - 16)
+                        audd_real_size = (alen > 16) ? alen - 16 : 0;
+                    if (m->nb_index >= cap) {
+                        cap = cap ? cap * 2 : 256;
+                        ni = av_realloc_array(m->index, cap, sizeof(*ni));
+                        if (!ni)
+                            break;
+                        m->index = ni;
+                    }
+                    m->index[m->nb_index].pos = pos;
+                    m->index[m->nb_index].video_ts = f5vid_inner_ts(inner);
+                    m->index[m->nb_index].audio_size = audd_real_size;
                 }
-                m->index[m->nb_index].pos = pos;
-                m->index[m->nb_index].video_ts = f5vid_inner_ts(inner);
-                m->index[m->nb_index].audio_size = (alen > 16) ? (alen - 8 - 8) : 0;
                 m->index[m->nb_index].is_key = (inner[6] == 0x20);
                 m->nb_index++;
                 pos += flen;
@@ -1571,11 +1118,14 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
 
     if (m->handle_audio_packet) {
         /* Audio tail of the current FRAM: AUDD payload after its 8-byte
-         * inner header. Frames are 8B DSP-ADPCM (PS + 14 nibbles),
-         * interleaved L,R,L,R...; the adpcm_thp decoder wants channel-major
-         * (all L then all R), so deinterleave here. */
+         * inner header. Frames are 8B DSP-ADPCM (PS + 14 nibbles), already
+         * channel-planar within this block (first half of frames = ch0,
+         * second half = ch1) — confirmed against the game binary, which
+         * sets up two independent hardware ADPCM voices, each fed its own
+         * contiguous run of frames, not interleaved per-frame. This already
+         * matches the adpcm_thp decoder's expected channel-major layout,
+         * so no reordering is needed, just splitting the block in half. */
         uint8_t *raw;
-        uint8_t *out;
         uint32_t nframes, nsamp;
         int ch = s->streams[1]->codecpar->ch_layout.nb_channels;
         if (ch != 2)
@@ -1611,20 +1161,11 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
             av_log(s, AV_LOG_WARNING, "f5vid: odd DSP frame count %u\n", nframes);
             nframes &= ~1u;
         }
-        out = av_malloc(nframes * 8);
-        if (!out) {
-            av_free(raw);
-            return AVERROR(ENOMEM);
-        }
-        /* deinterleave: even frames -> L half, odd frames -> R half */
-        for (uint32_t i = 0; i < nframes / 2; i++) {
-            memcpy(out + i * 8, raw + (2 * i) * 8, 8);
-            memcpy(out + (nframes / 2 + i) * 8, raw + (2 * i + 1) * 8, 8);
-        }
-        av_free(raw);
+        /* Already channel-planar (first half ch0, second half ch1);
+         * just trim to the even frame count used above. */
         nsamp = (nframes / 2) * 14;
-        if ((ret = av_packet_from_data(pkt, out, nframes * 8)) < 0) {
-            av_free(out);
+        if ((ret = av_packet_from_data(pkt, raw, nframes * 8)) < 0) {
+            av_free(raw);
             return ret;
         }
         pkt->stream_index = 1;
@@ -1655,14 +1196,11 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
         {
             uint32_t vidd_len = avio_rb32(pb);
             uint8_t inner[12];
-            uint8_t *mbdata;
+            uint8_t *raw; /* 8-byte metadata header + raw F5 MB payload */
             uint32_t mb_size;
             int vop_type; /* 0=I (0x20), 1=P (0x40/0x50) */
             int quant, fwd, rounding;
             uint32_t frame_ts;
-            F5BitW vw = { NULL, 0, 0, 0, 0 };
-            uint8_t *out;
-            int out_size, hdr_bytes, hdr_bits;
             if (vidd_len < 8 + 12)
                 return AVERROR_INVALIDDATA;
             if (avio_read(pb, inner, 12) != 12)
@@ -1699,118 +1237,35 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
                 quant = 4;
             if (quant > 31)
                 quant = 31;
-            /* MB data starts immediately after inner (no skip/transform). */
+            /* MB data starts immediately after inner (no skip/transform).
+             * Extract it as-is, with an 8-byte metadata header the
+             * "f5vid_mpeg4" bitstream filter reads (see its header comment
+             * for the exact layout); this demuxer performs no bitstream
+             * conversion itself. */
             mb_size = vidd_len - 8 - 12;
-            mbdata = av_malloc(mb_size);
-            if (!mbdata)
+            raw = av_malloc(8 + mb_size);
+            if (!raw)
                 return AVERROR(ENOMEM);
-            if (avio_read(pb, mbdata, mb_size) != (int)mb_size) {
-                av_free(mbdata);
+            raw[0] = vop_type;
+            raw[1] = quant;
+            raw[2] = fwd;
+            raw[3] = rounding;
+            raw[4] = raw[5] = raw[6] = raw[7] = 0;
+            if (avio_read(pb, raw + 8, mb_size) != (int)mb_size) {
+                av_free(raw);
                 return AVERROR_EOF;
             }
 
-            /* I-frames: run the MB bit filter (drops F5's DC extra bits,
-             * resyncs past isolated bad bits, truncates on persistent
-             * failure) so the mpeg4 decoder gets a clean stream. P-frames:
-             * transcode MBs (motion remap to standard magnitude+sign+
-             * residual with fwd-1 residual bits) with the same resync. */
-            {
-                F5BitW fw = { NULL, 0, 0, 0, 0 };
-                int use_filtered = 0;
-                int mb_w = (s->streams[0]->codecpar->width + 15) / 16;
-                int mb_h = (s->streams[0]->codecpar->height + 15) / 16;
-                if (mb_w < 1)
-                    mb_w = 40;
-                if (mb_h < 1)
-                    mb_h = 30;
-                if (vop_type == 0) {
-                    f5_filter_iframe(mbdata, mb_size, mb_w, mb_h, &fw);
-                    use_filtered = 1;
-                } else {
-                    int reslen = fwd > 1 ? fwd - 1 : 0;
-                    f5_filter_pframe(mbdata, mb_size, mb_w, mb_h,
-                                     reslen, &fw);
-                    use_filtered = 1;
-                }
-                if (use_filtered) {
-                    /* Flush filtered bits to bytes and use them as MB data. */
-                    if (f5bw_flush(&fw) < 0) {
-                        av_free(mbdata);
-                        av_free(fw.buf);
-                        return AVERROR(ENOMEM);
-                    }
-                    av_free(mbdata);
-                    mbdata = fw.buf;
-                    mb_size = fw.len;
-                    fw.buf = NULL;
-                }
-            }
-
-            /* Build packet: VOP start + VOP header (bit-exact, then MB data
-             * follows at bit granularity). */
             /* Adopt the container clock whenever it does not move backwards
              * (it never does, once the P-VOP timestamp is unpacked correctly);
              * otherwise keep the synthesized one-frame advance. */
             if (frame_ts >= (uint32_t)m->video_dts)
                 m->video_dts = frame_ts;
-            if ((ret = f5vid_build_vop(&vw, vop_type, (uint32_t)m->video_dts,
-                                       F5VID_TINC_BITS,
-                                       quant, fwd, 2, rounding, &hdr_bits)) < 0) {
-                av_free(mbdata);
-                av_free(vw.buf);
-                return ret;
-            }
-            /* vw.buf: 4B start + header whole bytes (+ rem bits in cache). */
-            {
-                int hdr_full_bytes = hdr_bits / 8;
-                int hdr_rem_bits = hdr_bits % 8;
-                /* vw.buf currently: 4B start + hdr_full_bytes (+ rem in cache) */
-                hdr_bytes = 4 + hdr_full_bytes;
-                out_size = hdr_bytes + mb_size + 1;
-                out = av_malloc(out_size);
-                if (!out) {
-                    av_free(mbdata);
-                    av_free(vw.buf);
-                    return AVERROR(ENOMEM);
-                }
-                memcpy(out, vw.buf, hdr_bytes);
-                if (hdr_rem_bits) {
-                    /* bit-splice: remaining header bits then MB bits */
-                    int i;
-                    uint8_t *dst = out + hdr_bytes;
-                    int dst_size = mb_size + 1;
-                    uint32_t acc;
-                    int acc_bits, dst_len = 0;
-                    av_assert0(vw.nbits == hdr_rem_bits);
-                    acc = vw.nbits ? (vw.cache & ((1u << vw.nbits) - 1)) : 0;
-                    acc_bits = vw.nbits;
-                    for (i = 0; i < mb_size; i++) {
-                        acc = (acc << 8) | mbdata[i];
-                        acc_bits += 8;
-                        while (acc_bits >= 8) {
-                            acc_bits -= 8;
-                            if (dst_len < dst_size)
-                                dst[dst_len++] = (acc >> acc_bits) & 0xFF;
-                        }
-                    }
-                    if (acc_bits > 0 && dst_len < dst_size)
-                        dst[dst_len++] = (acc << (8 - acc_bits)) & 0xFF;
-                    out_size = hdr_bytes + dst_len;
-                } else {
-                    memcpy(out + hdr_bytes, mbdata, mb_size);
-                    out_size = hdr_bytes + mb_size;
-                }
-            }
-            av_free(mbdata);
-            av_free(vw.buf);
 
-            if ((ret = av_packet_from_data(pkt, out, out_size)) < 0) {
-                av_free(out);
+            if ((ret = av_packet_from_data(pkt, raw, 8 + mb_size)) < 0) {
+                av_free(raw);
                 return ret;
             }
-            /* Keyframe = I-VOP */
-            if (vop_type == 0)
-                pkt->flags |= AV_PKT_FLAG_KEY;
             pkt->stream_index = 0;
             /* File order is display order and, once the P-VOP timestamp is
              * unpacked from the right bit offset, the container clock is
@@ -1818,10 +1273,25 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
              * it, so frames the encoder spaced unevenly keep their real
              * timing; fall back to the synthesized clock if a file ever
              * disagrees. (m->video_dts was already advanced to frame_ts
-             * above so the VOP header and the packet carry the same clock.) */
+             * above so the packet the filter sees carries the same clock.) */
             pkt->pts = pkt->dts = m->video_dts;
             pkt->duration = 2002;
+            if (vop_type == 0)
+                pkt->flags |= AV_PKT_FLAG_KEY;
             m->video_dts += 2002;
+
+            /* Drive the raw packet through the f5vid_mpeg4 bsf and hand the
+             * caller the clean MPEG-4 VOP packet it produces. */
+            if ((ret = av_bsf_send_packet(m->bsf, pkt)) < 0)
+                return ret;
+            ret = av_bsf_receive_packet(m->bsf, pkt);
+            if (ret == AVERROR(EAGAIN)) {
+                /* The filter is 1-in/1-out; this should not happen, but
+                 * fail closed rather than return an empty packet. */
+                return AVERROR_EXTERNAL;
+            }
+            if (ret < 0)
+                return ret;
         }
 
         /* AUDD (audio tail served on the next call) */
@@ -1830,11 +1300,20 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
         {
             uint32_t audd_len = avio_rb32(pb);
             uint8_t inner[8];
+            uint32_t real_size;
             if (audd_len < 8 + 8)
                 return AVERROR_INVALIDDATA;
             if (avio_read(pb, inner, 8) != 8)
                 return AVERROR_EOF;
-            m->audio_size = audd_len - 8 - 8;
+            /* inner: u32 0 | u32 real payload size. This is the size the
+             * game itself uses (see FUN_800e5e2c in the game binary): using
+             * audd_len-16 instead overcounts by up to one 8-byte DSP-ADPCM
+             * frame per channel (trailing pad bytes), corrupting predictor
+             * state at every block boundary. */
+            real_size = AV_RB32(inner + 4);
+            if (real_size > audd_len - 16)
+                real_size = audd_len - 16;
+            m->audio_size = real_size;
         }
         m->next_fram_pos = fram_end;
         m->handle_audio_packet = (m->audio_size > 0);
@@ -1856,6 +1335,7 @@ static int f5vid_read_close(AVFormatContext *s)
     }
     av_freep(&m->index);
     m->nb_index = 0;
+    av_bsf_free(&m->bsf);
     return 0;
 }
 
@@ -1864,6 +1344,7 @@ const FFInputFormat ff_f5vid_demuxer = {
     .p.long_name      = "Factor 5 DivX .vid (Carmen Sandiego GC)",
     .p.extensions     = "vid",
     .p.flags          = AVFMT_GENERIC_INDEX,
+    .flags_internal   = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe       = f5vid_probe,
     .read_header      = f5vid_read_header,
     .read_packet      = f5vid_read_packet,
