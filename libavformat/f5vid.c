@@ -11,13 +11,29 @@
  *                         | u32 max_FRAM_len | u32 fps_num | u16 fps_den | u16 0
  *       e.g. 640x480 display, 2997/100 (29.97 fps). The coded video is the
  *       full VIDH size (640x480 MPEG-4 ASP, DivX 5.02, 40x30 MBs).
-  *     AUDH payload (88B): u32 0 | "APCM" | u32 rate_BE (32000)
-  *                         | u16 channels_LE (2) | DSP-ADPCM coef table
-  *                         (32 bytes/channel: 16 BE int16 coefficients,
-  *                         channel-major) | remaining footer bytes.
-  *       Confirmed against the sibling VID1 container's identical APCM
-  *       layout (see niemasd/VID1-Preservation and librempeg's vid1.c,
-  *       which read this same table at this same offset).
+  *     AUDH payload: u32 0 | 4-byte codec tag | u32 rate_BE | u16 channels_LE
+  *                   (+1 pad byte, 14 bytes total) | codec-specific data.
+  *       The codec tag scheme (and header layout) is shared with the
+  *       sibling VID1 container's AUDH chunk (see niemasd/VID1-Preservation
+  *       and librempeg's vid1.c, which recognize the same four tags):
+  *         "APCM" - DSP-ADPCM (THP-compatible). VERIFIED: reverse-engineered
+  *           against the game binary (Ghidra, FUN_800e65f4/FUN_800e5e2c) and
+  *           audio-tested against a real sample file. Header is followed by
+  *           a DSP-ADPCM coef table (32 bytes/channel: 16 BE int16
+  *           coefficients, channel-major), exposed as codecpar extradata.
+  *         "PC16" - raw PCM_S16LE. SPECULATIVE: ported from vid1.c's PC16
+  *           handling; no PC16 sample .vid exists in this repo to confirm.
+  *         "XAPM" - ADPCM_IMA_XBOX. SPECULATIVE: ported from vid1.c's XAPM
+  *           handling; no XAPM sample .vid exists in this repo to confirm.
+  *         "VAUD" - Vorbis. SPECULATIVE: ported from vid1.c's VAUD handling,
+  *           which builds xiph-laced extradata (ident/comment/setup packets)
+  *           from bit-packed packet-length headers; no VAUD sample .vid
+  *           exists in this repo to confirm the byte layout or per-AUDD
+  *           packet framing (this demuxer's Vorbis path packetizes one
+  *           Vorbis packet per FRAM/AUDD, a simplification vs. vid1.c's
+  *           general multi-packet framing, since no sample exists to prove
+  *           multiple Vorbis packets ever appear in one AUDD chunk here).
+  *       Do not change the APCM path above; it is proven correct.
  *   FRAM len variable: 8-byte header + 24 bytes zeros, then VIDD + AUDD.
  *     VIDD: 8-byte header + 12-byte inner header + DivX video MB data.
  *       inner: 00 00 00 00 | 00 01 code sub | 32-bit timestamp (30000 Hz,
@@ -91,6 +107,9 @@
 #include "libavutil/avassert.h"
 #include "libavutil/mem.h"
 #include "libavcodec/bsf.h"
+#include "libavcodec/bytestream.h"
+#define BITSTREAM_READER_LE
+#include "libavcodec/get_bits.h"
 #include "config_components.h"
 #include "demux.h"
 #include "internal.h"
@@ -804,6 +823,57 @@ static int f5vid_probe(const AVProbeData *p)
     return AVPROBE_SCORE_MAX;
 }
 
+/* ---- VAUD (Vorbis) header helpers ----
+ * SPECULATIVE / UNVERIFIED (no VAUD sample .vid exists in this repo).
+ * Ported from librempeg's vid1.c get_packet_header/load_header_packet,
+ * which read a bit-packed "4-bit size_bits, then (size_bits+1)-bit size"
+ * length prefix ahead of each raw Vorbis packet. Byte-aligned afterwards. */
+static int f5vid_get_packet_header(AVIOContext *pb, int64_t *offset, int *size)
+{
+    GetBitContext gb;
+    uint8_t ibuf[4] = { 0 };
+    uint32_t size_bits;
+    int ret;
+
+    if (avio_feof(pb))
+        return AVERROR_EOF;
+
+    avio_seek(pb, offset[0], SEEK_SET);
+    if (avio_read(pb, ibuf, 4) != 4)
+        return AVERROR_INVALIDDATA;
+
+    ret = init_get_bits8(&gb, ibuf, 4);
+    if (ret < 0)
+        return ret;
+
+    size_bits = get_bits(&gb, 4);
+    size[0] = get_bits_long(&gb, size_bits + 1);
+
+    if (size_bits == 0 && size[0] == 0 && ibuf[0] == 128)
+        size[0] = 1;
+
+    offset[0] += (get_bits_count(&gb) + 7) / 8;
+
+    return 0;
+}
+
+static int f5vid_load_header_packet(AVIOContext *pb, AVCodecParameters *par,
+                                     int packet_size, int64_t *p_offset,
+                                     int *e_offset)
+{
+    if (packet_size < 0 || packet_size + e_offset[0] > par->extradata_size)
+        return AVERROR_INVALIDDATA;
+
+    avio_seek(pb, p_offset[0], SEEK_SET);
+    if (avio_read(pb, par->extradata + e_offset[0], packet_size) != packet_size)
+        return AVERROR_INVALIDDATA;
+
+    p_offset[0] += packet_size;
+    e_offset[0] += packet_size;
+
+    return 0;
+}
+
 static int f5vid_read_header(AVFormatContext *s)
 {
     F5VIDDemuxContext *m = s->priv_data;
@@ -823,10 +893,9 @@ static int f5vid_read_header(AVFormatContext *s)
     if (!ast)
         return AVERROR(ENOMEM);
     ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-    /* APCM is DSP-ADPCM (8-byte frames: predictor/scale + 14 nibbles,
-     * THP-compatible framing). The per-file coef table (read from AUDH
-     * below) is exposed as codecpar extradata. */
-    ast->codecpar->codec_id = AV_CODEC_ID_ADPCM_THP;
+    /* codec_id is set below from the AUDH codec tag (APCM/PC16/XAPM/VAUD);
+     * only APCM (DSP-ADPCM, THP-compatible) is verified against a real
+     * file, see the top-of-file container doc comment. */
 
     /* VID1 */
     if (avio_rb32(pb) != MKBETAG('V','I','D','1'))
@@ -908,11 +977,9 @@ static int f5vid_read_header(AVFormatContext *s)
         return AVERROR_INVALIDDATA;
     if (avio_read(pb, audh, 14) != 14)
         return AVERROR_EOF;
-    /* audh layout: u32 0 | "APCM" | u32 rate_BE | u16 channels, then the
-     * coef table immediately follows (see below) */
-    if (AV_RB32(audh + 4) != MKBETAG('A','P','C','M'))
-        av_log(s, AV_LOG_WARNING, "f5vid: unexpected audio tag %08X\n",
-               AV_RB32(audh + 4));
+    /* audh layout: u32 0 | 4-byte codec tag | u32 rate_BE | u16 channels_LE
+     * (+1 pad byte, 14 bytes total); what follows depends on the tag (see
+     * the top-of-file container doc comment). */
     ast->codecpar->sample_rate = AV_RB32(audh + 8);
     if (!ast->codecpar->sample_rate)
         ast->codecpar->sample_rate = 32000;
@@ -923,30 +990,157 @@ static int f5vid_read_header(AVFormatContext *s)
             ast->codecpar->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
         else
             ast->codecpar->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
-        ast->codecpar->block_align = 8; /* one DSP-ADPCM frame */
     }
-    /* DSP-ADPCM coef table: 16 BE int16 coefficient pairs per channel
-     * (32 bytes/channel), channel-major, immediately following the header
-     * we just read. Confirmed against the sibling VID1 container format
-     * (same APCM layout) rather than being unknown filler. */
+
     {
-        int nch = ast->codecpar->ch_layout.nb_channels;
-        int tab_size;
-        uint8_t *tab;
-        if (nch != 1 && nch != 2)
-            nch = 2;
-        tab_size = 32 * nch;
-        tab = av_malloc(tab_size);
-        if (!tab)
-            return AVERROR(ENOMEM);
-        if (avio_read(pb, tab, tab_size) != tab_size) {
-            av_free(tab);
-            return AVERROR_EOF;
+        uint32_t audio_tag = AV_RB32(audh + 4);
+        int64_t audh_hdr_start = avio_tell(pb) - 14; /* start of the 14-byte header we just read */
+
+        switch (audio_tag) {
+        case MKBETAG('A','P','C','M'):
+            /* DSP-ADPCM (THP-compatible 8-byte frames: predictor/scale +
+             * 14 nibbles). VERIFIED: reverse-engineered against the game
+             * binary (Ghidra, FUN_800e65f4/FUN_800e5e2c) and audio-tested
+             * against a real sample file. Do not change this path. */
+            ast->codecpar->codec_id = AV_CODEC_ID_ADPCM_THP;
+            ast->codecpar->block_align = 8; /* one DSP-ADPCM frame */
+            /* DSP-ADPCM coef table: 16 BE int16 coefficient pairs per
+             * channel (32 bytes/channel), channel-major, immediately
+             * following the header we just read. Confirmed against the
+             * sibling VID1 container format (same APCM layout). */
+            {
+                int nch = ast->codecpar->ch_layout.nb_channels;
+                int tab_size;
+                uint8_t *tab;
+                if (nch != 1 && nch != 2)
+                    nch = 2;
+                tab_size = 32 * nch;
+                tab = av_malloc(tab_size);
+                if (!tab)
+                    return AVERROR(ENOMEM);
+                if (avio_read(pb, tab, tab_size) != tab_size) {
+                    av_free(tab);
+                    return AVERROR_EOF;
+                }
+                ast->codecpar->extradata = tab;
+                ast->codecpar->extradata_size = tab_size;
+                if (audh_len > 8 + 14 + tab_size)
+                    avio_skip(pb, audh_len - 8 - 14 - tab_size);
+            }
+            break;
+
+        case MKBETAG('P','C','1','6'):
+            /* SPECULATIVE / UNVERIFIED: raw PCM_S16LE, ported from the
+             * sibling VID1 container's AUDH "PC16" handling (librempeg's
+             * vid1.c). No PC16 sample .vid exists in this repo to confirm
+             * byte order or block framing against a real file. */
+            ast->codecpar->codec_id = AV_CODEC_ID_PCM_S16LE;
+            ast->codecpar->block_align = 2 * ast->codecpar->ch_layout.nb_channels;
+            if (audh_len > 8 + 14)
+                avio_skip(pb, audh_len - 8 - 14);
+            break;
+
+        case MKBETAG('X','A','P','M'):
+            /* SPECULATIVE / UNVERIFIED: ADPCM_IMA_XBOX, ported from
+             * vid1.c's "XAPM" handling. No XAPM sample .vid exists in this
+             * repo to confirm block framing against a real file. */
+            ast->codecpar->codec_id = AV_CODEC_ID_ADPCM_IMA_XBOX;
+            if (audh_len > 8 + 14)
+                avio_skip(pb, audh_len - 8 - 14);
+            break;
+
+        case MKBETAG('V','A','U','D'): {
+            /* SPECULATIVE / UNVERIFIED: Vorbis, ported from vid1.c's
+             * "VAUD" handling, which builds 3-segment xiph-laced extradata
+             * (ident/comment/setup packets) from bit-packed packet-length
+             * headers read from the file. vid1.c reads a "duration" u32 at
+             * (header_start + 32), where header_start is where it began
+             * reading codec/rate/channels (9 bytes there, vs our 14-byte
+             * header); that fixed +32 offset is mirrored here relative to
+             * our own header start, but has not been confirmed against any
+             * real VAUD .vid file. */
+            int ret2;
+            int64_t off;
+            int packet_size = 0, eoffset = 0;
+            uint8_t *buf;
+
+            ast->codecpar->codec_id = AV_CODEC_ID_VORBIS;
+
+            if (avio_seek(pb, audh_hdr_start + 32, SEEK_SET) < 0)
+                return AVERROR_INVALIDDATA;
+            ast->duration = avio_rb32(pb);
+            off = avio_tell(pb);
+
+            if ((ret2 = ff_alloc_extradata(ast->codecpar, 16384)) < 0)
+                return ret2;
+            memset(ast->codecpar->extradata, 0, ast->codecpar->extradata_size);
+
+            if ((ret2 = f5vid_get_packet_header(pb, &off, &packet_size)) < 0)
+                return ret2;
+            AV_WB16(ast->codecpar->extradata + eoffset, packet_size);
+            eoffset += 2;
+            if ((ret2 = f5vid_load_header_packet(pb, ast->codecpar, packet_size,
+                                                  &off, &eoffset)) < 0)
+                return ret2;
+
+            AV_WB16(ast->codecpar->extradata + eoffset, 0x19);
+            eoffset += 2;
+            buf = ast->codecpar->extradata + eoffset;
+            bytestream_put_byte(&buf, 0x03);
+            bytestream_put_buffer(&buf, "vorbis", 6);
+            bytestream_put_le32(&buf, 9);
+            bytestream_put_buffer(&buf, "ff_f5vid1", 9);
+            bytestream_put_le32(&buf, 0);
+            bytestream_put_byte(&buf, 1);
+            eoffset += 0x19;
+
+            if ((ret2 = f5vid_get_packet_header(pb, &off, &packet_size)) < 0)
+                return ret2;
+            AV_WB16(ast->codecpar->extradata + eoffset, packet_size);
+            eoffset += 2;
+            if ((ret2 = f5vid_load_header_packet(pb, ast->codecpar, packet_size,
+                                                  &off, &eoffset)) < 0)
+                return ret2;
+
+            ast->codecpar->extradata_size = eoffset;
+
+            /* Restore the stream position to right after our 14-byte AUDH
+             * header (as the other branches leave it) before the common
+             * trailing-padding logic below runs. */
+            if (avio_seek(pb, audh_hdr_start + 14, SEEK_SET) < 0)
+                return AVERROR_INVALIDDATA;
+            if (audh_len > 8 + 14)
+                avio_skip(pb, audh_len - 8 - 14);
+            break;
         }
-        ast->codecpar->extradata = tab;
-        ast->codecpar->extradata_size = tab_size;
-        if (audh_len > 8 + 14 + tab_size)
-            avio_skip(pb, audh_len - 8 - 14 - tab_size);
+
+        default:
+            av_log(s, AV_LOG_WARNING,
+                   "f5vid: unrecognized audio codec tag %08X, assuming APCM\n",
+                   audio_tag);
+            ast->codecpar->codec_id = AV_CODEC_ID_ADPCM_THP;
+            ast->codecpar->block_align = 8;
+            {
+                int nch = ast->codecpar->ch_layout.nb_channels;
+                int tab_size;
+                uint8_t *tab;
+                if (nch != 1 && nch != 2)
+                    nch = 2;
+                tab_size = 32 * nch;
+                tab = av_malloc(tab_size);
+                if (!tab)
+                    return AVERROR(ENOMEM);
+                if (avio_read(pb, tab, tab_size) != tab_size) {
+                    av_free(tab);
+                    return AVERROR_EOF;
+                }
+                ast->codecpar->extradata = tab;
+                ast->codecpar->extradata_size = tab_size;
+                if (audh_len > 8 + 14 + tab_size)
+                    avio_skip(pb, audh_len - 8 - 14 - tab_size);
+            }
+            break;
+        }
     }
     /* HEAD trailing padding */
     {
@@ -1115,6 +1309,63 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
     F5VIDDemuxContext *m = s->priv_data;
     AVIOContext *pb = s->pb;
     int ret;
+
+    if (m->handle_audio_packet &&
+        s->streams[1]->codecpar->codec_id != AV_CODEC_ID_ADPCM_THP) {
+        /* SPECULATIVE / UNVERIFIED simple pass-through path for PC16
+         * (PCM_S16LE), XAPM (ADPCM_IMA_XBOX) and VAUD (Vorbis). These
+         * codecs don't need the F5-specific 8-byte-DSP-frame channel-
+         * planar split the APCM path below performs; that logic is
+         * APCM-specific and must stay gated to it (see the comment there).
+         * For Vorbis, this demuxer packetizes the AUDD payload as a single
+         * Vorbis packet per FRAM (a simplification vs. vid1.c's general
+         * multi-packet-per-AUDD framing; unconfirmed, no sample file). For
+         * PCM/IMA-XBOX ADPCM the AUDD payload is emitted verbatim as one
+         * packet, byte-identical to the source file. */
+        uint8_t *raw;
+        AVCodecParameters *acp = s->streams[1]->codecpar;
+        int ch = acp->ch_layout.nb_channels;
+        uint32_t nsamp;
+
+        if (m->audio_size == 0) {
+            avio_seek(pb, m->next_fram_pos, SEEK_SET);
+            m->handle_audio_packet = 0;
+            return FFERROR_REDO;
+        }
+        raw = av_malloc(m->audio_size);
+        if (!raw)
+            return AVERROR(ENOMEM);
+        ret = avio_read(pb, raw, m->audio_size);
+        if (ret < (int)m->audio_size) {
+            av_free(raw);
+            return ret < 0 ? ret : AVERROR_EOF;
+        }
+        if (acp->codec_id == AV_CODEC_ID_PCM_S16LE) {
+            nsamp = ch > 0 ? m->audio_size / (2 * ch) : 0;
+        } else if (acp->codec_id == AV_CODEC_ID_ADPCM_IMA_XBOX) {
+            /* IMA-XBOX ADPCM: 4-byte block header + nibbles per channel;
+             * sample count is left to the decoder/parser, advance pts by
+             * a nominal duration (unverified). */
+            nsamp = m->audio_size; /* placeholder: 1 "sample" per byte */
+        } else {
+            /* Vorbis: sample count is decoder-derived; advance pts by a
+             * nominal duration since no sample file exists to derive the
+             * real per-packet sample count here. */
+            nsamp = 0;
+        }
+        if ((ret = av_packet_from_data(pkt, raw, m->audio_size)) < 0) {
+            av_free(raw);
+            return ret;
+        }
+        pkt->stream_index = 1;
+        pkt->pts = pkt->dts = m->audio_sample_pos;
+        pkt->duration = nsamp;
+        pkt->flags |= AV_PKT_FLAG_KEY;
+        m->audio_sample_pos += nsamp;
+        avio_seek(pb, m->next_fram_pos, SEEK_SET);
+        m->handle_audio_packet = 0;
+        return ret;
+    }
 
     if (m->handle_audio_packet) {
         /* Audio tail of the current FRAM: AUDD payload after its 8-byte
