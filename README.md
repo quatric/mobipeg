@@ -54,6 +54,7 @@ such as audio, video, subtitles and related metadata.
 | BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
 | BWAV | `.bwav` | Nintendo Switch (AAL) | ✅ | ✅ |
 | DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
+| Monster Games SFX0 | `.sfx`, `.sf0` | GameCube / Wii | ❌ | ✅ |
 | RWAV | `.brwav`, `.rwav` | Nintendo Wii | ✅ | ✅ |
 | Wii Photo Channel AAC | `.m4a` | Wii | ✅ | ✅ |
 | Nintendo 3DS Sound AAC | `.m4a` | Nintendo 3DS | ✅ | ✅ |

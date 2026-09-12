@@ -466,6 +466,7 @@ OBJS-$(CONFIG_MSP_DEMUXER)               += mspdec.o
 OBJS-$(CONFIG_MTAF_DEMUXER)              += mtaf.o
 OBJS-$(CONFIG_MTV_DEMUXER)               += mtv.o
 OBJS-$(CONFIG_MUSX_DEMUXER)              += musx.o
+OBJS-$(CONFIG_SFX0_MONSTER_DEMUXER)      += sfx0_monster.o
 OBJS-$(CONFIG_MV_DEMUXER)                += mvdec.o
 OBJS-$(CONFIG_MVI_DEMUXER)               += mvi.o
 OBJS-$(CONFIG_MVR_DEMUXER)               += mvrdec.o
