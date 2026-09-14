@@ -2,8 +2,12 @@ Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
 version 2.2:
-- Added Sentry Native SDK crash reporting to the GUI and fftools
+- GameCube Factor 5 DivX (.vid) demuxer, muxer, and f5vid_mpeg4 bitstream filter
 - Super MOFLEX demuxing, muxing, and tooling support
+- Namco Universal Sound 3 (NUS3BANK / NUS3AUDIO) demuxer and muxer
+- HAL Laboratory HPS GameCube audio demuxer
+- Level-5 SADL Nintendo DS audio demuxer
+- Added Sentry Native SDK crash reporting to the GUI and fftools
 - ffmpeg_mux_init: default to high quality MPEG-4 (-q:v 3) when decoding video
 - macOS: package GUI app zip with ditto
 - CI: fixed sentry-native cross-compilation and static linking across Windows targets
