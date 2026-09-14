@@ -242,6 +242,9 @@ def input_fmt(path):
     if ext == ".h4m":
         # Hudson Soft HVQM4 (.h4m) GameCube/Wii FMV.
         return ["-f", "hvqm4"]
+    if ext == ".vid":
+        # GameCube Factor 5 DivX (.vid) VID1 container.
+        return ["-f", "vid1"]
     return []
 
 
@@ -516,7 +519,7 @@ def package_cia(parsed):
 
 def main():
     parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)")
+    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)")
     parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
     parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
     parser.add_argument("input2", nargs="?", default="", help="Second input file (right eye for moflex3d / 3ds_camera3d). moflex3d: omit this to auto-split a single packed stereoscopic source (e.g. a BD3D MKV with StereoMode set) using --stereo or its detected layout.")
@@ -747,13 +750,17 @@ def main():
         # any) is adpcm_ima_moflex, muxed directly rather than through the
         # mobiclip -mo_audio path, so moaud stays 0.
         mode, dmx, scale, moaud, cvc = "vid", "fv", "256:192", 0, "fastvideo"
+    elif fmt in ("factor5", "vid1"):
+        # GameCube Factor 5 DivX (.vid / VID1 container): DivX-compatible
+        # MPEG-4 Part 2 ASP video with optional 16-bit PCM audio.
+        mode, dmx, scale, moaud, cvc = "vid", "vid1", "640:480", 0, "mpeg4"
     elif fmt in AUDIO_FORMATS:
         # Audio-only containers: no video stream, so none of the scaling,
         # keyframe or frame-rate machinery below applies.
         mode, dmx, scale, moaud, cvc = "aud", fmt, "", 0, ""
     else:
         print(f"unknown format '{fmt}' "
-              f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|"
+              f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|"
               f"{'|'.join(AUDIO_FORMATS)})")
         sys.exit(2)
 
@@ -1113,7 +1120,8 @@ def main():
     out_ext = {"hvqm4": "h4m", "fastvideo": "fv",
                "gba_ads": "mmstr", "gba_hydrogen": "mmstr",
                "wii_photo": "avi", "nintendo_channel": "3gp",
-               "3ds_camera": "avi", "smoflex": "moflex",
+               "3ds_camera": "avi", "factor5": "vid",
+               "smoflex": "moflex",
                "super_moflex": "moflex", "smoflex3d": "moflex",
                "super_moflex3d": "moflex"}.get(fmt, fmt)
     container = f"{stem}.{out_ext}"
@@ -1293,6 +1301,21 @@ def main():
             enc_opts.extend(["-c:a", "adpcm_ima_moflex"])
             if audio_rate > 0:
                 enc_opts.extend(["-ar", str(audio_rate)])
+    elif fmt in ("factor5", "vid1"):
+        # GameCube Factor 5 DivX: MPEG-4 ASP video.
+        enc_opts.extend(["-vtag", "DIVX", "-pix_fmt", "yuv420p"])
+        if vx_quant > 0:
+            enc_opts.extend(["-qscale:v", str(vx_quant)])
+        elif mobi_bitrate:
+            enc_opts.extend(["-b:v", mobi_bitrate])
+        else:
+            enc_opts.extend(["-qscale:v", "3"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "pcm_s16be"])
+            if audio_rate > 0:
+                enc_opts.extend(["-ar", str(audio_rate)])
     elif fmt in ("gba_ads", "gba_hydrogen"):
         # GBA audio remains decode-only. The encoder writes a video-only
         # .mmstr and selects the compressor used by the requested lineage.
@@ -1347,6 +1370,8 @@ def main():
         fps_filter = "fps=15"
     elif fmt == "nintendo_channel":
         fps_filter = "fps=25"
+    elif fmt in ("factor5", "vid1"):
+        fps_filter = "fps=30000/1001"
         
     filters = []
     if scale:
