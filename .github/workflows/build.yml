@@ -332,19 +332,19 @@ jobs:
           cmake --install build
 
           mkdir -p "$DEPS/lib/pkgconfig"
-          cat << 'EOF' > "$DEPS/lib/pkgconfig/sentry.pc"
-prefix=${pcfiledir}/../..
-exec_prefix=${prefix}
-libdir=${prefix}/lib
-includedir=${prefix}/include
-
-Name: sentry
-Description: Sentry SDK for C/C++
-Version: 0.16.5
-Libs: -L${libdir} -lsentry
-Libs.private: -lunwind -ldl -lrt -lpthread -lm
-Cflags: -I${includedir}
-EOF
+          printf '%s\n' \
+            'prefix=${pcfiledir}/../..' \
+            'exec_prefix=${prefix}' \
+            'libdir=${prefix}/lib' \
+            'includedir=${prefix}/include' \
+            '' \
+            'Name: sentry' \
+            'Description: Sentry SDK for C/C++' \
+            'Version: 0.16.5' \
+            'Libs: -L${libdir} -lsentry' \
+            'Libs.private: -lunwind -ldl -lrt -lpthread -lm' \
+            'Cflags: -I${includedir}' \
+            > "$DEPS/lib/pkgconfig/sentry.pc"
 
       - name: Build x264
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -674,19 +674,19 @@ EOF
           cd ..
 
           mkdir -p "$DEPS/lib/pkgconfig"
-          cat << 'EOF' > "$DEPS/lib/pkgconfig/sentry.pc"
-prefix=${pcfiledir}/../..
-exec_prefix=${prefix}
-libdir=${prefix}/lib
-includedir=${prefix}/include
-
-Name: sentry
-Description: Sentry SDK for C/C++
-Version: 0.16.5
-Libs: -L${libdir} -lsentry
-Libs.private: -ldbghelp -lshlwapi -lversion
-Cflags: -I${includedir}
-EOF
+          printf '%s\n' \
+            'prefix=${pcfiledir}/../..' \
+            'exec_prefix=${prefix}' \
+            'libdir=${prefix}/lib' \
+            'includedir=${prefix}/include' \
+            '' \
+            'Name: sentry' \
+            'Description: Sentry SDK for C/C++' \
+            'Version: 0.16.5' \
+            'Libs: -L${libdir} -lsentry' \
+            'Libs.private: -ldbghelp -lshlwapi -lversion' \
+            'Cflags: -I${includedir}' \
+            > "$DEPS/lib/pkgconfig/sentry.pc"
 
       - name: Create cross pkg-config shim
         run: |
@@ -868,19 +868,19 @@ EOF
             cd ..
 
             mkdir -p "$PREFIX/lib/pkgconfig"
-            cat << 'EOF' > "$PREFIX/lib/pkgconfig/sentry.pc"
-prefix=${pcfiledir}/../..
-exec_prefix=${prefix}
-libdir=${prefix}/lib
-includedir=${prefix}/include
-
-Name: sentry
-Description: Sentry SDK for C/C++
-Version: 0.16.5
-Libs: -L${libdir} -lsentry
-Libs.private: -lpthread
-Cflags: -I${includedir}
-EOF
+            printf '%s\n' \
+              'prefix=${pcfiledir}/../..' \
+              'exec_prefix=${prefix}' \
+              'libdir=${prefix}/lib' \
+              'includedir=${prefix}/include' \
+              '' \
+              'Name: sentry' \
+              'Description: Sentry SDK for C/C++' \
+              'Version: 0.16.5' \
+              'Libs: -L${libdir} -lsentry' \
+              'Libs.private: -lpthread' \
+              'Cflags: -I${includedir}' \
+              > "$PREFIX/lib/pkgconfig/sentry.pc"
 
             # x264
             [ ! -d x264-$ARCH ] && git clone --depth=1 https://github.com/quatric/x264.git x264-$ARCH
