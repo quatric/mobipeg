@@ -15,7 +15,8 @@ import threading
 import os
 import sys
 
-ENCODE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode.py")
+_script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+ENCODE_SCRIPT = os.path.join(_script_dir, "encode.py")
 
 
 # One source of truth for what the decoder accepts: (family, extensions).
@@ -113,8 +114,10 @@ class EncodeGUI(tk.Tk):
         try:
             if hasattr(sys, '_MEIPASS'):
                 base_path = sys._MEIPASS
-            else:
+            elif '__file__' in globals():
                 base_path = os.path.dirname(os.path.abspath(__file__))
+            else:
+                base_path = os.getcwd()
             if sys.platform != 'darwin':
                 icon_path = os.path.join(base_path, "logo.png")
                 if os.path.exists(icon_path):
