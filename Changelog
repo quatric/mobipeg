@@ -1,6 +1,14 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 2.2:
+- Added Sentry Native SDK crash reporting to the GUI and fftools
+- Super MOFLEX demuxing, muxing, and tooling support
+- ffmpeg_mux_init: default to high quality MPEG-4 (-q:v 3) when decoding video
+- macOS: package GUI app zip with ditto
+- CI: fixed sentry-native cross-compilation and static linking across Windows targets
+
+
 version 2.1:
 - Rebased onto latest upstream FFmpeg master
 - RWAV/BRWAV, FWAV/BFWAV, and CWAV/BCWAV demuxers and muxers with DSP-ADPCM and planar PCM support
