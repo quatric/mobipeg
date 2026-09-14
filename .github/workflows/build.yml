@@ -507,7 +507,7 @@ jobs:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # Match the Linux cache marker: these artifacts need an x264 build
           # with platform assembly enabled, not the older scalar-only build.
-          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-v4-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-v5-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -655,6 +655,12 @@ jobs:
           curl -fsSL --retry 5 --retry-connrefused -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
           unzip -q sentry-native.zip -d sentry-native-src
           cd sentry-native-src
+          # Work around a sentry-native bug: on 32-bit non-clang MinGW, UNSIGNED_MINGW
+          # expands to "unsigned", producing the illegal "unsigned DWORD" (DWORD is
+          # already unsigned long) in SENTRY_THREAD_FN, which fails to parse.
+          if [ "${{ matrix.target }}" = "windows-x86" ]; then
+            sed -i 's/#    define UNSIGNED_MINGW unsigned/#    define UNSIGNED_MINGW/' src/sentry_sync.h
+          fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_SYSTEM_NAME=Windows \
