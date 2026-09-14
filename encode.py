@@ -243,8 +243,8 @@ def input_fmt(path):
         # Hudson Soft HVQM4 (.h4m) GameCube/Wii FMV.
         return ["-f", "hvqm4"]
     if ext == ".vid":
-        # GameCube Factor 5 DivX (.vid) VID1 container.
-        return ["-f", "vid1"]
+        # GameCube Factor 5 DivX (.vid) container.
+        return ["-f", "f5vid"]
     return []
 
 
@@ -750,10 +750,10 @@ def main():
         # any) is adpcm_ima_moflex, muxed directly rather than through the
         # mobiclip -mo_audio path, so moaud stays 0.
         mode, dmx, scale, moaud, cvc = "vid", "fv", "256:192", 0, "fastvideo"
-    elif fmt in ("factor5", "vid1"):
-        # GameCube Factor 5 DivX (.vid / VID1 container): DivX-compatible
-        # MPEG-4 Part 2 ASP video with optional 16-bit PCM audio.
-        mode, dmx, scale, moaud, cvc = "vid", "vid1", "640:480", 0, "mpeg4"
+    elif fmt in ("factor5", "f5vid"):
+        # GameCube Factor 5 DivX (.vid / f5vid container): DivX-compatible
+        # MPEG-4 Part 2 ASP video with optional DSP-ADPCM (adpcm_thp) audio.
+        mode, dmx, scale, moaud, cvc = "vid", "f5vid", "640:480", 0, "mpeg4"
     elif fmt in AUDIO_FORMATS:
         # Audio-only containers: no video stream, so none of the scaling,
         # keyframe or frame-rate machinery below applies.
@@ -1301,9 +1301,9 @@ def main():
             enc_opts.extend(["-c:a", "adpcm_ima_moflex"])
             if audio_rate > 0:
                 enc_opts.extend(["-ar", str(audio_rate)])
-    elif fmt in ("factor5", "vid1"):
-        # GameCube Factor 5 DivX: MPEG-4 ASP video.
-        enc_opts.extend(["-vtag", "DIVX", "-pix_fmt", "yuv420p"])
+    elif fmt in ("factor5", "f5vid"):
+        # GameCube Factor 5 DivX: MPEG-4 ASP video + DSP-ADPCM audio.
+        enc_opts.extend(["-vtag", "DIVX", "-pix_fmt", "yuv420p", "-bf", "0"])
         if vx_quant > 0:
             enc_opts.extend(["-qscale:v", str(vx_quant)])
         elif mobi_bitrate:
@@ -1313,7 +1313,7 @@ def main():
         if audio == "none":
             enc_opts.append("-an")
         else:
-            enc_opts.extend(["-c:a", "pcm_s16be"])
+            enc_opts.extend(["-c:a", "adpcm_thp"])
             if audio_rate > 0:
                 enc_opts.extend(["-ar", str(audio_rate)])
     elif fmt in ("gba_ads", "gba_hydrogen"):
@@ -1370,7 +1370,7 @@ def main():
         fps_filter = "fps=15"
     elif fmt == "nintendo_channel":
         fps_filter = "fps=25"
-    elif fmt in ("factor5", "vid1"):
+    elif fmt in ("factor5", "f5vid"):
         fps_filter = "fps=30000/1001"
         
     filters = []

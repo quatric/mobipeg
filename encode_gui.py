@@ -231,7 +231,7 @@ class EncodeGUI(tk.Tk):
             "rvid":     ["pcm", "none"],
             # hvqm4 has no audio support yet -- video only.
             "hvqm4":    ["none"],
-            "factor5":  ["pcm", "none"],
+            "factor5":  ["adpcm", "none"],
             "fastvideo": ["adpcm", "none"],
             "dpg":      ["mp2", "none"],
             # Audio-only formats: the choice is which of the container's own
