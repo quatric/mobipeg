@@ -17,6 +17,7 @@ such as audio, video, subtitles and related metadata.
 |--------|-----------|----------|--------|--------|
 | BPK1 | `.bpk`, `.bpk1`, `.apd` | Nintendo 3DS Swapdoodle / Swapnote | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
+| Factor 5 DivX | `.vid` | GameCube (Factor 5) | ✅ | ✅ |
 | FastVideo DS | `.fv` | Nintendo DS | ✅ | ✅ |
 | Flipnote Studio | `.ppm` | Nintendo DS / DSi | — | ✅ |
 | Flipnote Studio 3D | `.kwz` | Nintendo 3DS | — | ✅ |
@@ -33,6 +34,7 @@ such as audio, video, subtitles and related metadata.
 | MODS | `.mods` | Nintendo DS | ✅ | ✅ |
 | MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
 | MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
+| Super MOFLEX | `.moflex` | Nintendo 3DS | ✅ | ✅ |
 | RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
 | THP | `.thp` | GameCube / Wii | ✅ | ✅ |
 | Wii Photo Channel | `.avi` | Wii | ✅ | ✅ |
@@ -52,7 +54,10 @@ such as audio, video, subtitles and related metadata.
 | BRSTM | `.brstm` | Nintendo Wii | ✅ | ✅ |
 | BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
 | DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
+| HPS | `.hps` | GameCube (HAL Laboratory) | — | ✅ |
+| NUS3BANK | `.nus3bank`, `.nus3audio` | Nintendo Wii U / 3DS | ✅ | ✅ |
 | RWAV | `.brwav`, `.rwav` | Nintendo Wii | ✅ | ✅ |
+| SADL | `.sadl` | Nintendo DS (Level-5) | — | ✅ |
 | Wii Photo Channel AAC | `.m4a` | Wii | ✅ | ✅ |
 | Nintendo 3DS Sound AAC | `.m4a` | Nintendo 3DS | ✅ | ✅ |
 
