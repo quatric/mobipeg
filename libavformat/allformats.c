@@ -539,6 +539,8 @@ extern const FFInputFormat  ff_vc1_demuxer;
 extern const FFOutputFormat ff_vc1_muxer;
 extern const FFInputFormat  ff_vc1t_demuxer;
 extern const FFOutputFormat ff_vc1t_muxer;
+extern const FFInputFormat  ff_vid1_demuxer;
+extern const FFOutputFormat ff_vid1_muxer;
 extern const FFInputFormat  ff_vividas_demuxer;
 extern const FFInputFormat  ff_vivo_demuxer;
 extern const FFInputFormat  ff_vmd_demuxer;

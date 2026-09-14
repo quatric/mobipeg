@@ -30,6 +30,7 @@ DECODER_FAMILIES = [
     ("RocketVideo", "*.rvid"),
     ("HVQM4", "*.h4m"),
     ("FastVideoDS", "*.fv"),
+    ("Factor 5 DivX", "*.vid"),
     ("TiVo TyStream", "*.ty *.ty+ *.tmf"),
     ("Swapdoodle / Swapnote", "*.bpk *.bpk1 *.apd"),
     ("Flipnote", "*.ppm *.kwz"),
@@ -55,6 +56,7 @@ ENCODE_EXTENSIONS = {
     "wii_photo": "avi", "nintendo_channel": "3gp",
     "3ds_camera": "avi", "3ds_camera3d": "avi",
     "wii_photo_m4a": "m4a", "3ds_sound": "m4a",
+    "factor5": "vid",
 }
 
 # How many family cells sit side by side in the expandable grid.
@@ -194,6 +196,7 @@ class EncodeGUI(tk.Tk):
             "GameCube/Wii THP .thp": "thp",
             "DS RocketVideo .rvid": "rvid",
             "GameCube/Wii HVQM4 .h4m": "hvqm4",
+            "GameCube Factor 5 DivX .vid": "factor5",
             "DS ActImagine FastVideoDS .fv": "fastvideo",
             "DS MoonShell .dpg": "dpg",
             "Nintendo DSP-ADPCM .dsp": "dsp",
@@ -228,6 +231,7 @@ class EncodeGUI(tk.Tk):
             "rvid":     ["pcm", "none"],
             # hvqm4 has no audio support yet -- video only.
             "hvqm4":    ["none"],
+            "factor5":  ["pcm", "none"],
             "fastvideo": ["adpcm", "none"],
             "dpg":      ["mp2", "none"],
             # Audio-only formats: the choice is which of the container's own
@@ -432,13 +436,13 @@ class EncodeGUI(tk.Tk):
             ({"moflex3d", "3ds_camera3d"}, (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn)),
             ({"moflex3d"}, (self.enc_layout_label, self.enc_layout_entry)),
             ({"mo", "moflex", "moflex3d", "vx"}, (self.enc_keyframes_label, self.enc_keyframes_entry)),
-            ({"vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"}, (self.enc_quant_label, self.enc_quant_entry)),
-            ({"vx", "mods", "ty", "thp", "rvid", "dpg", "wii_photo", "3ds_camera"} | AUDIO_ONLY_FORMATS,
+            ({"vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d", "factor5"}, (self.enc_quant_label, self.enc_quant_entry)),
+            ({"vx", "mods", "ty", "thp", "rvid", "dpg", "wii_photo", "3ds_camera", "factor5"} | AUDIO_ONLY_FORMATS,
              (self.enc_arate_label, self.enc_arate_entry)),
             # Scale and FPS describe a video stream, so they go away entirely
             # for the audio-only containers.
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_scale_label, self.enc_scale_entry)),
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg"}, (self.enc_fps_label, self.enc_fps_entry)),
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg", "factor5"}, (self.enc_scale_label, self.enc_scale_entry)),
+            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg", "factor5"}, (self.enc_fps_label, self.enc_fps_entry)),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),
@@ -776,15 +780,15 @@ class EncodeGUI(tk.Tk):
             cmd.append("--hq")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
             cmd.append("--fast-audio")
-        if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d"):
+        if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d", "factor5"):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
                 cmd.extend(["--quantizer", q])
-        if fmt in ("vx", "thp", "mods"):
+        if fmt in ("vx", "thp", "mods", "factor5"):
             fps = self.enc_fps_var.get().strip()
             if fps:
                 cmd.extend(["--fps", fps])
-        if fmt in ("vx", "mods", "ty", "thp", "rvid"):
+        if fmt in ("vx", "mods", "ty", "thp", "rvid", "factor5"):
             arate = self.enc_audio_rate_var.get().strip()
             if arate and arate != "0":
                 cmd.extend(["--audio-rate", arate])
