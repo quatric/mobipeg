@@ -36,7 +36,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['logo.png'],
+    icon=['logo.ico' if sys.platform.startswith('win') else 'logo.icns' if sys.platform == 'darwin' else 'logo.png'],
 )
 coll = COLLECT(
     exe,
@@ -50,7 +50,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='mobipeg-gui.app',
-    icon='logo.png',
+    icon='logo.icns',
     bundle_identifier=None,
     version='2.0',
 )

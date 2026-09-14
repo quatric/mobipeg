@@ -1258,7 +1258,7 @@ jobs:
             pyinstaller --name "mobipeg-gui" --windowed \
               "${BINARY_ARGS[@]}" \
               --exclude-module PIL \
-              --add-data "logo.png;." --icon=logo.png \
+              --add-data "logo.png;." --icon=logo.ico \
               --version-file version_info.txt \
               --distpath pyinst_dist encode_gui.py
             cd pyinst_dist
@@ -1276,7 +1276,7 @@ jobs:
               BINARY_ARGS+=(--add-binary "artifact-vidinjector/VidInjector9002-CLI:.")
             pyinstaller --name "mobipeg-gui" --windowed \
               "${BINARY_ARGS[@]}" --add-data "logo.png:." \
-              --icon=logo.png --distpath pyinst_dist \
+              --icon=logo.icns --distpath pyinst_dist \
               --exclude-module PIL \
               --target-architecture universal2 encode_gui.py
             cd pyinst_dist
@@ -1293,7 +1293,7 @@ jobs:
               "${BINARY_ARGS[@]}" \
               --exclude-module PIL \
               --add-data "logo.png:." \
-              --icon=logo.png --distpath pyinst_dist encode_gui.py
+              --distpath pyinst_dist encode_gui.py
             cd pyinst_dist
             tar -czf ../mobipeg-gui-${{ matrix.target }}.tar.gz mobipeg-gui
           fi
