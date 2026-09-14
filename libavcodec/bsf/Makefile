@@ -20,6 +20,7 @@ OBJS-$(CONFIG_EAC3_CORE_BSF)              += bsf/eac3_core.o
 OBJS-$(CONFIG_EIA608_TO_SMPTE436M_BSF)    += bsf/eia608_to_smpte436m.o
 OBJS-$(CONFIG_EVC_FRAME_MERGE_BSF)        += bsf/evc_frame_merge.o
 OBJS-$(CONFIG_EXTRACT_EXTRADATA_BSF)      += bsf/extract_extradata.o
+OBJS-$(CONFIG_F5VID_MPEG4_BSF)            += bsf/f5vid_mpeg4.o
 OBJS-$(CONFIG_FILTER_UNITS_BSF)           += bsf/filter_units.o
 OBJS-$(CONFIG_H264_METADATA_BSF)          += bsf/h264_metadata.o
 OBJS-$(CONFIG_H264_MP4TOANNEXB_BSF)       += bsf/h264_mp4toannexb.o
