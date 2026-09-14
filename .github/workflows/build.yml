@@ -507,7 +507,7 @@ jobs:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # Match the Linux cache marker: these artifacts need an x264 build
           # with platform assembly enabled, not the older scalar-only build.
-          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-v2-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-v3-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -684,8 +684,8 @@ jobs:
             'Description: Sentry SDK for C/C++' \
             'Version: 0.16.5' \
             'Libs: -L${libdir} -lsentry' \
-            'Libs.private: -ldbghelp -lshlwapi -lversion' \
-            'Cflags: -I${includedir}' \
+            'Libs.private: -ldbghelp -lshlwapi -lversion -lgdi32' \
+            'Cflags: -I${includedir} -DSENTRY_BUILD_STATIC' \
             > "$DEPS/lib/pkgconfig/sentry.pc"
 
       - name: Create cross pkg-config shim
