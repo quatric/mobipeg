@@ -190,7 +190,7 @@ jobs:
           # The x264 build now includes its architecture-specific assembly.
           # Keep this marker in the key so a previously cached scalar build
           # cannot be reused for a release artifact.
-          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-linux-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-v2-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Install foreign-arch codec headers (cross targets)
         if: matrix.foreign_arch != ''
@@ -211,7 +211,7 @@ jobs:
           CONFIGGUESS=$(find /usr/share/automake* -name config.guess 2>/dev/null | head -1)
 
           # libogg
-          [ ! -d libogg-1.3.5 ] && curl -fsSL https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz
+          [ ! -d libogg-1.3.5 ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz
           cd libogg-1.3.5
           [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
           [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
@@ -226,7 +226,7 @@ jobs:
           cd ..
 
           # libvorbis
-          [ ! -d libvorbis-1.3.7 ] && curl -fsSL https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz
+          [ ! -d libvorbis-1.3.7 ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz
           cd libvorbis-1.3.7
           [ -n "$CONFIGSUB" ]   && cp "$CONFIGSUB"   config.sub
           [ -n "$CONFIGGUESS" ] && cp "$CONFIGGUESS" config.guess
@@ -302,19 +302,20 @@ jobs:
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps/${{ matrix.target }}"
           mkdir -p "$DEPS"
-          curl -fsSL -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
+          curl -fsSL --retry 5 --retry-connrefused -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
           unzip -q sentry-native.zip -d sentry-native-src
           cd sentry-native-src
 
           CMAKE_EXTRA_ARGS=()
           if [ "${{ matrix.target }}" = "linux-x86" ]; then
-            CMAKE_EXTRA_ARGS+=("-DCMAKE_C_FLAGS=-m32" "-DCMAKE_CXX_FLAGS=-m32" "-DSENTRY_BUILD_FORCE32=ON")
+            CMAKE_EXTRA_ARGS+=("-DCMAKE_C_FLAGS=-m32" "-DCMAKE_CXX_FLAGS=-m32" "-DCMAKE_ASM_FLAGS=-m32" "-DSENTRY_BUILD_FORCE32=ON")
           elif [ -n "${{ matrix.cross_prefix }}" ]; then
             CMAKE_EXTRA_ARGS+=(
               "-DCMAKE_SYSTEM_NAME=Linux"
               "-DCMAKE_SYSTEM_PROCESSOR=${{ matrix.ffarch }}"
               "-DCMAKE_C_COMPILER=${{ matrix.cross_prefix }}gcc"
               "-DCMAKE_CXX_COMPILER=${{ matrix.cross_prefix }}g++"
+              "-DCMAKE_ASM_COMPILER=${{ matrix.cross_prefix }}gcc"
             )
           fi
 
@@ -332,19 +333,18 @@ jobs:
 
           mkdir -p "$DEPS/lib/pkgconfig"
           cat << 'EOF' > "$DEPS/lib/pkgconfig/sentry.pc"
-          prefix=${pcfiledir}/../..
-          exec_prefix=${prefix}
-          libdir=${prefix}/lib
-          includedir=${prefix}/include
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
 
-          Name: sentry
-          Description: Sentry SDK for C/C++
-          Version: ${{ env.SENTRY_VERSION }}
-          Libs: -L${libdir} -lsentry
-          Cflags: -I${includedir}
-          EOF
-          # Strip leading whitespace from heredoc
-          sed -i 's/^[ \t]*//' "$DEPS/lib/pkgconfig/sentry.pc"
+Name: sentry
+Description: Sentry SDK for C/C++
+Version: 0.16.5
+Libs: -L${libdir} -lsentry
+Libs.private: -lunwind -ldl -lrt -lpthread -lm
+Cflags: -I${includedir}
+EOF
 
       - name: Build x264
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -507,7 +507,7 @@ jobs:
           path: ${{ github.workspace }}/deps/${{ matrix.target }}
           # Match the Linux cache marker: these artifacts need an x264 build
           # with platform assembly enabled, not the older scalar-only build.
-          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
+          key: deps-${{ matrix.target }}-vorbis1.3.7-opus1.5.2-no-hardening-no-arm-asm-or-rtcd-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-sentry${{ env.SENTRY_VERSION }}-v2-x264-${{ steps.x264-rev.outputs.sha }}-asm-on
 
       - name: Build x264 for ${{ matrix.target }}
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -652,12 +652,13 @@ jobs:
           cd ..
 
           # sentry-native
-          curl -fsSL -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
+          curl -fsSL --retry 5 --retry-connrefused -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
           unzip -q sentry-native.zip -d sentry-native-src
           cd sentry-native-src
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_SYSTEM_VERSION=10.0 \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.ffarch }} \
             -DCMAKE_C_COMPILER=${{ matrix.cross_prefix }}-gcc \
             -DCMAKE_CXX_COMPILER=${{ matrix.cross_prefix }}-g++ \
@@ -674,18 +675,18 @@ jobs:
 
           mkdir -p "$DEPS/lib/pkgconfig"
           cat << 'EOF' > "$DEPS/lib/pkgconfig/sentry.pc"
-          prefix=${pcfiledir}/../..
-          exec_prefix=${prefix}
-          libdir=${prefix}/lib
-          includedir=${prefix}/include
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
 
-          Name: sentry
-          Description: Sentry SDK for C/C++
-          Version: ${{ env.SENTRY_VERSION }}
-          Libs: -L${libdir} -lsentry
-          Cflags: -I${includedir}
-          EOF
-          sed -i 's/^[ \t]*//' "$DEPS/lib/pkgconfig/sentry.pc"
+Name: sentry
+Description: Sentry SDK for C/C++
+Version: 0.16.5
+Libs: -L${libdir} -lsentry
+Libs.private: -ldbghelp -lshlwapi -lversion
+Cflags: -I${includedir}
+EOF
 
       - name: Create cross pkg-config shim
         run: |
@@ -784,7 +785,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/deps
-          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-dav1d1.5.1-sentry${{ env.SENTRY_VERSION }}-x264-${{ steps.x264-rev.outputs.sha }}
+          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-dav1d1.5.1-sentry${{ env.SENTRY_VERSION }}-v2-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -800,14 +801,14 @@ jobs:
             
             cd "$GITHUB_WORKSPACE"
             # libogg
-            [ ! -d libogg-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz && mv libogg-1.3.5 libogg-$ARCH
+            [ ! -d libogg-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | tar -xz && mv libogg-1.3.5 libogg-$ARCH
             cd libogg-$ARCH
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
             
             # libvorbis
-            [ ! -d libvorbis-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz && mv libvorbis-1.3.7 libvorbis-$ARCH
+            [ ! -d libvorbis-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz | tar -xz && mv libvorbis-1.3.7 libvorbis-$ARCH
             cd libvorbis-$ARCH
             sed -i.bak 's/-force_cpusubtype_ALL//g' configure
             PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --with-ogg-includes="$PREFIX/include" --with-ogg-libraries="$PREFIX/lib" --enable-static --disable-shared
@@ -815,42 +816,42 @@ jobs:
             cd ..
             
             # libopus
-            [ ! -d opus-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz | tar -xz && mv opus-1.5.2 opus-$ARCH
+            [ ! -d opus-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz | tar -xz && mv opus-1.5.2 opus-$ARCH
             cd opus-$ARCH
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared --disable-doc --disable-extra-programs
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
             # libmp3lame
-            [ ! -d lame-$ARCH ] && curl -fsSL https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | tar -xz && mv lame-3.100 lame-$ARCH
+            [ ! -d lame-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | tar -xz && mv lame-3.100 lame-$ARCH
             cd lame-$ARCH
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared --disable-frontend
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
             # libspeex
-            [ ! -d speex-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz | tar -xz && mv speex-1.2.1 speex-$ARCH
+            [ ! -d speex-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/speex/speex-1.2.1.tar.gz | tar -xz && mv speex-1.2.1 speex-$ARCH
             cd speex-$ARCH
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
             # libtheora
-            [ ! -d libtheora-$ARCH ] && curl -fsSL https://downloads.xiph.org/releases/theora/libtheora-1.1.1.tar.gz | tar -xz && mv libtheora-1.1.1 libtheora-$ARCH
+            [ ! -d libtheora-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/theora/libtheora-1.1.1.tar.gz | tar -xz && mv libtheora-1.1.1 libtheora-$ARCH
             cd libtheora-$ARCH
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --with-ogg-includes="$PREFIX/include" --with-ogg-libraries="$PREFIX/lib" --enable-static --disable-shared --disable-examples --disable-oggtest --disable-vorbistest
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
             # libwebp
-            [ ! -d libwebp-$ARCH ] && curl -fsSL https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.4.0.tar.gz | tar -xz && mv libwebp-1.4.0 libwebp-$ARCH
+            [ ! -d libwebp-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.4.0.tar.gz | tar -xz && mv libwebp-1.4.0 libwebp-$ARCH
             cd libwebp-$ARCH
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared --disable-gl --disable-png --disable-jpeg --disable-tiff --disable-gif --disable-wic
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
             # sentry-native
-            [ ! -f sentry-native.zip ] && curl -fsSL -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
+            [ ! -f sentry-native.zip ] && curl -fsSL --retry 5 --retry-connrefused -o sentry-native.zip "https://github.com/getsentry/sentry-native/releases/download/${{ env.SENTRY_VERSION }}/sentry-native.zip"
             rm -rf sentry-native-$ARCH && unzip -q sentry-native.zip -d sentry-native-$ARCH
             cd sentry-native-$ARCH
             cmake -B build \
@@ -868,18 +869,18 @@ jobs:
 
             mkdir -p "$PREFIX/lib/pkgconfig"
             cat << 'EOF' > "$PREFIX/lib/pkgconfig/sentry.pc"
-            prefix=${pcfiledir}/../..
-            exec_prefix=${prefix}
-            libdir=${prefix}/lib
-            includedir=${prefix}/include
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
 
-            Name: sentry
-            Description: Sentry SDK for C/C++
-            Version: ${{ env.SENTRY_VERSION }}
-            Libs: -L${libdir} -lsentry
-            Cflags: -I${includedir}
-            EOF
-            sed -i '' 's/^[ \t]*//' "$PREFIX/lib/pkgconfig/sentry.pc"
+Name: sentry
+Description: Sentry SDK for C/C++
+Version: 0.16.5
+Libs: -L${libdir} -lsentry
+Libs.private: -lpthread
+Cflags: -I${includedir}
+EOF
 
             # x264
             [ ! -d x264-$ARCH ] && git clone --depth=1 https://github.com/quatric/x264.git x264-$ARCH
