@@ -1219,8 +1219,9 @@ jobs:
               apt-get update -qq
               apt-get install -y --no-install-recommends \
                 python3-tk binutils build-essential zlib1g-dev libjpeg-dev
-              pip install --quiet pyinstaller Pillow sentry-sdk
+              pip install --quiet pyinstaller sentry-sdk
               pyinstaller --name mobipeg-gui --windowed \
+                --exclude-module PIL \
                 --add-binary artifact/ffmpeg:. \
                 --add-binary artifact/ffprobe:. \
                 --add-data logo.png:. \
@@ -1234,7 +1235,7 @@ jobs:
         if: matrix.docker_platform == ''
         shell: bash
         run: |
-          python -m pip install pyinstaller Pillow sentry-sdk
+          python -m pip install pyinstaller sentry-sdk
           if [[ "${{ matrix.target }}" == windows* ]]; then
             FFMPEG_BIN="artifact/ffmpeg.exe"
             FFPROBE_BIN="artifact/ffprobe.exe"
@@ -1249,6 +1250,7 @@ jobs:
               BINARY_ARGS+=(--add-binary "artifact-vidinjector/VidInjector9002-CLI.exe;.")
             pyinstaller --name "mobipeg-gui" --windowed \
               "${BINARY_ARGS[@]}" \
+              --exclude-module PIL \
               --add-data "logo.png;." --icon=logo.png \
               --version-file version_info.txt \
               --distpath pyinst_dist encode_gui.py
@@ -1263,10 +1265,12 @@ jobs:
             BINARY_ARGS=(--add-binary "$FFMPEG_BIN:." --add-binary "$FFPROBE_BIN:.")
             # ffplay is only present if SDL2 was found during the FFmpeg build
             [ -f "$FFPLAY_BIN" ] && BINARY_ARGS+=(--add-binary "$FFPLAY_BIN:.")
-            BINARY_ARGS+=(--add-binary "artifact-vidinjector/VidInjector9002-CLI:.")
+            [ -f "artifact-vidinjector/VidInjector9002-CLI" ] && \
+              BINARY_ARGS+=(--add-binary "artifact-vidinjector/VidInjector9002-CLI:.")
             pyinstaller --name "mobipeg-gui" --windowed \
               "${BINARY_ARGS[@]}" --add-data "logo.png:." \
               --icon=logo.png --distpath pyinst_dist \
+              --exclude-module PIL \
               --target-architecture universal2 encode_gui.py
             cd pyinst_dist
             ditto -c -k --sequesterRsrc --keepParent mobipeg-gui.app ../mobipeg-gui-${{ matrix.target }}.zip
@@ -1280,6 +1284,7 @@ jobs:
               BINARY_ARGS+=(--add-binary "artifact-vidinjector/VidInjector9002-CLI:.")
             pyinstaller --name "mobipeg-gui" --windowed \
               "${BINARY_ARGS[@]}" \
+              --exclude-module PIL \
               --add-data "logo.png:." \
               --icon=logo.png --distpath pyinst_dist encode_gui.py
             cd pyinst_dist
