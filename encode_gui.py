@@ -985,6 +985,10 @@ class EncodeGUI(tk.Tk):
 
         self.execute_cmd(cmd, self.cia_run_btn)
 
+
+MobipegGUI = EncodeGUI
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--encode-script":
         import encode
