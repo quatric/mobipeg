@@ -70,6 +70,8 @@ typedef struct MODSDemuxContext {
     int      has_sx_audio;    /* retail SX stream is present */
     int      sx_width, sx_height;
     int      sx_emit_blocks;  /* >0: aud_buf holds a pending SX audio packet */
+    /* Last video-field length reported by the split decoder, for MODS_DBG. */
+    int last_vfield;
 } MODSDemuxContext;
 
 
@@ -457,6 +459,7 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
              * the private decoder is unavailable. */
             int is_key = (size >= 2 && (pkt->data[1] & 0x80));
             int vfield = mods_sx_video_split(m, pkt->data, size);
+            m->last_vfield = vfield;
             if (vfield >= 0 && vfield <= (int)size) {
                 if (m->audio_codec_id == AV_CODEC_ID_ADPCM_IMA_NDS) {
                     /* On keyframes a 4-byte re-prime word precedes the audio,
@@ -469,57 +472,63 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                     if (is_key && audio_blocks > 0)
                         audio_size += 4 + 4 * m->audio_channels;
 
-                    /* vfield is the exact split in the common case, but it
-                     * can land one 16-bit word late: when the video field ends
-                     * exactly on a word boundary the decoder's final bit
-                     * position slips 1-2 bits into the encoder's zero-fill and
-                     * the round-up to whole words then adds 2 bytes.  Older
-                     * code "fixed" that by forcing a 4-byte tail pad, which is
-                     * a property of one particular retail file -- DS system
-                     * videos (e.g. the DSi menu movie) leave 0 or 2 bytes, and
-                     * there the forced pad shifted every chunk's audio and made
-                     * the re-prime header on *every* keyframe decode as a wild
-                     * step_index, aborting the packet.
+                    /* Where the audio starts, in order of how much the
+                     * chunk actually tells us.
                      *
-                     * So: take vfield, and consider stepping back over one
-                     * all-zero word.  Keyframes settle it exactly -- the IMA
-                     * re-prime header is self-checking (step_index must be
-                     * 0..88 for every channel) -- and elsewhere the zero word
-                     * is the only evidence available. */
+                     * 1. Our own muxer appends [pad][0x00][asize u16le].  When
+                     *    that asize agrees with the block count in the chunk
+                     *    word the suffix is real and gives the split exactly.
+                     *    (Retail chunks carry no suffix -- across every chunk
+                     *    of the DSi menu movie the trailing u16 reads 0, so the
+                     *    agreement test never fires on one by accident.)
+                     *
+                     * 2. Otherwise the video decoder's field length, which is
+                     *    exact except that it can land one 16-bit word late:
+                     *    when the field ends exactly on a word boundary the
+                     *    decoder's final bit position slips a bit or two into
+                     *    the encoder's zero-fill and the round-up to whole
+                     *    words then adds 2 bytes.  On a keyframe the IMA
+                     *    re-prime header settles it -- step_index has to be
+                     *    0..88 for every channel -- so the 2-byte step back is
+                     *    taken only when the header proves it is needed.
+                     *
+                     * Nothing is guessed beyond that.  Older code forced a
+                     * 4-byte tail pad instead, which is a property of one
+                     * particular retail file: DS system videos leave 0 or 2
+                     * bytes, so the forced pad shifted every chunk's audio and
+                     * made the re-prime header on *every* keyframe decode as a
+                     * wild step_index, aborting the packet. */
                     if (audio_size > 0 && audio_size <= (int)size) {
-                        int cand[2];
-                        int nb_cand = 0;
+                        int stored_asize = (size >= 4) ? (int)AV_RL16(pkt->data + size - 2) : 0;
+                        int spad         = (size >= 4) ? pkt->data[size - 4] : 0;
+                        int have_suffix  = size >= 4 && spad <= 3 &&
+                                           pkt->data[size - 3] == 0 &&
+                                           stored_asize == audio_size &&
+                                           (int)size - 4 - spad - stored_asize >= 0;
 
-                        audio_start = vfield;
-                        if (audio_start + audio_size > (int)size)
-                            audio_start = (int)size - audio_size;
+                        if (have_suffix) {
+                            audio_start = (int)size - 4 - spad - stored_asize;
+                        } else {
+                            audio_start = vfield;
+                            if (audio_start + audio_size > (int)size)
+                                audio_start = (int)size - audio_size;
 
-                        cand[nb_cand++] = audio_start;
-                        if (audio_start >= 2)
-                            cand[nb_cand++] = audio_start - 2;
-
-                        if (is_key && audio_blocks > 0) {
-                            /* [4-byte re-prime word][hdr ch0][128B ch0][hdr ch1]
-                             * [128B ch1]...; hdr = u16 step_index, u16 predictor. */
-                            for (int i = 0; i < nb_cand; i++) {
+                            if (is_key && audio_blocks > 0 && audio_start >= 2) {
+                                /* [4-byte re-prime word][hdr ch0][128B ch0]
+                                 * [hdr ch1][128B ch1]...; hdr is u16 step_index
+                                 * then u16 predictor. */
                                 int ok = 1;
                                 for (int c = 0; c < m->audio_channels; c++) {
-                                    int off = cand[i] + 4 + c * 132;
+                                    int off = audio_start + 4 + c * 132;
                                     if (off + 2 > (int)size ||
                                         AV_RL16(pkt->data + off) > 88u) {
                                         ok = 0;
                                         break;
                                     }
                                 }
-                                if (ok) {
-                                    audio_start = cand[i];
-                                    break;
-                                }
+                                if (!ok)
+                                    audio_start -= 2;
                             }
-                        } else if (nb_cand > 1 &&
-                                   pkt->data[audio_start - 1] == 0 &&
-                                   pkt->data[audio_start - 2] == 0) {
-                            audio_start -= 2;   /* encoder zero-fill, not video */
                         }
                     }
                 } else { /* FASTAUDIO: 4-byte keyframe word precedes blocks */
@@ -574,6 +583,22 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
         } else {
             audio_size = 0;
             audio_start = size;
+        }
+
+        /* MODS_DBG=1 prints how each chunk was split.  The audio/video split
+         * is the one thing in this demuxer that cannot be read straight out of
+         * the container, so being able to see it is worth ten lines. */
+        if (getenv("MODS_DBG")) {
+            int stored = (size >= 4) ? (int)AV_RL16(pkt->data + size - 2) : -1;
+            int spad   = (size >= 4) ? pkt->data[size - 4] : -1;
+            int zpad   = (size >= 4) ? pkt->data[size - 3] : -1;
+            av_log(s, AV_LOG_INFO,
+                   "MODS_DBG f=%d size=%u blocks=%d key=%d vf=%d start=%d asz=%d pad=%d "
+                   "suffix[pad=%d z=%d asz=%d]\n",
+                   m->frame_index, size, (int)(flags & 0x3FFF),
+                   (size >= 2 && (pkt->data[1] & 0x80)) ? 1 : 0, m->last_vfield,
+                   audio_start, audio_size, (int)size - audio_start - audio_size,
+                   spad, zpad, stored);
         }
 
         if (audio_start >= 0 && audio_size >= 0 && audio_start + audio_size <= (int)size) {
