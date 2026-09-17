@@ -29,6 +29,7 @@
 #include "libavutil/mem.h"
 #include "libavutil/thread.h"
 #include "libavutil/dict.h"
+#include "libavutil/imgutils.h"
 
 #include "avcodec.h"
 #include "bswapdsp.h"
@@ -1260,6 +1261,43 @@ static int predict_motion(AVCodecContext *avctx,
     return 0;
 }
 
+/* The DS (.mods) MobiClip bitstream stores YCgCo, not YCbCr: Y=(R+2G+B)/4,
+ * Cg=(2G-R-B)/4+128, Co=(R-B)/2+128.  This used to be signalled by tagging the
+ * decoded YUV420P frame AVCOL_SPC_YCGCO, but swscale cannot convert *from*
+ * YCgCo (it errors out, or silently misreads the planes as BT601 and produces
+ * the familiar cyan/magenta cast), so every caller had to bolt an inverse
+ * transform onto its filter chain.  Do it here instead, exactly as the VX
+ * decoder does for its own YCoCg-style colorspace, and output RGB24.
+ *
+ * Inverse: t = Y - Cg;  R = t + Co,  G = Y + Cg,  B = t - Co.
+ * The 3DS/moflex variant is ordinary YCbCr and is left alone.
+ *
+ * Plane order follows the decoder's own mods/moflex chroma swap: for .mods,
+ * data[1] is Cg and data[2] is Co. */
+static void mobiclip_ycgco_to_rgb24(AVCodecContext *avctx,
+                                    const AVFrame *yuv, AVFrame *rgb)
+{
+    int w = avctx->width, h = avctx->height;
+
+    for (int y = 0; y < h; y++) {
+        const uint8_t *ly  = yuv->data[0] + (ptrdiff_t)y * yuv->linesize[0];
+        const uint8_t *lcg = yuv->data[1] + (ptrdiff_t)(y >> 1) * yuv->linesize[1];
+        const uint8_t *lco = yuv->data[2] + (ptrdiff_t)(y >> 1) * yuv->linesize[2];
+        uint8_t *out = rgb->data[0] + (ptrdiff_t)y * rgb->linesize[0];
+
+        for (int x = 0; x < w; x++) {
+            int Y  = ly[x];
+            int cg = lcg[x >> 1] - 128;
+            int co = lco[x >> 1] - 128;
+            int t  = Y - cg;
+
+            out[x * 3 + 0] = av_clip_uint8(t + co);
+            out[x * 3 + 1] = av_clip_uint8(Y + cg);
+            out[x * 3 + 2] = av_clip_uint8(t - co);
+        }
+    }
+}
+
 static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
                            int *got_frame, AVPacket *pkt)
 {
@@ -1273,9 +1311,21 @@ static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
 
     av_fast_padded_malloc(&s->bitstream, &s->bitstream_size,
                           pkt->size);
+    if (!s->bitstream)
+        return AVERROR(ENOMEM);
 
-    if ((ret = ff_reget_buffer(avctx, frame, 0)) < 0)
-        return ret;
+    /* Internal reconstruction frames are always YUV420P -- intra prediction and
+     * motion compensation work in the codec's native plane domain.  They are
+     * private to the decoder and reused as reference frames, so allocate them
+     * lazily and never ref them out; the public output frame is produced
+     * separately below (RGB24 for .mods, YUV420P for moflex). */
+    if (!frame->data[0]) {
+        frame->format = AV_PIX_FMT_YUV420P;
+        frame->width  = avctx->width;
+        frame->height = avctx->height;
+        if ((ret = av_frame_get_buffer(frame, 0)) < 0)
+            return ret;
+    }
 
     s->bdsp.bswap16_buf((uint16_t *)s->bitstream,
                         (uint16_t *)pkt->data,
@@ -1372,15 +1422,35 @@ static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
         }
     }
 
-    if (!s->moflex) {
-        avctx->colorspace = AVCOL_SPC_YCGCO;
-        frame->colorspace = AVCOL_SPC_YCGCO;
+    /* .mods is YCgCo and is converted to RGB24 here; moflex is plain YCbCr and
+     * is handed out as the YUV420P it was decoded into.  s->moflex is a
+     * property of the bitstream, so the format settles on the first frame. */
+    avctx->pix_fmt = s->moflex ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_RGB24;
+
+    if ((ret = ff_get_buffer(avctx, rframe, 0)) < 0)
+        return ret;
+    /* Copy the picture properties by hand: av_frame_copy_props() would also
+     * overwrite the output frame's private_ref (FrameDecodeData) with the
+     * internal frame's NULL one, which trips an assert in decode.c. */
+    rframe->pict_type = frame->pict_type;
+    if (frame->flags & AV_FRAME_FLAG_KEY)
+        rframe->flags |= AV_FRAME_FLAG_KEY;
+    else
+        rframe->flags &= ~AV_FRAME_FLAG_KEY;
+
+    if (s->moflex) {
+        av_image_copy(rframe->data, rframe->linesize,
+                      (const uint8_t **)frame->data, frame->linesize,
+                      AV_PIX_FMT_YUV420P, avctx->width, avctx->height);
+    } else {
+        mobiclip_ycgco_to_rgb24(avctx, frame, rframe);
+        avctx->colorspace = AVCOL_SPC_RGB;
+        avctx->color_range = AVCOL_RANGE_JPEG;
+        rframe->colorspace = AVCOL_SPC_RGB;
+        rframe->color_range = AVCOL_RANGE_JPEG;
     }
 
     s->current_pic = (s->current_pic + 1) % 6;
-    ret = av_frame_ref(rframe, frame);
-    if (ret < 0)
-        return ret;
     *got_frame = 1;
 
     /* For DS .mods retail audio extraction: record how many bytes of the
