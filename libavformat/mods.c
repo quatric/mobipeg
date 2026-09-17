@@ -469,32 +469,58 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                     if (is_key && audio_blocks > 0)
                         audio_size += 4 + 4 * m->audio_channels;
 
-                    /* vfield is an UPPER BOUND, not the exact split: the video
-                     * decoder's final bit position sometimes lands 1-2 bits past
-                     * the last bit the encoder wrote, which pushes the 16-bit
-                     * round-up one word too far and puts audio_start 2 bytes too
-                     * high.  It is invisible unless the true end sits exactly on
-                     * a 16-bit boundary, so it hits a minority of frames (6 of 76
-                     * keyframes in americ1 movie_01) -- and there it made the
-                     * decoder read the IMA re-prime header 2 bytes late and abort
-                     * the packet with a bogus step_index.
+                    /* vfield is the exact split in the common case, but it
+                     * can land one 16-bit word late: when the video field ends
+                     * exactly on a word boundary the decoder's final bit
+                     * position slips 1-2 bits into the encoder's zero-fill and
+                     * the round-up to whole words then adds 2 bytes.  Older
+                     * code "fixed" that by forcing a 4-byte tail pad, which is
+                     * a property of one particular retail file -- DS system
+                     * videos (e.g. the DSi menu movie) leave 0 or 2 bytes, and
+                     * there the forced pad shifted every chunk's audio and made
+                     * the re-prime header on *every* keyframe decode as a wild
+                     * step_index, aborting the packet.
                      *
-                     * Retail chunks always leave 4 or 6 pad bytes after the audio
-                     * (verified over every unambiguous keyframe in that file), so
-                     * exactly two starts are legal, 2 bytes apart, and the error
-                     * is always upward.  Clamp the overshoot to the pad-4
-                     * candidate, then choose between the two on the bytes in
-                     * question: both zero means they are the encoder's zero-fill
-                     * of the final 16-bit word rather than video, so the real
-                     * split is the pad-6 one.  Bounded to those two candidates,
-                     * so this can never invent an offset of its own. */
-                    if (audio_size > 0) {
-                        int pad4 = (int)size - 4 - audio_size;
-                        if (audio_start > pad4 && pad4 >= 0)
-                            audio_start = pad4;          /* clamp the overshoot */
-                        if (audio_start == pad4 && pad4 >= 2 &&
-                            pkt->data[pad4 - 1] == 0 && pkt->data[pad4 - 2] == 0)
-                            audio_start = pad4 - 2;      /* zero-fill, so pad is 6 */
+                     * So: take vfield, and consider stepping back over one
+                     * all-zero word.  Keyframes settle it exactly -- the IMA
+                     * re-prime header is self-checking (step_index must be
+                     * 0..88 for every channel) -- and elsewhere the zero word
+                     * is the only evidence available. */
+                    if (audio_size > 0 && audio_size <= (int)size) {
+                        int cand[2];
+                        int nb_cand = 0;
+
+                        audio_start = vfield;
+                        if (audio_start + audio_size > (int)size)
+                            audio_start = (int)size - audio_size;
+
+                        cand[nb_cand++] = audio_start;
+                        if (audio_start >= 2)
+                            cand[nb_cand++] = audio_start - 2;
+
+                        if (is_key && audio_blocks > 0) {
+                            /* [4-byte re-prime word][hdr ch0][128B ch0][hdr ch1]
+                             * [128B ch1]...; hdr = u16 step_index, u16 predictor. */
+                            for (int i = 0; i < nb_cand; i++) {
+                                int ok = 1;
+                                for (int c = 0; c < m->audio_channels; c++) {
+                                    int off = cand[i] + 4 + c * 132;
+                                    if (off + 2 > (int)size ||
+                                        AV_RL16(pkt->data + off) > 88u) {
+                                        ok = 0;
+                                        break;
+                                    }
+                                }
+                                if (ok) {
+                                    audio_start = cand[i];
+                                    break;
+                                }
+                            }
+                        } else if (nb_cand > 1 &&
+                                   pkt->data[audio_start - 1] == 0 &&
+                                   pkt->data[audio_start - 2] == 0) {
+                            audio_start -= 2;   /* encoder zero-fill, not video */
+                        }
                     }
                 } else { /* FASTAUDIO: 4-byte keyframe word precedes blocks */
                     int kf_word = (is_key && audio_blocks > 0) ? 4 : 0;
