@@ -105,49 +105,6 @@ else:
 DEFAULT_OUTDIR = os.environ.get("OUTDIR", "/Volumes/SSD/tmp")
 
 
-# Inverse of the YCgCo forward transform applied at encode time (see the `ycgco`
-# geq in the mods encode path). The mobiclip .mods decoder outputs YCgCo planes
-# tagged AVCOL_SPC_YCGCO, which swscale refuses to convert to RGB (error -22);
-# copying them straight into a BT601 mpeg4 file misreads the chroma (green/
-# magenta cast). Forward: Y=(R+2G+B)/4, Cg=(2G-R-B)/4+128, Co=(R-B)/2+128.
-# Inverse: R=Y-cg+co, G=Y+cg, B=Y-cg-co  (cg=Cg-128, co=Co-128). setparams
-# relabels the colorspace so swscale chroma-upsamples numerically instead of
-# rejecting the YCGCO tag; mergeplanes reinterprets the YUV planes as gbrp.
-YCGCO_INV_VF = ("setparams=colorspace=smpte170m:range=pc,format=yuv444p,"
-                "mergeplanes=0x000102:gbrp,geq="
-                "r='clip(g(X,Y)-(b(X,Y)-128)+(r(X,Y)-128),0,255)':"
-                "g='clip(g(X,Y)+(b(X,Y)-128),0,255)':"
-                "b='clip(g(X,Y)-(b(X,Y)-128)-(r(X,Y)-128),0,255)'")
-
-
-def is_ycgco(inp, ifmt):
-    """True if the input's decoded video is tagged YCgCo. The mods decoder only
-    sets this after decoding a frame, so probe the first decoded frame rather
-    than the container header (which reports 'unknown'). Works for any input
-    type, so vx/other YCgCo sources get corrected the same as .mods.
-
-    .mods is *always* YCgCo, so short-circuit on extension: the ffprobe frame
-    probe can fail silently (e.g. FFPROBE path issues in the frozen GUI build),
-    and we must not skip the color transform for that format.
-
-    .vx must NOT be listed here even though its bitstream is equally YCgCo: the
-    vx decoder converts to RGB24 itself (see vx.c, avctx->pix_fmt), so applying
-    the inverse on top of that transforms already-correct color a second time.
-    That wrecks the chroma by a fixed amount at every quantizer, which reads as
-    "the quantizer setting does nothing" -- decoded PSNR sat at ~20 dB for every
-    QP until this was removed, and is ~43 dB at QP 12 without it."""
-    if os.path.splitext(inp)[1].lower() == ".mods":
-        return True
-    try:
-        p = subprocess.run(
-            [FFPROBE, "-v", "error"] + ifmt +
-            ["-select_streams", "v:0", "-show_entries", "frame=color_space",
-             "-read_intervals", "%+#1", "-of", "default=nk=1:nw=1", inp],
-            stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        return "ycgco" in (p.stdout or "").lower()
-    except Exception:
-        return False
-
 
 def stereo_layout(inp, ifmt):
     """Return (type, inverted) for a stereoscopic input, else (None, False).
@@ -822,9 +779,6 @@ def main():
             sys.exit(2)
         ifmt = input_fmt(inp)
         vf = []
-        if is_ycgco(inp, ifmt):
-            print("   (YCgCo input: applying inverse color transform)")
-            vf.append(YCGCO_INV_VF)
 
         kind, inverted = resolve_stereo(inp, ifmt, parsed.stereo)
         want = parsed.eyes
@@ -873,12 +827,12 @@ def main():
             base, ext = os.path.splitext(os.path.basename(inp))[0], ".mp4"
             outdir_for = OUTDIR
         ifmt = input_fmt(inp)
-        # mods (and any YCgCo-tagged) video needs the inverse-YCgCo filter, else
-        # the chroma copies through wrong (green/magenta). Detect via the first
-        # decoded frame's colorspace so it also covers non-.mods YCgCo inputs.
-        ycgco = is_ycgco(inp, ifmt)
-        if ycgco:
-            print("   (YCgCo input: applying inverse color transform)")
+        # The YCgCo bitstreams (.mods MobiClip, .vx) used to reach here tagged
+        # AVCOL_SPC_YCGCO and needed an inverse-transform filter bolted on, or
+        # the chroma copied through wrong (green/magenta cast). Both decoders
+        # now do the conversion themselves and hand out RGB24, so there is
+        # nothing left to correct here -- and applying it anyway would
+        # transform already-correct color a second time.
 
         kind, inverted = resolve_stereo(inp, ifmt, parsed.stereo)
         want = parsed.eyes
@@ -890,7 +844,7 @@ def main():
             wanted = [("left", left_mode), ("right", right_mode)]
             if want in ("left", "right"):
                 wanted = [w for w in wanted if w[0] == want]
-            pre = f"{YCGCO_INV_VF}," if ycgco else ""
+            pre = ""
             labels, graph, outs = [], [], []
             graph.append("[0:v]split=%d%s" % (len(wanted), "".join(f"[s{i}]" for i in range(len(wanted)))))
             for i, (name, mode) in enumerate(wanted):
@@ -924,7 +878,7 @@ def main():
         if kind and want == "packed":
             print(f"   (stereoscopic {kind} input kept packed; --eyes both splits it)")
         print(f">> decoding  {inp}  ->  {watch}")
-        dec_vf = ["-vf", YCGCO_INV_VF] if ycgco else []
+        dec_vf = []
         cmd1 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac"] + extra_args + [watch]
         cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3"] + extra_args + [watch]
         run_ffenc_fallback(cmd1, cmd2)
@@ -1440,9 +1394,9 @@ def main():
     
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
-        # mods video decodes to YCgCo planes that must be inverted before mpeg4,
-        # else the chroma copies through wrong (green/magenta). See YCGCO_INV_VF.
-        dec_vf = ["-vf", YCGCO_INV_VF] if fmt == "mods" else []
+        # The mods decoder converts its YCgCo planes to RGB itself now, so the
+        # round-trip needs no colour filter of its own.
+        dec_vf = []
         cmd1 = [FFENC, "-nostdin", "-y", "-loglevel", "error", "-f", dmx, "-i", container] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
         cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error", "-f", dmx, "-i", container, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", watch]
         run_ffenc_fallback(cmd1, cmd2)
