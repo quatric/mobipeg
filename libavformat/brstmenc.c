@@ -502,10 +502,10 @@ static int brstm_write_fstm(AVFormatContext *s, uint8_t *const *data,
     /* INFO */
     wr_tag(s, "INFO");
     wr32(s, info_size);
-    wr32(s, 0x41000000); wr32(s, h1rel);
+    wr16(s, 0x4100); wr16(s, 0); wr32(s, h1rel);
     /* No track table: -1 is how these formats say a reference is absent. */
-    wr32(s, 0x01010000); wr32(s, 0xFFFFFFFF);
-    wr32(s, 0x01010000); wr32(s, h3rel);
+    wr16(s, 0x0101); wr16(s, 0); wr32(s, 0xFFFFFFFF);
+    wr16(s, 0x0101); wr16(s, 0); wr32(s, h3rel);
 
     if ((ret = pad_to(s, info_body_base + h1rel)) < 0)
         return ret;
@@ -522,9 +522,9 @@ static int brstm_write_fstm(AVFormatContext *s, uint8_t *const *data,
     wr32(s, last_block_used);
     wr32(s, last_block_samples);
     wr32(s, last_block_size);
-    wr32(s, samples_per_block);                 /* samples per seek entry */
     wr32(s, 4);                                 /* bytes per seek entry */
-    wr32(s, 0x1F000000);                        /* sample data reference */
+    wr32(s, samples_per_block);                 /* samples per seek entry */
+    wr16(s, 0x1F00); wr16(s, 0);                        /* sample data reference */
     wr32(s, 0x18);
 
     /* Channel info: a table of references to references to the coefficients. */
@@ -532,12 +532,12 @@ static int brstm_write_fstm(AVFormatContext *s, uint8_t *const *data,
         return ret;
     wr32(s, channels);
     for (int ch = 0; ch < channels; ch++) {
-        wr32(s, 0x41020000);
+        wr16(s, 0x4102); wr16(s, 0);
         wr32(s, ci0 + 8 * ch);
     }
     for (int ch = 0; ch < channels; ch++) {
-        wr32(s, c->is_adpcm ? 0x03000000 : 0xFFFFFFFF);
-        wr32(s, c->is_adpcm ? (unsigned)(ai0 + 46 * ch) : 0xFFFFFFFF);
+        wr16(s, c->is_adpcm ? 0x0300 : 0); wr16(s, 0);
+        wr32(s, c->is_adpcm ? (unsigned)(ai0 + 46 * ch - (ci0 + 8 * ch)) : 0xFFFFFFFF);
     }
     for (int ch = 0; ch < channels; ch++) {
         int ps = size[ch] ? data[ch][0] : 0;
