@@ -44,7 +44,7 @@ typedef struct RVIDFrame {
 
 typedef struct RVIDMuxContext {
     int bmp_mode, interlaced, compressed;
-    int vres, width, have_video;
+    int vres, width, have_video, video_stream;
 
     RVIDFrame *frames;
     int nframes, cap;
@@ -77,6 +77,10 @@ static int rvid_init(AVFormatContext *s)
     for (i = 0; i < s->nb_streams; i++) {
         AVCodecParameters *par = s->streams[i]->codecpar;
         if (par->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (m->have_video) {
+                av_log(s, AV_LOG_ERROR, "rvid: only one video stream is supported\n");
+                return AVERROR(EINVAL);
+            }
             if (par->codec_id != AV_CODEC_ID_RVID) {
                 av_log(s, AV_LOG_ERROR, "rvid: video must be the rvid codec\n");
                 return AVERROR(EINVAL);
@@ -90,12 +94,27 @@ static int rvid_init(AVFormatContext *s)
             m->compressed = par->extradata[2];
             m->width      = par->width;
             m->vres       = m->interlaced ? par->height / 2 : par->height;
+            if ((m->width != 240 && m->width != 256) ||
+                m->vres < 1 || m->vres > 255 || m->bmp_mode > 2 ||
+                (m->interlaced && (par->height & 1)))
+                return AVERROR(EINVAL);
+            m->video_stream = i;
             m->have_video = 1;
         } else if (par->codec_type == AVMEDIA_TYPE_AUDIO) {
+            if (m->have_audio ||
+                (par->codec_id != AV_CODEC_ID_PCM_S16LE && par->codec_id != AV_CODEC_ID_PCM_U8) ||
+                par->ch_layout.nb_channels < 1 || par->ch_layout.nb_channels > 2 ||
+                par->sample_rate < 1 || par->sample_rate > UINT16_MAX) {
+                av_log(s, AV_LOG_ERROR,
+                       "rvid: audio must be one mono/stereo PCM U8 or S16LE stream at 1-65535 Hz\n");
+                return AVERROR(EINVAL);
+            }
             m->channels    = par->ch_layout.nb_channels;
             m->sample_rate = par->sample_rate;
             m->audio_16bit = (par->codec_id == AV_CODEC_ID_PCM_S16LE);
             m->have_audio  = 1;
+        } else {
+            return AVERROR(EINVAL);
         }
     }
     if (!m->have_video) {
@@ -170,11 +189,13 @@ static int rvid_write_packet(AVFormatContext *s, AVPacket *pkt)
 
 static int fps_byte(AVFormatContext *s)
 {
-    AVRational fr = s->streams[0]->avg_frame_rate;
+    RVIDMuxContext *m = s->priv_data;
+    AVStream *st = s->streams[m->video_stream];
+    AVRational fr = st->avg_frame_rate;
     double fps;
     int base, reduce;
     if (fr.num <= 0 || fr.den <= 0)
-        fr = av_inv_q(s->streams[0]->time_base);
+        fr = av_inv_q(st->time_base);
     fps = av_q2d(fr);
     if (fps <= 0)
         return 30;
