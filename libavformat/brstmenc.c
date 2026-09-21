@@ -299,6 +299,26 @@ static void brstm_write_coefs(AVFormatContext *s, int ch)
         wr16(s, c->coefs[ch][i]);
 }
 
+static void brstm_write_loop_context(AVFormatContext *s, int ch,
+                                      const uint8_t *data, int size)
+{
+    BRSTMMuxContext *c = s->priv_data;
+    int16_t h1 = 0, h2 = 0;
+    int ps = 0;
+
+    if (c->is_adpcm && c->loop) {
+        int64_t off = c->loop_start / FF_DSP_ADPCM_SAMPLES_PER_FRAME *
+                      FF_DSP_ADPCM_BYTES_PER_FRAME;
+        if (off < size) {
+            ff_dsp_adpcm_advance_samples(data, c->loop_start, c->coefs[ch], &h1, &h2);
+            ps = data[off];
+        }
+    }
+    wr16(s, ps);
+    wr16(s, h1);
+    wr16(s, h2);
+}
+
 static int brstm_write_rstm(AVFormatContext *s, uint8_t *const *data,
                             const int *size, int64_t block_count,
                             int last_block_used, int last_block_size,
@@ -408,9 +428,7 @@ static int brstm_write_rstm(AVFormatContext *s, uint8_t *const *data,
         wr16(s, ps);                            /* initial predictor/scale */
         wr16(s, 0);                             /* initial hist1 */
         wr16(s, 0);                             /* initial hist2 */
-        wr16(s, 0);                             /* loop predictor/scale */
-        wr16(s, 0);                             /* loop hist1 */
-        wr16(s, 0);                             /* loop hist2 */
+        brstm_write_loop_context(s, ch, data[ch], size[ch]);
         wr16(s, 0);
     }
     if ((ret = pad_to(s, 0x40 + head_size)) < 0)
@@ -530,9 +548,7 @@ static int brstm_write_fstm(AVFormatContext *s, uint8_t *const *data,
         wr16(s, ps);                            /* initial predictor/scale */
         wr16(s, 0);                             /* initial hist1 */
         wr16(s, 0);                             /* initial hist2 */
-        wr16(s, 0);                             /* loop predictor/scale */
-        wr16(s, 0);                             /* loop hist1 */
-        wr16(s, 0);                             /* loop hist2 */
+        brstm_write_loop_context(s, ch, data[ch], size[ch]);
         wr16(s, 0);
     }
     if ((ret = pad_to(s, info_off + info_size)) < 0)
@@ -589,6 +605,12 @@ static int brstm_write_trailer(AVFormatContext *s)
                "the input has to come from the adpcm_thp encoder or from a "
                "container that carries the table\n");
         ret = AVERROR_INVALIDDATA;
+        goto end;
+    }
+
+    if (c->loop && c->loop_start >= c->nb_samples) {
+        av_log(s, AV_LOG_ERROR, "loop start is outside the audio samples\n");
+        ret = AVERROR(EINVAL);
         goto end;
     }
 
