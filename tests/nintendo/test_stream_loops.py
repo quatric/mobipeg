@@ -45,7 +45,7 @@ class StreamLoopTests(unittest.TestCase):
                                     coefs = body + u32(body + ci + 4)
                                     state = coefs + 0x28
                                 else:
-                                    coefs = channel_table + u32(channel_table + ci + 4)
+                                    coefs = channel_table + ci + u32(channel_table + ci + 4)
                                     state = coefs + 0x26
                                 decoded = subprocess.run([FFMPEG, '-v', 'error', '-i', str(path),
                                                           '-f', 's16le', '-'], capture_output=True, timeout=15)
@@ -63,3 +63,53 @@ class StreamLoopTests(unittest.TestCase):
                     with self.subTest(fmt=fmt, start=start):
                         result, _ = self.encode(directory, fmt, 'be', start)
                         self.assertGreater(result.returncode, 0)
+
+    def test_stream_references_and_seek_description(self):
+        # Follow NintendoWare references as external readers do, rather than
+        # assuming the contiguous coefficient layout used by our demuxer.
+        with tempfile.TemporaryDirectory() as directory:
+            for fmt in ('bfstm', 'bcstm'):
+                for endian in ('be', 'le'):
+                    with self.subTest(fmt=fmt, endian=endian):
+                        result, path = self.encode(directory, fmt, endian, 29)
+                        self.assertEqual(result.returncode, 0, result.stderr.decode())
+                        data = path.read_bytes()
+                        order = '>' if endian == 'be' else '<'
+                        u32 = lambda off: struct.unpack_from(order + 'I', data, off)[0]
+                        ref = lambda off: struct.unpack_from(order + 'HHI', data, off)
+                        body = u32(0x18) + 8
+                        kind, pad, offset = ref(body)
+                        self.assertEqual((kind, pad), (0x4100, 0))
+                        stream = body + offset
+                        self.assertEqual((u32(stream + 40), u32(stream + 44)), (4, 56))
+                        self.assertEqual(ref(stream + 48), (0x1f00, 0, 24))
+                        kind, pad, offset = ref(body + 16)
+                        self.assertEqual((kind, pad), (0x0101, 0))
+                        table = body + offset
+                        decoded = subprocess.run([FFMPEG, '-v', 'error', '-i', str(path),
+                                                  '-f', 's16le', '-'], capture_output=True, timeout=15)
+                        self.assertEqual(decoded.returncode, 0, decoded.stderr.decode())
+                        pcm = struct.unpack('<%dh' % (len(decoded.stdout) // 2), decoded.stdout)
+                        audio = u32(0x30) + 0x20
+                        for ch in range(2):
+                            kind, pad, offset = ref(table + 4 + 8 * ch)
+                            self.assertEqual((kind, pad), (0x4102, 0))
+                            ci = table + offset
+                            kind, pad, offset = ref(ci)
+                            self.assertEqual((kind, pad), (0x0300, 0))
+                            coefs = struct.unpack_from(order + '16h', data, ci + offset)
+                            h1 = h2 = 0
+                            samples = []
+                            for frame in range(4):
+                                off = audio + ch * 32 + frame * 8
+                                header = data[off]
+                                a, b = coefs[(header >> 4) * 2:(header >> 4) * 2 + 2]
+                                for n in range(14):
+                                    byte = data[off + 1 + n // 2]
+                                    nib = (byte & 15) if n % 2 else byte >> 4
+                                    if nib >= 8:
+                                        nib -= 16
+                                    value = ((h1 * a + h2 * b) >> 11) + nib * (1 << (header & 15))
+                                    h2, h1 = h1, max(-32768, min(32767, value))
+                                    samples.append(h1)
+                            self.assertEqual(samples, list(pcm[ch:112:2]))
