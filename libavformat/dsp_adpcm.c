@@ -67,19 +67,20 @@ static inline int nibble_value(int nibble)
     return nibble > 7 ? nibble - 16 : nibble;
 }
 
-void ff_dsp_adpcm_advance(const uint8_t *src, int64_t nb_frames,
+void ff_dsp_adpcm_advance_samples(const uint8_t *src, int64_t nb_samples,
                           const int16_t *coefs, int16_t *hist1, int16_t *hist2)
 {
     int s1 = *hist1, s2 = *hist2;
 
-    for (int64_t f = 0; f < nb_frames; f++) {
+    while (nb_samples > 0) {
         int header  = *src++;
         int index   = (header >> 4) & 7;
         unsigned e  = header & 0x0F;
-        int factor1 = coefs[index * 2];
-        int factor2 = coefs[index * 2 + 1];
+        int64_t factor1 = coefs[index * 2];
+        int64_t factor2 = coefs[index * 2 + 1];
 
-        for (int n = 0; n < FF_DSP_ADPCM_SAMPLES_PER_FRAME; n++) {
+        int count = FFMIN(nb_samples, FF_DSP_ADPCM_SAMPLES_PER_FRAME);
+        for (int n = 0; n < count; n++) {
             int byte = src[n >> 1];
             int nib  = nibble_value((n & 1) ? byte & 0x0F : byte >> 4);
             int sample = ((s1 * factor1 + s2 * factor2) >> 11) +
@@ -90,8 +91,16 @@ void ff_dsp_adpcm_advance(const uint8_t *src, int64_t nb_frames,
             s1 = sample;
         }
         src += FF_DSP_ADPCM_BYTES_PER_FRAME - 1;
+        nb_samples -= count;
     }
 
     *hist1 = s1;
     *hist2 = s2;
+}
+
+void ff_dsp_adpcm_advance(const uint8_t *src, int64_t nb_frames,
+                          const int16_t *coefs, int16_t *hist1, int16_t *hist2)
+{
+    ff_dsp_adpcm_advance_samples(src, nb_frames * FF_DSP_ADPCM_SAMPLES_PER_FRAME,
+                                coefs, hist1, hist2);
 }
