@@ -196,8 +196,8 @@ static int bns_build(AVFormatContext *s, uint8_t *const *data, const int *size,
         int64_t loop_off = loop_frames * FF_DSP_ADPCM_BYTES_PER_FRAME;
         int16_t loop_h1 = 0, loop_h2 = 0;
 
-        if (loop_off > 0 && loop_off < size[ch])
-            ff_dsp_adpcm_advance(data[ch], loop_frames, c->coefs[ch],
+        if (c->loop && loop_off < size[ch])
+            ff_dsp_adpcm_advance_samples(data[ch], c->loop_start, c->coefs[ch],
                                  &loop_h1, &loop_h2);
 
         for (int i = 0; i < 16; i++)
@@ -255,6 +255,12 @@ static int bns_write_trailer(AVFormatContext *s)
                "the input has to come from the adpcm_thp encoder or from a "
                "container that carries the table\n");
         ret = AVERROR_INVALIDDATA;
+        goto end;
+    }
+
+    if (c->loop && c->loop_start >= c->nb_samples) {
+        av_log(s, AV_LOG_ERROR, "loop start is outside the audio samples\n");
+        ret = AVERROR(EINVAL);
         goto end;
     }
 
