@@ -51,6 +51,7 @@ typedef struct RWAVMuxContext {
     int          is_adpcm;
     int          extradata_le;       /* DSP coefficients in extradata are LE */
     int          bytes_per_sample;   /* PCM only */
+    int          pcm_interleaved;
 } RWAVMuxContext;
 
 static void wr16(AVFormatContext *s, unsigned v)
@@ -141,6 +142,15 @@ static int rwav_common_init(AVFormatContext *s)
                FF_DSP_ADPCM_MAX_CHANNELS);
         return AVERROR(EINVAL);
     }
+    if (par->sample_rate <= 0 ||
+        (c->variant == RWAV_VARIANT_RWAV && par->sample_rate > UINT16_MAX)) {
+        av_log(s, AV_LOG_ERROR, "sample rate does not fit the wave header\n");
+        return AVERROR(EINVAL);
+    }
+
+    c->pcm_interleaved = par->codec_id == AV_CODEC_ID_PCM_S8 ||
+                        par->codec_id == AV_CODEC_ID_PCM_S16BE ||
+                        par->codec_id == AV_CODEC_ID_PCM_S16LE;
 
     if (c->little_endian < 0)
         c->little_endian = (c->variant == RWAV_VARIANT_CWAV);
@@ -206,15 +216,22 @@ static int rwav_write_packet(AVFormatContext *s, AVPacket *pkt)
         c->have_coefs = 1;
     }
 
-    if (pkt->size % channels) {
-        av_log(s, AV_LOG_ERROR, "packet of %d bytes is not divisible by %d channels\n",
+    if (pkt->size % (channels * (c->is_adpcm ? FF_DSP_ADPCM_BYTES_PER_FRAME : c->bytes_per_sample))) {
+        av_log(s, AV_LOG_ERROR, "packet of %d bytes does not contain complete frames for %d channels\n",
                pkt->size, channels);
         return AVERROR_INVALIDDATA;
     }
     per_ch = pkt->size / channels;
 
-    for (int ch = 0; ch < channels; ch++)
-        avio_write(c->ch_buf[ch], pkt->data + (size_t)ch * per_ch, per_ch);
+    for (int ch = 0; ch < channels; ch++) {
+        if (c->pcm_interleaved) {
+            int bps = c->bytes_per_sample;
+            for (int pos = ch * bps; pos < pkt->size; pos += channels * bps)
+                avio_write(c->ch_buf[ch], pkt->data + pos, bps);
+        } else {
+            avio_write(c->ch_buf[ch], pkt->data + (size_t)ch * per_ch, per_ch);
+        }
+    }
 
     if (pkt->duration > 0)
         c->nb_samples += pkt->duration;
@@ -266,40 +283,40 @@ static int rwav_write_trailer(AVFormatContext *s)
 
         /* Header (0x20) */
         wr_tag(s, "RWAV");
-        avio_wb16(s->pb, 0xFEFF); /* BOM */
-        avio_wb16(s->pb, 0x0100); /* version 1.0 */
-        avio_wb32(s->pb, file_size);
-        avio_wb16(s->pb, 0x20);   /* header size */
-        avio_wb16(s->pb, 2);      /* chunk count */
-        avio_wb32(s->pb, 0x20);   /* info offset */
-        avio_wb32(s->pb, info_chunk_size);
-        avio_wb32(s->pb, 0x20 + info_chunk_size); /* data offset */
-        avio_wb32(s->pb, data_chunk_size);
+        wr16(s, 0xFEFF); /* BOM */
+        wr16(s, 0x0100); /* version 1.0 */
+        wr32(s, file_size);
+        wr16(s, 0x20);   /* header size */
+        wr16(s, 2);      /* chunk count */
+        wr32(s, 0x20);   /* info offset */
+        wr32(s, info_chunk_size);
+        wr32(s, 0x20 + info_chunk_size); /* data offset */
+        wr32(s, data_chunk_size);
 
         /* INFO chunk */
         int64_t info_pos = avio_tell(s->pb);
         wr_tag(s, "INFO");
-        avio_wb32(s->pb, info_chunk_size);
+        wr32(s, info_chunk_size);
         avio_w8(s->pb, encoding);
         avio_w8(s->pb, c->loop ? 1 : 0);
         avio_w8(s->pb, channels);
         avio_w8(s->pb, 0);
-        avio_wb16(s->pb, sample_rate);
+        wr16(s, sample_rate);
         avio_w8(s->pb, 0); avio_w8(s->pb, 0);
-        avio_wb32(s->pb, (uint32_t)loop_nibbles);
-        avio_wb32(s->pb, c->is_adpcm ? (uint32_t)nibbles : (uint32_t)n_samples);
-        avio_wb32(s->pb, ch_table_off);
-        avio_wb32(s->pb, 0); avio_wb32(s->pb, 0);
+        wr32(s, (uint32_t)loop_nibbles);
+        wr32(s, c->is_adpcm ? (uint32_t)nibbles : (uint32_t)n_samples);
+        wr32(s, ch_table_off);
+        wr32(s, 0); wr32(s, 0);
 
         for (int ch = 0; ch < channels; ch++)
-            avio_wb32(s->pb, ci_base + ci_size * ch);
+            wr32(s, ci_base + ci_size * ch);
 
         for (int ch = 0; ch < channels; ch++) {
-            avio_wb32(s->pb, ch * ch_bytes[0]);
-            avio_wb32(s->pb, c->is_adpcm ? (ai_base + ai_size * ch) : 0);
-            avio_wb32(s->pb, 1); avio_wb32(s->pb, 1);
-            avio_wb32(s->pb, 1); avio_wb32(s->pb, 1);
-            avio_wb32(s->pb, 0);
+            wr32(s, ch * ch_bytes[0]);
+            wr32(s, c->is_adpcm ? (ai_base + ai_size * ch) : 0);
+            wr32(s, 1); wr32(s, 1);
+            wr32(s, 1); wr32(s, 1);
+            wr32(s, 0);
         }
 
         if (c->is_adpcm) {
@@ -320,7 +337,7 @@ static int rwav_write_trailer(AVFormatContext *s)
         /* DATA chunk */
         int64_t data_pos = avio_tell(s->pb);
         wr_tag(s, "DATA");
-        avio_wb32(s->pb, data_chunk_size);
+        wr32(s, data_chunk_size);
         for (int ch = 0; ch < channels; ch++)
             avio_write(s->pb, ch_data[ch], ch_bytes[ch]);
         if ((ret = pad_to(s, data_pos + data_chunk_size)) < 0)

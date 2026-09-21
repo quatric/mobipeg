@@ -89,7 +89,7 @@ unpacks those archives into the loose wave files this reads and writes.
 ```sh
 ffmpeg -i input.wav -c:a adpcm_thp out.brwav
 ffmpeg -i input.wav -c:a adpcm_thp out.bfwav
-ffmpeg -i input.wav -c:a pcm_s16be_planar out.bcwav
+ffmpeg -i input.wav -c:a pcm_s16le_planar out.bcwav
 ffmpeg -i sound.bcwav out.wav
 ```
 
