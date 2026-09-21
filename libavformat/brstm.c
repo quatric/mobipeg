@@ -103,21 +103,29 @@ static av_always_inline unsigned int read32(AVFormatContext *s)
         return avio_rb32(s->pb);
 }
 
-/* NintendoWare channel and codec references use different relative bases. */
-static int read_bfstm_coefs(AVFormatContext *s, int64_t pos, uint32_t size,
-                            int64_t table, int channels)
+/* Stream variants use different bases for channel and codec references. */
+static int read_stream_coefs(AVFormatContext *s, int64_t pos, uint32_t size,
+                            int64_t table, int channels, int bfstm)
 {
     BRSTMDemuxContext *b = s->priv_data;
 
     if (table < 8 || table > size - 4LL - 8LL * channels ||
-        avio_seek(s->pb, pos + table, SEEK_SET) < 0 || read32(s) != channels)
+        avio_seek(s->pb, pos + table, SEEK_SET) < 0)
         return AVERROR_INVALIDDATA;
+    if (bfstm) {
+        if (read32(s) != channels)
+            return AVERROR_INVALIDDATA;
+    } else {
+        if (avio_r8(s->pb) != channels)
+            return AVERROR_INVALIDDATA;
+        avio_skip(s->pb, 3);
+    }
     for (int ch = 0; ch < channels; ch++) {
         int type = read16(s);
         int64_t offset;
         read16(s); /* padding */
-        offset = table + read32(s);
-        if (type != 0x4102 || offset < 8 || offset > size - 8LL)
+        offset = (bfstm ? table : 8) + (int64_t)read32(s);
+        if ((bfstm && type != 0x4102) || offset < 8 || offset > size - 8LL)
             return AVERROR_INVALIDDATA;
         b->offsets[ch].channel = ch;
         b->offsets[ch].offset = offset;
@@ -130,8 +138,9 @@ static int read_bfstm_coefs(AVFormatContext *s, int64_t pos, uint32_t size,
             return AVERROR_INVALIDDATA;
         type = read16(s);
         read16(s); /* padding */
-        offset += read32(s);
-        if (type != 0x0300 || offset < 8 || offset > size - 46LL)
+        offset = (bfstm ? offset : 8) + (int64_t)read32(s);
+        if ((bfstm && type != 0x0300) || offset < 8 ||
+            offset > size - (bfstm ? 46LL : 48LL))
             return AVERROR_INVALIDDATA;
         b->offsets[ch].offset = offset;
     }
@@ -307,34 +316,9 @@ static int read_header(AVFormatContext *s)
 
 
     if (codec == AV_CODEC_ID_ADPCM_THP || codec == AV_CODEC_ID_ADPCM_THP_LE) {
-        int ch;
-
-        if (bfstm) {
-            if (read_bfstm_coefs(s, pos, size, toffset - 8,
-                                 st->codecpar->ch_layout.nb_channels) < 0)
-                return AVERROR_INVALIDDATA;
-        } else {
-            avio_skip(s->pb, pos + toffset - avio_tell(s->pb));
-            toffset = read32(s) + 16LL;
-            if (toffset > size)
-                return AVERROR_INVALIDDATA;
-
-            avio_skip(s->pb, pos + toffset - avio_tell(s->pb) - 8LL * (st->codecpar->ch_layout.nb_channels + 1));
-            for (ch = 0; ch < st->codecpar->ch_layout.nb_channels; ch++) {
-                avio_skip(s->pb, 4);
-                b->offsets[ch].channel = ch;
-                b->offsets[ch].offset = read32(s);
-            }
-
-            qsort(b->offsets, st->codecpar->ch_layout.nb_channels, sizeof(*b->offsets), sort_offsets);
-            avio_skip(s->pb, pos + toffset - avio_tell(s->pb));
-
-            for (ch = 0; ch < st->codecpar->ch_layout.nb_channels; ch++) {
-                avio_skip(s->pb, pos + 16LL + b->offsets[ch].offset - avio_tell(s->pb));
-                if (avio_read(s->pb, b->table + ch * 32, 32) != 32)
-                    return AVERROR_INVALIDDATA;
-            }
-        }
+        if (read_stream_coefs(s, pos, size, toffset - 8,
+                              st->codecpar->ch_layout.nb_channels, bfstm) < 0)
+            return AVERROR_INVALIDDATA;
     }
 
     if (size < (avio_tell(s->pb) - pos))
