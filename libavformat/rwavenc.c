@@ -241,6 +241,33 @@ static int rwav_write_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
+/* RWAV retains the DSP gain word; FWAV/CWAV contain only decoder contexts. */
+static void rwav_write_adpcm_info(AVFormatContext *s, int ch, const uint8_t *data,
+                                  int size)
+{
+    RWAVMuxContext *c = s->priv_data;
+    int16_t h1 = 0, h2 = 0;
+    int loop_ps = 0;
+
+    if (c->loop) {
+        int64_t off = c->loop_start / FF_DSP_ADPCM_SAMPLES_PER_FRAME *
+                      FF_DSP_ADPCM_BYTES_PER_FRAME;
+        if (off < size) {
+            ff_dsp_adpcm_advance_samples(data, c->loop_start, c->coefs[ch], &h1, &h2);
+            loop_ps = data[off];
+        }
+    }
+    for (int i = 0; i < 16; i++)
+        wr16(s, (uint16_t)c->coefs[ch][i]);
+    if (c->variant == RWAV_VARIANT_RWAV)
+        wr16(s, 0); /* gain */
+    wr16(s, size ? data[0] : 0);
+    wr16(s, 0); wr16(s, 0); /* initial histories */
+    wr16(s, loop_ps);
+    wr16(s, h1); wr16(s, h2);
+    wr16(s, 0); /* padding */
+}
+
 static int rwav_write_trailer(AVFormatContext *s)
 {
     RWAVMuxContext *c = s->priv_data;
@@ -260,6 +287,12 @@ static int rwav_write_trailer(AVFormatContext *s)
         n_samples = c->nb_samples;
     else
         n_samples = bytes_to_samples(c, ch_bytes[0]);
+
+    if (c->loop && c->loop_start >= n_samples) {
+        av_log(s, AV_LOG_ERROR, "loop start is outside the audio samples\n");
+        ret = AVERROR(EINVAL);
+        goto fail;
+    }
 
     encoding = c->is_adpcm ? 2 : (c->bytes_per_sample == 2 ? 1 : 0);
 
@@ -319,17 +352,9 @@ static int rwav_write_trailer(AVFormatContext *s)
             wr32(s, 0);
         }
 
-        if (c->is_adpcm) {
-            for (int ch = 0; ch < channels; ch++) {
-                for (int i = 0; i < 16; i++)
-                    wr16(s, (uint16_t)c->coefs[ch][i]);
-                wr16(s, 0); /* gain */
-                wr16(s, ch_bytes[ch] ? ch_data[ch][0] : 0); /* ps */
-                wr16(s, 0); wr16(s, 0); /* yn1, yn2 */
-                wr16(s, 0); wr16(s, 0); wr16(s, 0); /* loop ps, yn1, yn2 */
-                wr16(s, 0); /* pad */
-            }
-        }
+        if (c->is_adpcm)
+            for (int ch = 0; ch < channels; ch++)
+                rwav_write_adpcm_info(s, ch, ch_data[ch], ch_bytes[ch]);
 
         if ((ret = pad_to(s, info_pos + info_chunk_size)) < 0)
             goto fail;
@@ -410,17 +435,9 @@ static int rwav_write_trailer(AVFormatContext *s)
             wr32(s, 0);
         }
 
-        if (c->is_adpcm) {
-            for (int ch = 0; ch < channels; ch++) {
-                for (int i = 0; i < 16; i++)
-                    wr16(s, (uint16_t)c->coefs[ch][i]);
-                wr16(s, 0); /* gain */
-                wr16(s, 0); /* ps */
-                wr16(s, 0); wr16(s, 0); /* yn1, yn2 */
-                wr16(s, 0); /* loop ps */
-                wr16(s, 0); wr16(s, 0); /* loop yn1, yn2 */
-            }
-        }
+        if (c->is_adpcm)
+            for (int ch = 0; ch < channels; ch++)
+                rwav_write_adpcm_info(s, ch, ch_data[ch], ch_bytes[ch]);
 
         if ((ret = pad_to(s, info_pos + info_chunk_size)) < 0)
             goto fail;

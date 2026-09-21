@@ -21,11 +21,11 @@ class WaveFormatTests(unittest.TestCase):
                             for i in range(18000))
         self.source.write_bytes(self.raw)
 
-    def encode(self, fmt, codec, endian, rate=32000):
+    def encode(self, fmt, codec, endian, rate=32000, extra=()):
         path = self.root / ('output.' + fmt)
         result = subprocess.run([
             FFMPEG, '-v', 'error', '-y', '-f', 's16le', '-ar', str(rate), '-ac', '2',
-            '-i', str(self.source), '-c:a', codec, '-endian', endian, str(path)],
+            '-i', str(self.source), '-c:a', codec, '-endian', endian, *extra, str(path)],
             capture_output=True, timeout=15)
         return result, path
 
@@ -114,3 +114,44 @@ class WaveFormatTests(unittest.TestCase):
                         capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
                     self.assertEqual(result.stdout, raw)
+
+    def test_wave_loop_context(self):
+        for fmt in ('rwav', 'fwav', 'cwav'):
+            for endian in ('be', 'le'):
+                for start in (0, 1, 13, 14, 29, 17999):
+                    with self.subTest(fmt=fmt, endian=endian, start=start):
+                        result, path = self.encode(fmt, 'adpcm_thp', endian,
+                                                   extra=('-loop', '1', '-loop_start', str(start)))
+                        self.assertEqual(result.returncode, 0, result.stderr.decode())
+                        data = path.read_bytes()
+                        order = '>' if endian == 'be' else '<'
+                        u32 = lambda off: struct.unpack_from(order + 'I', data, off)[0]
+                        decoded = subprocess.run([FFMPEG, '-v', 'error', '-i', str(path),
+                                                  '-f', 's16le', '-'], capture_output=True, timeout=15)
+                        self.assertEqual(decoded.returncode, 0, decoded.stderr.decode())
+                        pcm = struct.unpack('<%dh' % (len(decoded.stdout) // 2), decoded.stdout)
+                        for ch in range(2):
+                            if fmt == 'rwav':
+                                info = u32(0x10) + 8
+                                ci = info + u32(info + u32(info + 16) + ch * 4)
+                                state = info + u32(ci + 4) + 0x22
+                                audio = u32(0x18) + 8 + u32(ci)
+                            else:
+                                anchor = u32(0x18) + 0x1c
+                                ci = anchor + u32(anchor + 8 + ch * 8)
+                                state = ci + u32(ci + 12) + 0x20
+                                audio = u32(0x24) + 8 + u32(ci + 4)
+                            ps, h1, h2, lps, lh1, lh2 = struct.unpack_from(order + 'HhhHhh', data, state)
+                            self.assertEqual((ps, h1, h2), (data[audio], 0, 0))
+                            self.assertEqual(lps, data[audio + start // 14 * 8])
+                            self.assertEqual(lh1, pcm[(start - 1) * 2 + ch] if start else 0)
+                            self.assertEqual(lh2, pcm[(start - 2) * 2 + ch] if start > 1 else 0)
+
+    def test_wave_rejects_invalid_loop_start(self):
+        for fmt in ('rwav', 'fwav', 'cwav'):
+            for codec in ('adpcm_thp', 'pcm_s16be'):
+                for start in (18000, 2**63 - 1):
+                    with self.subTest(fmt=fmt, codec=codec, start=start):
+                        result, _ = self.encode(fmt, codec, 'be',
+                                               extra=('-loop', '1', '-loop_start', str(start)))
+                        self.assertGreater(result.returncode, 0)
