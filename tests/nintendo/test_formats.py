@@ -8,6 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 FFMPEG = os.environ.get('FFMPEG', str(ROOT / 'ffmpeg'))
+FFPROBE = os.environ.get('FFPROBE', str(ROOT / 'ffprobe'))
 
 
 def lz_literals(data):
@@ -157,3 +158,55 @@ class NintendoFormatTests(unittest.TestCase):
                         capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
                     self.assertEqual(result.stdout, raw)
+
+    def test_rvid_rejects_invalid_tables_and_audio_ranges(self):
+        valid = rvid_frame(bytes(512), compressed=False)
+        cases = []
+        short_table = bytearray(valid[:0x204])
+        struct.pack_into('<I', short_table, 8, 4)
+        cases.append(short_table)
+        invalid_frame = bytearray(valid)
+        struct.pack_into('<I', invalid_frame, 0x200, len(valid) - 1)
+        cases.append(invalid_frame)
+        invalid_fps = bytearray(valid)
+        invalid_fps[12] = 0x80
+        cases.append(invalid_fps)
+        invalid_audio = bytearray(valid)
+        struct.pack_into('<H', invalid_audio, 16, 32000)
+        struct.pack_into('<II', invalid_audio, 24, len(valid) + 10, len(valid) + 20)
+        cases.append(invalid_audio)
+        short_sizes = bytearray(rvid_frame(lz_literals(bytes(512))))
+        struct.pack_into('<I', short_sizes, 20, len(short_sizes) - 1)
+        cases.append(short_sizes)
+        for index, data in enumerate(cases):
+            with self.subTest(case=index):
+                path = self.root / 'invalid.rvid'
+                path.write_bytes(data)
+                result = subprocess.run([FFPROBE, '-v', 'error', '-f', 'rvid',
+                                         '-show_streams', str(path)],
+                                        capture_output=True, timeout=15)
+                self.assertGreater(result.returncode, 0, result.stderr.decode(errors='replace'))
+
+    def test_rvid_audio_packets_are_bounded_and_timestamped(self):
+        # Both channel blocks are long enough to need several packets.
+        frames = bytearray(rvid_frame(bytes(512), compressed=False))
+        left = bytes(range(256)) * 160
+        right = bytes(reversed(range(256))) * 160
+        struct.pack_into('<H', frames, 16, 32000)
+        frames[18] = 1
+        struct.pack_into('<II', frames, 24, len(frames), len(frames) + len(left))
+        path = self.root / 'packets.rvid'
+        path.write_bytes(frames + left + right)
+        result = subprocess.run([FFPROBE, '-v', 'error', '-select_streams', 'a',
+                                 '-show_packets', '-show_entries', 'packet=pts,duration,size',
+                                 '-of', 'json', str(path)], capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        import json
+        packets = json.loads(result.stdout)['packets']
+        self.assertGreater(len(packets), 1)
+        samples = 0
+        for packet in packets:
+            self.assertLessEqual(int(packet['size']), 16384)
+            self.assertEqual(packet['pts'], samples)
+            samples += packet['duration']
+        self.assertEqual(samples, len(left) // 2)

@@ -28,6 +28,7 @@
 
 #define RVID_MAGIC MKTAG('R', 'V', 'I', 'D')
 #define RVID_PAL_BYTES 0x200
+#define RVID_AUDIO_PACKET_SAMPLES 4096
 
 typedef struct RVIDDemuxContext {
     int      nframes;
@@ -37,7 +38,7 @@ typedef struct RVIDDemuxContext {
     uint32_t *comp;        /* per-frame payload size (compressed builds) */
     int      frame;        /* next video frame to emit */
     int      vstream, astream;
-    int      audio_done;
+    int64_t  audio_bytes, audio_pos; /* per channel */
     int64_t  snd_left, snd_right, file_size;
     int      audio_16bit, channels, sample_rate;
 } RVIDDemuxContext;
@@ -81,12 +82,34 @@ static int rvid_read_header(AVFormatContext *s)
     c->snd_right   = AV_RL32(hdr + 0x1C);
     c->compressed  = comp_off != 0;
 
-    if (dual > 2)
+    if (dual > 2 || c->bmp_mode > 2 || fps_base == 0x80)
         return AVERROR_INVALIDDATA;
     if (c->nframes <= 0 || c->vres <= 0 || c->vres > 255)
         return AVERROR_INVALIDDATA;
     c->width = dual == 2 ? 240 : 256;
     c->file_size = avio_size(pb);
+
+    if (c->file_size > 0 &&
+        (0x200 + 4LL * c->nframes > c->file_size ||
+         (c->compressed && (int64_t)comp_off +
+          (c->bmp_mode == 0 ? 2LL : 4LL) * c->nframes > c->file_size)))
+        return AVERROR_INVALIDDATA;
+
+    if (c->snd_right && (!c->snd_left || c->snd_right <= c->snd_left))
+        return AVERROR_INVALIDDATA;
+    if (c->snd_left) {
+        int bps = c->audio_16bit ? 2 : 1;
+        int64_t left_size;
+
+        if (!c->sample_rate || c->snd_left < 0x200 ||
+            c->snd_left > c->file_size || c->snd_right > c->file_size)
+            return AVERROR_INVALIDDATA;
+        left_size = (c->snd_right ? c->snd_right : c->file_size) - c->snd_left;
+        c->audio_bytes = c->snd_right
+            ? FFMIN(left_size, c->file_size - c->snd_right) : left_size;
+        if (left_size % bps || (c->snd_right && (c->file_size - c->snd_right) % bps))
+            return AVERROR_INVALIDDATA;
+    }
 
     /* frame offset table at 0x200 */
     c->ftab = av_malloc_array(c->nframes, sizeof(*c->ftab));
@@ -94,8 +117,11 @@ static int rvid_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     if (avio_seek(pb, 0x200, SEEK_SET) < 0)
         return AVERROR_INVALIDDATA;
-    for (i = 0; i < c->nframes; i++)
+    for (i = 0; i < c->nframes; i++) {
         c->ftab[i] = avio_rl32(pb);
+        if (avio_feof(pb))
+            return AVERROR_INVALIDDATA;
+    }
 
     if (c->compressed) {
         c->comp = av_malloc_array(c->nframes, sizeof(*c->comp));
@@ -103,8 +129,20 @@ static int rvid_read_header(AVFormatContext *s)
             return AVERROR(ENOMEM);
         if (avio_seek(pb, comp_off, SEEK_SET) < 0)
             return AVERROR_INVALIDDATA;
-        for (i = 0; i < c->nframes; i++)
+        for (i = 0; i < c->nframes; i++) {
             c->comp[i] = (c->bmp_mode == 0) ? avio_rl16(pb) : avio_rl32(pb);
+            if (avio_feof(pb) || c->comp[i] < 4 || c->comp[i] > INT_MAX - RVID_PAL_BYTES)
+                return AVERROR_INVALIDDATA;
+        }
+    }
+
+    for (i = 0; i < c->nframes; i++) {
+        int pal = c->bmp_mode == 0 ? RVID_PAL_BYTES : 0;
+        int64_t size = pal + (c->compressed ? c->comp[i]
+            : c->width * c->vres * (c->bmp_mode == 0 ? 1 : 2));
+        if (c->ftab[i] < 0x200 ||
+            (c->file_size > 0 && c->ftab[i] + size > c->file_size))
+            return AVERROR_INVALIDDATA;
     }
 
     /* video stream */
@@ -175,6 +213,10 @@ static int rvid_read_packet(AVFormatContext *s, AVPacket *pkt)
             return AVERROR_EOF;
         if ((ret = av_get_packet(pb, pkt, size)) < 0)
             return ret;
+        if (ret != size) {
+            av_packet_unref(pkt);
+            return AVERROR_INVALIDDATA;
+        }
         pkt->stream_index = c->vstream;
         pkt->pts = pkt->dts = i;
         pkt->duration = 1;
@@ -183,43 +225,35 @@ static int rvid_read_packet(AVFormatContext *s, AVPacket *pkt)
         return 0;
     }
 
-    /* audio after all video: interleave L/R on the fly into one packet */
-    if (c->astream >= 0 && !c->audio_done) {
-        int64_t end_l = c->snd_right ? c->snd_right :
-                        (c->file_size > 0 ? c->file_size : c->snd_left);
-        int lsize = (int)(end_l - c->snd_left);
+    /* The channels are separate file regions. Read bounded chunks rather
+     * than allocating the complete soundtrack in one packet. */
+    if (c->astream >= 0 && c->audio_pos < c->audio_bytes) {
+        uint8_t channel[RVID_AUDIO_PACKET_SAMPLES * 2];
         int bps = c->audio_16bit ? 2 : 1;
-        c->audio_done = 1;
-        if (lsize <= 0)
-            return AVERROR_EOF;
+        int per_ch = FFMIN(c->audio_bytes - c->audio_pos,
+                           RVID_AUDIO_PACKET_SAMPLES * bps);
 
-        if (c->channels == 1) {
-            if (avio_seek(pb, c->snd_left, SEEK_SET) < 0)
-                return AVERROR_EOF;
-            if ((ret = av_get_packet(pb, pkt, lsize)) < 0)
-                return ret;
-        } else {
-            int64_t end_r = c->file_size > 0 ? c->file_size
-                                             : c->snd_right + lsize;
-            int rsize = (int)(end_r - c->snd_right);
-            int n = FFMIN(lsize, rsize) / bps;   /* samples per channel */
-            uint8_t *lbuf = av_malloc(FFMAX(1, n * bps));
-            uint8_t *rbuf = av_malloc(FFMAX(1, n * bps));
-            int k;
-            if (!lbuf || !rbuf) { av_free(lbuf); av_free(rbuf); return AVERROR(ENOMEM); }
-            avio_seek(pb, c->snd_left, SEEK_SET);  avio_read(pb, lbuf, n * bps);
-            avio_seek(pb, c->snd_right, SEEK_SET); avio_read(pb, rbuf, n * bps);
-            if ((ret = av_new_packet(pkt, n * bps * 2)) < 0) {
-                av_free(lbuf); av_free(rbuf); return ret;
+        if ((ret = av_new_packet(pkt, per_ch * c->channels)) < 0)
+            return ret;
+        for (int ch = 0; ch < c->channels; ch++) {
+            int64_t offset = (ch ? c->snd_right : c->snd_left) + c->audio_pos;
+            int64_t seek_ret = avio_seek(pb, offset, SEEK_SET);
+            if (seek_ret < 0) {
+                av_packet_unref(pkt);
+                return seek_ret;
             }
-            for (k = 0; k < n; k++) {
-                memcpy(pkt->data + (2 * k)     * bps, lbuf + k * bps, bps);
-                memcpy(pkt->data + (2 * k + 1) * bps, rbuf + k * bps, bps);
+            ret = avio_read(pb, channel, per_ch);
+            if (ret != per_ch) {
+                av_packet_unref(pkt);
+                return ret < 0 && ret != AVERROR_EOF ? ret : AVERROR_INVALIDDATA;
             }
-            av_free(lbuf); av_free(rbuf);
+            for (int k = 0; k < per_ch / bps; k++)
+                memcpy(pkt->data + (c->channels * k + ch) * bps, channel + k * bps, bps);
         }
         pkt->stream_index = c->astream;
-        pkt->pts = pkt->dts = 0;
+        pkt->pts = pkt->dts = c->audio_pos / bps;
+        pkt->duration = per_ch / bps;
+        c->audio_pos += per_ch;
         return 0;
     }
 
@@ -239,6 +273,7 @@ const FFInputFormat ff_rvid_demuxer = {
     .p.long_name    = NULL_IF_CONFIG_SMALL("RocketVideo (RVID)"),
     .p.extensions   = "rvid",
     .priv_data_size = sizeof(RVIDDemuxContext),
+    .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe     = rvid_probe,
     .read_header    = rvid_read_header,
     .read_packet    = rvid_read_packet,
