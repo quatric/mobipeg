@@ -3,6 +3,11 @@ fate-api-flac: $(APITESTSDIR)/api-flac-test$(EXESUF)
 fate-api-flac: CMD = run $(APITESTSDIR)/api-flac-test$(EXESUF)
 fate-api-flac: CMP = null
 
+FATE_API_LIBAVCODEC-$(CONFIG_RVID_DECODER) += fate-api-rvid
+fate-api-rvid: $(APITESTSDIR)/api-rvid-test$(EXESUF)
+fate-api-rvid: CMD = run $(APITESTSDIR)/api-rvid-test$(EXESUF)
+fate-api-rvid: CMP = null
+
 FATE_API_LIBAVCODEC-$(call ALLYES, H261_ENCODER H261_PARSER) += fate-api-enc-parser fate-api-enc-parser-cif
 fate-api-enc-parser: $(APITESTSDIR)/api-enc-parser-test$(EXESUF)
 fate-api-enc-parser: CMD = run $(APITESTSDIR)/api-enc-parser-test$(EXESUF) h261 176 144
