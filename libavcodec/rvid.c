@@ -102,7 +102,10 @@ static av_cold int rvid_decode_init(AVCodecContext *avctx)
     c->width  = avctx->width;
     c->disp_h = avctx->height;
     c->vres   = c->interlaced ? c->disp_h / 2 : c->disp_h;
-    if (c->width <= 0 || c->vres <= 0 || c->vres > 255)
+    if ((c->width != 240 && c->width != 256) ||
+        c->vres <= 0 || c->vres > 255 ||
+        (c->interlaced && (c->disp_h & 1)) ||
+        c->bmp_mode > RVID_BMP_565)
         return AVERROR_INVALIDDATA;
     avctx->pix_fmt = AV_PIX_FMT_RGB24;
 
@@ -135,8 +138,8 @@ static int rvid_decode_frame(AVCodecContext *avctx, AVFrame *frame,
             ret = avpriv_nintendo_lz10_decompress(avpkt->data + RVID_PAL_BYTES,
                                        avpkt->size - RVID_PAL_BYTES,
                                        c->scratch, W * VR);
-            if (ret < 0)
-                return ret;
+            if (ret != W * VR)
+                return ret < 0 ? ret : AVERROR_INVALIDDATA;
             px = c->scratch;
         } else {
             if (avpkt->size < RVID_PAL_BYTES + W * VR)
@@ -147,8 +150,8 @@ static int rvid_decode_frame(AVCodecContext *avctx, AVFrame *frame,
         if (c->compressed) {
             ret = avpriv_nintendo_lz10_decompress(avpkt->data, avpkt->size,
                                        c->scratch, W * VR * 2);
-            if (ret < 0)
-                return ret;
+            if (ret != W * VR * 2)
+                return ret < 0 ? ret : AVERROR_INVALIDDATA;
             px = c->scratch;
         } else {
             if (avpkt->size < W * VR * 2)
@@ -203,6 +206,15 @@ static av_cold int rvid_decode_close(AVCodecContext *avctx)
     return 0;
 }
 
+static void rvid_decode_flush(AVCodecContext *avctx)
+{
+    RVIDDecCtx *c = avctx->priv_data;
+
+    c->frame_idx = 0;
+    if (c->persist)
+        memset(c->persist, 0, (size_t)c->width * c->disp_h * 3);
+}
+
 const FFCodec ff_rvid_decoder = {
     .p.name         = "rvid",
     CODEC_LONG_NAME("RocketVideo (RVID)"),
@@ -212,7 +224,9 @@ const FFCodec ff_rvid_decoder = {
     .priv_data_size = sizeof(RVIDDecCtx),
     .init           = rvid_decode_init,
     .close          = rvid_decode_close,
+    .flush          = rvid_decode_flush,
     FF_CODEC_DECODE_CB(rvid_decode_frame),
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };
 
 /* --------------------------------------------------------------------------
@@ -417,4 +431,5 @@ const FFCodec ff_rvid_encoder = {
     .close          = rvid_encode_close,
     FF_CODEC_ENCODE_CB(rvid_encode_frame),
     CODEC_PIXFMTS(AV_PIX_FMT_RGB24),
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

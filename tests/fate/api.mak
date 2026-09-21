@@ -10,6 +10,10 @@ fate-api-flac: CMP = null
 FATE_API_LIBAVCODEC-$(CONFIG_MOVTEXT_ENCODER) += fate-api-movtext
 fate-api-movtext: $(APITESTSDIR)/api-movtext-test$(EXESUF)
 fate-api-movtext: CMD = run $(APITESTSDIR)/api-movtext-test$(EXESUF)
+FATE_API_LIBAVCODEC-$(CONFIG_RVID_DECODER) += fate-api-rvid
+fate-api-rvid: $(APITESTSDIR)/api-rvid-test$(EXESUF)
+fate-api-rvid: CMD = run $(APITESTSDIR)/api-rvid-test$(EXESUF)
+fate-api-rvid: CMP = null
 
 FATE_API_LIBAVCODEC-$(call ALLYES, H261_ENCODER H261_PARSER) += fate-api-enc-parser fate-api-enc-parser-cif
 fate-api-enc-parser: $(APITESTSDIR)/api-enc-parser-test$(EXESUF)

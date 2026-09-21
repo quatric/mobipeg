@@ -114,6 +114,9 @@ static int bns_unwrap(AVFormatContext *s, uint8_t **bufp, int *sizep)
             av_free(buf);
             buf  = out;
             size = out_size;
+            /* Keep the owner's pointer valid if a later wrapper fails. */
+            *bufp = buf;
+            *sizep = size;
             continue;
         }
 
