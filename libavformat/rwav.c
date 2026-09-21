@@ -51,7 +51,7 @@ static int probe_rwav(const AVProbeData *p)
 {
     if (AV_RL32(p->buf) == MKTAG('R','W','A','V') &&
         (AV_RB16(p->buf + 4) == 0xFEFF || AV_RB16(p->buf + 4) == 0xFFFE))
-        return AVPROBE_SCORE_MAX / 3 * 2;
+        return AVPROBE_SCORE_MAX;
     return 0;
 }
 
@@ -59,7 +59,7 @@ static int probe_fwav(const AVProbeData *p)
 {
     if (AV_RL32(p->buf) == MKTAG('F','W','A','V') &&
         (AV_RB16(p->buf + 4) == 0xFEFF || AV_RB16(p->buf + 4) == 0xFFFE))
-        return AVPROBE_SCORE_MAX / 3 * 2;
+        return AVPROBE_SCORE_MAX;
     return 0;
 }
 
@@ -67,7 +67,7 @@ static int probe_cwav(const AVProbeData *p)
 {
     if (AV_RL32(p->buf) == MKTAG('C','W','A','V') &&
         (AV_RB16(p->buf + 4) == 0xFEFF || AV_RB16(p->buf + 4) == 0xFFFE))
-        return AVPROBE_SCORE_MAX / 3 * 2;
+        return AVPROBE_SCORE_MAX;
     return 0;
 }
 
@@ -93,6 +93,7 @@ static int rwav_read_header(AVFormatContext *s)
 {
     RWAVDemuxContext *b = s->priv_data;
     AVStream *st;
+    int64_t input_size = avio_size(s->pb);
     uint32_t magic;
     int bom;
 
@@ -200,7 +201,7 @@ static int rwav_read_header(AVFormatContext *s)
             if (avio_seek(s->pb, wave_info_pos + ci_off, SEEK_SET) < 0)
                 return AVERROR_INVALIDDATA;
             ch_data_rel = read32(s);
-            b->ch_data_offsets[ch] = data_offset + 8 + ch_data_rel;
+            b->ch_data_offsets[ch] = (int64_t)data_offset + 8 + ch_data_rel;
             if (b->is_adpcm) {
                 uint32_t ai_off = read32(s);
                 if (avio_seek(s->pb, wave_info_pos + ai_off, SEEK_SET) < 0)
@@ -209,7 +210,7 @@ static int rwav_read_header(AVFormatContext *s)
                     return AVERROR_INVALIDDATA;
             }
         }
-        b->ch_total_bytes = b->is_adpcm ? ff_dsp_adpcm_byte_count(n_samples) : n_samples * b->bytes_per_sample;
+        b->ch_total_bytes = b->is_adpcm ? ff_dsp_adpcm_byte_count(n_samples) : (int64_t)n_samples * b->bytes_per_sample;
     } else {
         uint32_t info_offset = 0, info_size = 0;
         uint32_t data_offset = 0, data_size = 0;
@@ -311,7 +312,7 @@ static int rwav_read_header(AVFormatContext *s)
              * payload, and already accounts for the 24 bytes of padding
              * that follow the block's magic and length -- every real file
              * stores 0x18 for channel 0. */
-            b->ch_data_offsets[ch] = data_offset + 8 + ch_data_rel;
+            b->ch_data_offsets[ch] = (int64_t)data_offset + 8 + ch_data_rel;
             avio_skip(s->pb, 4);
             ai_rel = read32(s);
             if (b->is_adpcm && ai_rel != 0xFFFFFFFF) {
@@ -321,7 +322,14 @@ static int rwav_read_header(AVFormatContext *s)
                     return AVERROR_INVALIDDATA;
             }
         }
-        b->ch_total_bytes = b->is_adpcm ? ff_dsp_adpcm_byte_count(n_samples) : n_samples * b->bytes_per_sample;
+        b->ch_total_bytes = b->is_adpcm ? ff_dsp_adpcm_byte_count(n_samples) : (int64_t)n_samples * b->bytes_per_sample;
+    }
+
+    for (int ch = 0; ch < b->channels; ch++) {
+        if (input_size > 0 &&
+            (b->ch_data_offsets[ch] > input_size ||
+             b->ch_total_bytes > input_size - b->ch_data_offsets[ch]))
+            return AVERROR_INVALIDDATA;
     }
 
     return 0;
