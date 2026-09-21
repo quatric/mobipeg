@@ -110,3 +110,50 @@ class NintendoFormatTests(unittest.TestCase):
                         # The second field completes the persistent image.
                         frame = result.stdout[256 * 4 * 3:]
                         self.assertEqual(frame, bytes([255, 0, 0]) * (256 * 4))
+
+    def encode_rvid_audio(self, options):
+        output = self.root / 'audio.rvid'
+        result = subprocess.run([
+            FFMPEG, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+            'color=red:size=256x4:rate=30', '-f', 'lavfi', '-i',
+            'sine=sample_rate=32000', '-t', '0.1', '-c:v', 'rvid',
+            '-c:a', 'pcm_s16le'] + options + [str(output)],
+            capture_output=True, timeout=15)
+        return result, output
+
+    def test_rvid_audio_first_keeps_video_frame_rate(self):
+        result, output = self.encode_rvid_audio(['-map', '1:a', '-map', '0:v'])
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        # v5 stores the nominal frame rate in byte 12 of the header.
+        self.assertEqual(output.read_bytes()[12], 30)
+
+    def test_rvid_rejects_unrepresentable_audio_and_duplicate_streams(self):
+        for options in (['-ac', '3'], ['-ar', '96000'], ['-c:a', 'pcm_s16be'],
+                        ['-map', '0:v', '-map', '1:a', '-map', '1:a'],
+                        ['-map', '0:v', '-map', '0:v']):
+            with self.subTest(options=options):
+                result, _ = self.encode_rvid_audio(options)
+                self.assertGreater(result.returncode, 0)
+
+    def test_rvid_pcm_roundtrips(self):
+        for channels in (1, 2):
+            for codec, bps in (('pcm_u8', 1), ('pcm_s16le', 2)):
+                with self.subTest(channels=channels, codec=codec):
+                    raw = bytes((i * 37 + i // 17) % 256 for i in range(3200 * channels * bps))
+                    source = self.root / 'source.pcm'
+                    source.write_bytes(raw)
+                    output = self.root / 'pcm.rvid'
+                    result = subprocess.run([
+                        FFMPEG, '-v', 'error', '-y', '-f', codec[4:],
+                        '-ar', '32000', '-ac', str(channels), '-i', str(source),
+                        '-f', 'lavfi', '-i', 'color=red:size=256x4:rate=30',
+                        '-map', '0:a', '-map', '1:v', '-frames:v', '3',
+                        '-c:a', 'copy', '-c:v', 'rvid', str(output)],
+                        capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                    result = subprocess.run([
+                        FFMPEG, '-v', 'error', '-xerror', '-i', str(output), '-map', '0:a',
+                        '-c:a', 'copy', '-f', codec[4:], '-'],
+                        capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                    self.assertEqual(result.stdout, raw)
