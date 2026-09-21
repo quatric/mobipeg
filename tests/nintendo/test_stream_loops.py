@@ -113,3 +113,57 @@ class StreamLoopTests(unittest.TestCase):
                                     h2, h1 = h1, max(-32768, min(32767, value))
                                     samples.append(h1)
                             self.assertEqual(samples, list(pcm[ch:112:2]))
+
+    def test_reader_follows_coefficient_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for fmt in ('bfstm', 'bcstm'):
+                for endian in ('be', 'le'):
+                    with self.subTest(fmt=fmt, endian=endian):
+                        result, path = self.encode(directory, fmt, endian, 29)
+                        self.assertEqual(result.returncode, 0, result.stderr.decode())
+                        command = [FFMPEG, '-v', 'error', '-xerror', '-i', str(path), '-f', 's16le', '-']
+                        expected = subprocess.run(command, capture_output=True, timeout=15)
+                        self.assertEqual(expected.returncode, 0)
+                        original = path.read_bytes()
+                        data = bytearray(original)
+                        order = '>' if endian == 'be' else '<'
+                        u32 = lambda off: struct.unpack_from(order + 'I', data, off)[0]
+                        body = u32(0x18) + 8
+                        table = body + u32(body + 20)
+                        cis = [table + u32(table + 8 + 8 * ch) for ch in range(2)]
+                        coefs = [ci + u32(ci + 4) for ci in cis]
+                        # Relocate the two 46-byte contexts without changing channel identity.
+                        for ch in range(2):
+                            target = coefs[1 - ch]
+                            data[target:target + 46] = original[coefs[ch]:coefs[ch] + 46]
+                            struct.pack_into(order + 'I', data, cis[ch] + 4, target - cis[ch])
+                        path.write_bytes(data)
+                        actual = subprocess.run(command, capture_output=True, timeout=15)
+                        self.assertEqual(actual.returncode, 0, actual.stderr.decode())
+                        self.assertEqual(actual.stdout, expected.stdout)
+                        piped = subprocess.run([FFMPEG, '-v', 'error', '-xerror', '-i', 'pipe:0',
+                                                '-f', 's16le', '-'], input=bytes(data),
+                                               capture_output=True, timeout=15)
+                        self.assertEqual(piped.returncode, 0, piped.stderr.decode())
+                        self.assertEqual(piped.stdout, expected.stdout)
+
+    def test_reader_rejects_invalid_coefficient_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for fmt in ('bfstm', 'bcstm'):
+                for endian in ('be', 'le'):
+                    result, path = self.encode(directory, fmt, endian, 29)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    original = path.read_bytes()
+                    order = '>' if endian == 'be' else '<'
+                    u32 = lambda off: struct.unpack_from(order + 'I', original, off)[0]
+                    body = u32(0x18) + 8
+                    table = body + u32(body + 20)
+                    ci = table + u32(table + 8)
+                    for field in (table + 8, ci + 4):
+                        with self.subTest(fmt=fmt, endian=endian, field=field):
+                            data = bytearray(original)
+                            struct.pack_into(order + 'I', data, field, 0xfffffff0)
+                            path.write_bytes(data)
+                            result = subprocess.run([FFMPEG, '-v', 'error', '-xerror', '-i', str(path),
+                                                     '-f', 'null', '-'], capture_output=True, timeout=15)
+                            self.assertGreater(result.returncode, 0)
