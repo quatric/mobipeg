@@ -102,8 +102,14 @@ else:
         os.path.dirname(os.path.abspath(__file__)),
         "third_party", "VidInjector9000", "VidInjector9002-CLI", "build",
         "VidInjector9002-CLI"))
-DEFAULT_OUTDIR = os.environ.get("OUTDIR", "/Volumes/SSD/tmp")
+DEFAULT_OUTDIR = os.environ.get("OUTDIR", ".")
 
+
+
+def report_outputs(*paths):
+    """Show completed files without requiring a platform-specific utility."""
+    for path in paths:
+        print(f"{path} ({os.path.getsize(path):,} bytes)")
 
 
 def stereo_layout(inp, ifmt):
@@ -227,7 +233,7 @@ def preprocess_input(inp, outdir):
     no libdav1d linked in, and its native AV1 decoder is broken on at least
     ARM64), use the system ffmpeg *only* to decode+scale the video to a piped
     y4m stream, then hand that to our OWN bundled ffmpeg to encode into a
-    small intermediate .mp4 -- so the actual encode (and its libx264) is
+    small intermediate .mkv -- so the actual encode (and its libx264) is
     always the tested, known-good one this project ships, never whatever
     libx264 the system ffmpeg happens to be linked against. Audio is read
     from the original file directly by the bundled ffmpeg (its native opus/
@@ -248,7 +254,9 @@ def preprocess_input(inp, outdir):
         return inp
     os.makedirs(outdir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(inp))[0]
-    intermediate = os.path.join(outdir, f".preprocessed_{stem}.mp4")
+    fd, intermediate = tempfile.mkstemp(prefix=f".preprocessed_{stem}_",
+                                        suffix=".mkv", dir=outdir)
+    os.close(fd)
     print(f">> {os.path.basename(inp)} doesn't decode cleanly with the bundled "
           f"ffmpeg (unsupported/broken codec) -- decoding video with system "
           f"ffmpeg and re-encoding with our own libx264 to {intermediate}")
@@ -260,11 +268,28 @@ def preprocess_input(inp, outdir):
                   "-map", "0:v:0", "-map", "1:a:0?",
                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
                   "-c:a", "pcm_s16le", intermediate]
-    decoder = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE)
-    encoder = subprocess.run(encode_cmd, stdin=decoder.stdout)
-    decoder.stdout.close()
-    decoder.wait()
-    if encoder.returncode != 0 or decoder.returncode != 0:
+    decoder = None
+    succeeded = False
+    try:
+        decoder = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE)
+        try:
+            encoder = subprocess.Popen(encode_cmd, stdin=decoder.stdout)
+        finally:
+            # Release our copy immediately so an early encoder exit sends
+            # SIGPIPE to the decoder instead of leaving it blocked forever.
+            decoder.stdout.close()
+        encoder_status = encoder.wait()
+        decoder_status = decoder.wait()
+        succeeded = encoder_status == 0 and decoder_status == 0
+    except OSError as e:
+        print(f"warning: could not run pre-transcode: {e}")
+    finally:
+        if decoder is not None and decoder.poll() is None:
+            decoder.terminate()
+            decoder.wait()
+        if not succeeded:
+            os.unlink(intermediate)
+    if not succeeded:
         print("warning: pre-transcode failed, using original input")
         return inp
     return intermediate
@@ -292,7 +317,7 @@ def resolve_output_stem(output, default_name, outdir):
     on what the user typed), matching how -o already works for decode."""
     if output:
         base = os.path.splitext(os.path.basename(output))[0]
-        out_dir = os.path.dirname(output) or outdir
+        out_dir = os.path.dirname(output) or "."
         return os.path.join(out_dir, base)
     return os.path.join(outdir, default_name)
 
@@ -471,7 +496,7 @@ def package_cia(parsed):
         shutil.rmtree(workdir, ignore_errors=True)
 
     print("\npackage complete:")
-    subprocess.run(["ls", "-la", out_cia])
+    report_outputs(out_cia)
 
 
 def main():
@@ -543,7 +568,7 @@ def main():
     parser.add_argument("--poster", dest="poster", default="", help="Super MOFLEX: poster artwork (image file)")
 
     parsed = parser.parse_args()
-    OUTDIR = parsed.outdir
+    OUTDIR = (os.path.dirname(parsed.output) or ".") if parsed.output else (parsed.outdir or ".")
 
     # Escape hatch for anything the presets below don't expose.  shlex keeps
     # quoted filter graphs in one piece; ffmpeg resolves duplicates by taking
@@ -727,9 +752,9 @@ def main():
     elif audio == "vorbis":
         scale = "384:288"
     
-    out_directory = parsed.outdir or "."
+    out_directory = OUTDIR
     # Play mode writes nothing, so don't create (or require) an output directory
-    # for it -- the default one lives on a removable volume.
+    # for it.
     if out_directory and mode != "play":
         os.makedirs(out_directory, exist_ok=True)
 
@@ -816,6 +841,7 @@ def main():
         if not os.path.isfile(inp):
             print(f"input not found: {inp}")
             sys.exit(2)
+        source_name = os.path.splitext(os.path.basename(inp))[0]
         inp = preprocess_input(inp, OUTDIR)
         # Name the output after the input rather than a fixed "decoded.mp4", so
         # decoding several files into one directory doesn't overwrite itself.
@@ -824,7 +850,7 @@ def main():
             ext = ext or ".mp4"
             outdir_for = os.path.dirname(parsed.output) or OUTDIR
         else:
-            base, ext = os.path.splitext(os.path.basename(inp))[0], ".mp4"
+            base, ext = source_name, ".mp4"
             outdir_for = OUTDIR
         ifmt = input_fmt(inp)
         # The YCgCo bitstreams (.mods MobiClip, .vx) used to reach here tagged
@@ -871,7 +897,7 @@ def main():
                     cmd += ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3"] + extra_args + [o]
                 run_cmd(cmd) or sys.exit(1)
             print("\ndecode complete:")
-            run_cmd(["ls", "-la"] + outs)
+            report_outputs(*outs)
             sys.exit(0)
 
         watch = os.path.join(outdir_for, base + ext)
@@ -883,7 +909,7 @@ def main():
         cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3"] + extra_args + [watch]
         run_ffenc_fallback(cmd1, cmd2)
         print("\ndecode complete:")
-        run_cmd(["ls", "-la", watch])
+        report_outputs(watch)
         sys.exit(0)
 
     if mode == "vid3d":
@@ -959,10 +985,10 @@ def main():
             run_ffenc_fallback(cmd1, cmd2)
             
             print("\n3D round-trip complete (frame is left|right side-by-side):")
-            run_cmd(["ls", "-la", container, watch])
+            report_outputs(container, watch)
         else:
             print("\n3D encode complete:")
-            run_cmd(["ls", "-la", container])
+            report_outputs(container)
         print()
         
         p = subprocess.run([FFENC, "-hide_banner", "-f", dmx, "-i", container], stderr=subprocess.PIPE, text=True)
@@ -1010,7 +1036,7 @@ def main():
                    "-map", "0:a:0?", "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
             run_cmd(cmd) or sys.exit(1)
         print("\nencode complete:")
-        run_cmd(["ls", "-la", container] + ([watch] if roundtrip else []))
+        report_outputs(container, *([watch] if roundtrip else []))
         sys.exit(0)
 
     if mode == "aud":
@@ -1045,10 +1071,10 @@ def main():
                      "-f", AUDIO_FORMAT_DEMUXERS.get(fmt, fmt), "-i", container,
                      "-c:a", "pcm_s16le", watch]) or sys.exit(1)
             print("\nround-trip complete:")
-            run_cmd(["ls", "-la", container, watch])
+            report_outputs(container, watch)
         else:
             print("\nencode complete:")
-            run_cmd(["ls", "-la", container])
+            report_outputs(container)
         print()
 
         p = subprocess.run([FFENC, "-hide_banner", "-f",
@@ -1402,10 +1428,10 @@ def main():
         run_ffenc_fallback(cmd1, cmd2)
         
         print("\nround-trip complete:")
-        run_cmd(["ls", "-la", container, watch])
+        report_outputs(container, watch)
     else:
         print("\nencode complete:")
-        run_cmd(["ls", "-la", container])
+        report_outputs(container)
     print()
     
     p = subprocess.run([FFENC, "-hide_banner", "-f", dmx, "-i", container], stderr=subprocess.PIPE, text=True)
