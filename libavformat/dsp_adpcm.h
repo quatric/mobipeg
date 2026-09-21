@@ -86,4 +86,10 @@ int64_t ff_dsp_adpcm_nibbles_to_samples(int64_t nibbles);
 void ff_dsp_adpcm_advance(const uint8_t *src, int64_t nb_frames,
                           const int16_t *coefs, int16_t *hist1, int16_t *hist2);
 
+/** Advance through exactly nb_samples samples, including a partial final frame.
+ * src must contain ceil(nb_samples / 14) complete frames of one channel.
+ */
+void ff_dsp_adpcm_advance_samples(const uint8_t *src, int64_t nb_samples,
+                                 const int16_t *coefs, int16_t *hist1, int16_t *hist2);
+
 #endif /* AVFORMAT_DSP_ADPCM_H */

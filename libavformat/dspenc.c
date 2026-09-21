@@ -168,16 +168,13 @@ static void dsp_write_header_block(AVFormatContext *s, int ch,
     int16_t loop_h1 = 0, loop_h2 = 0;
     int loop_ps = 0;
 
-    if (c->loop && loop_start > 0) {
-        /* The header caches the decoder state a player needs to jump to the
-         * loop point without decoding the whole file first. Only whole frames
-         * are replayed: a loop point inside a frame decodes from that frame's
-         * start, which is what loop_ps names. */
-        int64_t frames = loop_start / FF_DSP_ADPCM_SAMPLES_PER_FRAME;
-        int64_t off    = frames * FF_DSP_ADPCM_BYTES_PER_FRAME;
+    if (c->loop) {
+        int64_t off = loop_start / FF_DSP_ADPCM_SAMPLES_PER_FRAME *
+                      FF_DSP_ADPCM_BYTES_PER_FRAME;
 
         if (off < data_size) {
-            ff_dsp_adpcm_advance(data, frames, c->coefs[ch], &loop_h1, &loop_h2);
+            ff_dsp_adpcm_advance_samples(data, loop_start, c->coefs[ch],
+                                        &loop_h1, &loop_h2);
             loop_ps = data[off];
         }
     }
@@ -229,6 +226,14 @@ static int dsp_write_trailer(AVFormatContext *s)
                "the input has to come from the adpcm_thp encoder or from a "
                "container that carries the table\n");
         ret = AVERROR_INVALIDDATA;
+        goto end;
+    }
+
+    if (c->loop && (c->loop_start >= c->nb_samples ||
+        (c->loop_end >= 0 && (c->loop_end < c->loop_start ||
+                              c->loop_end >= c->nb_samples)))) {
+        av_log(s, AV_LOG_ERROR, "loop range is outside the audio samples\n");
+        ret = AVERROR(EINVAL);
         goto end;
     }
 
