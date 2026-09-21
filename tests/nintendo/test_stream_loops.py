@@ -116,7 +116,7 @@ class StreamLoopTests(unittest.TestCase):
 
     def test_reader_follows_coefficient_references(self):
         with tempfile.TemporaryDirectory() as directory:
-            for fmt in ('bfstm', 'bcstm'):
+            for fmt in ('brstm', 'bfstm', 'bcstm'):
                 for endian in ('be', 'le'):
                     with self.subTest(fmt=fmt, endian=endian):
                         result, path = self.encode(directory, fmt, endian, 29)
@@ -128,15 +128,17 @@ class StreamLoopTests(unittest.TestCase):
                         data = bytearray(original)
                         order = '>' if endian == 'be' else '<'
                         u32 = lambda off: struct.unpack_from(order + 'I', data, off)[0]
-                        body = u32(0x18) + 8
+                        body = u32(0x10 if fmt == 'brstm' else 0x18) + 8
                         table = body + u32(body + 20)
-                        cis = [table + u32(table + 8 + 8 * ch) for ch in range(2)]
-                        coefs = [ci + u32(ci + 4) for ci in cis]
-                        # Relocate the two 46-byte contexts without changing channel identity.
+                        base = body if fmt == 'brstm' else table
+                        cis = [base + u32(table + 8 + 8 * ch) for ch in range(2)]
+                        coefs = [(body if fmt == 'brstm' else ci) + u32(ci + 4) for ci in cis]
+                        # Relocate contexts without changing channel identity.
+                        context_size = 48 if fmt == 'brstm' else 46
                         for ch in range(2):
                             target = coefs[1 - ch]
-                            data[target:target + 46] = original[coefs[ch]:coefs[ch] + 46]
-                            struct.pack_into(order + 'I', data, cis[ch] + 4, target - cis[ch])
+                            data[target:target + context_size] = original[coefs[ch]:coefs[ch] + context_size]
+                            struct.pack_into(order + 'I', data, cis[ch] + 4, target - (body if fmt == 'brstm' else cis[ch]))
                         path.write_bytes(data)
                         actual = subprocess.run(command, capture_output=True, timeout=15)
                         self.assertEqual(actual.returncode, 0, actual.stderr.decode())
@@ -149,16 +151,16 @@ class StreamLoopTests(unittest.TestCase):
 
     def test_reader_rejects_invalid_coefficient_references(self):
         with tempfile.TemporaryDirectory() as directory:
-            for fmt in ('bfstm', 'bcstm'):
+            for fmt in ('brstm', 'bfstm', 'bcstm'):
                 for endian in ('be', 'le'):
                     result, path = self.encode(directory, fmt, endian, 29)
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
                     original = path.read_bytes()
                     order = '>' if endian == 'be' else '<'
                     u32 = lambda off: struct.unpack_from(order + 'I', original, off)[0]
-                    body = u32(0x18) + 8
+                    body = u32(0x10 if fmt == 'brstm' else 0x18) + 8
                     table = body + u32(body + 20)
-                    ci = table + u32(table + 8)
+                    ci = (body if fmt == 'brstm' else table) + u32(table + 8)
                     for field in (table + 8, ci + 4):
                         with self.subTest(fmt=fmt, endian=endian, field=field):
                             data = bytearray(original)
