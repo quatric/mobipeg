@@ -1,0 +1,45 @@
+# streams
+stream,0,mobiclip,video,640,480,yuv420p
+stream,1,pcm_s16le,audio,s16,32000,2
+# packets
+packet,0,-2,-2,1,1360,K__,MD5:81654a01bca17606802a91f7e783ef79
+packet,1,-2,-2,1280,5120,K__,MD5:9444690d28e8d5a98f27340bbad8172c
+packet,0,-1,-1,1,304,___,MD5:2aca9acc9d786313dd61ee1380ad7345
+packet,1,1278,1278,1024,4096,K__,MD5:df74db0ddce05eff2b75db0e5cdffae0
+packet,0,0,0,1,304,___,MD5:061bc2854af4afe7426e5f4b4b6e1562
+packet,1,2302,2302,1024,4096,K__,MD5:8dba43a8a8529207b32b406e3748834e
+packet,0,1,1,1,304,___,MD5:061bc2854af4afe7426e5f4b4b6e1562
+packet,1,3326,3326,1024,4096,K__,MD5:b88b4675216872dac6e1284b1589ba5e
+packet,0,2,2,1,304,___,MD5:061bc2854af4afe7426e5f4b4b6e1562
+packet,1,4350,4350,1024,4096,K__,MD5:e086b9ca9378cba865e6d7d5db020526
+packet,0,3,3,1,304,___,MD5:061bc2854af4afe7426e5f4b4b6e1562
+packet,1,5374,5374,1280,5120,K__,MD5:361a0a81ac45a57652902b53614da31e
+# decode
+#format: frame checksums
+#version: 2
+#hash: MD5
+#tb 0: 32/959
+#media_type 0: video
+#codec_id 0: rawvideo
+#dimensions 0: 640x480
+#sar 0: 0/1
+#tb 1: 1/32000
+#media_type 1: audio
+#codec_id 1: pcm_s16le
+#sample_rate 1: 32000
+#channel_layout_name 1: stereo
+#stream#, dts,        pts, duration,     size, hash
+0,          0,          0,        1,   460800, 6ea223f076db0d702ef1b8d64e464308
+0,          1,          1,        1,   460800, 6ea223f076db0d702ef1b8d64e464308
+1,       2132,       2132,     1280,     5120, 9444690d28e8d5a98f27340bbad8172c
+0,          2,          2,        1,   460800, 6ea223f076db0d702ef1b8d64e464308
+0,          3,          3,        1,   460800, 6ea223f076db0d702ef1b8d64e464308
+1,       3412,       3412,     1024,     4096, df74db0ddce05eff2b75db0e5cdffae0
+0,          4,          4,        1,   460800, 6ea223f076db0d702ef1b8d64e464308
+1,       4436,       4436,     1024,     4096, 8dba43a8a8529207b32b406e3748834e
+0,          5,          5,        1,   460800, 6ea223f076db0d702ef1b8d64e464308
+1,       5460,       5460,     1024,     4096, b88b4675216872dac6e1284b1589ba5e
+1,       6484,       6484,     1024,     4096, e086b9ca9378cba865e6d7d5db020526
+1,       7508,       7508,     1280,     5120, 361a0a81ac45a57652902b53614da31e
+# audio 0 md5
+MD5=c415665fd6a3c07679f4c7659ed7e76a
