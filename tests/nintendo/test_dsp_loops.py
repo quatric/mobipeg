@@ -10,6 +10,29 @@ FFMPEG = os.environ.get('FFMPEG', str(Path(__file__).resolve().parents[2] / 'ffm
 
 
 class DSPLoopTests(unittest.TestCase):
+    def test_dsp_seek_matches_uninterrupted_decode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'seek.dsp'
+            for channels in (1, 2):
+                encoded = subprocess.run([
+                    FFMPEG, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                    'sine=frequency=731:sample_rate=32000', '-t', '0.1',
+                    '-ac', str(channels), '-c:a', 'adpcm_thp',
+                    '-interleave', '1', str(path)], capture_output=True, timeout=15)
+                self.assertEqual(encoded.returncode, 0, encoded.stderr.decode())
+                full = subprocess.run([FFMPEG, '-v', 'error', '-i', str(path),
+                                       '-f', 's16le', '-'], capture_output=True, timeout=15)
+                self.assertEqual(full.returncode, 0, full.stderr.decode())
+                self.assertEqual(len(full.stdout), 3200 * channels * 2)
+                for sample in (0, 32, 1600):
+                    with self.subTest(channels=channels, sample=sample):
+                        seek = subprocess.run([
+                            FFMPEG, '-v', 'error', '-ss', str(sample / 32000),
+                            '-i', str(path), '-f', 's16le', '-'],
+                            capture_output=True, timeout=15)
+                        self.assertEqual(seek.returncode, 0, seek.stderr.decode())
+                        self.assertEqual(seek.stdout, full.stdout[sample * channels * 2:])
+
     def encode(self, directory, fmt, start, end=None):
         path = Path(directory) / ('loop.' + fmt)
         args = [FFMPEG, '-v', 'error', '-y', '-f', 'lavfi', '-i',
