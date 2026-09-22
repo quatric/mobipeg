@@ -252,11 +252,17 @@ static int decode_aframe(AVCodecContext *avctx, VXAState *s, GetBitContext *gb,
     } else {
         for (int i = 0; i < 8; i++) lpc_filter[i] = s->lpc_filter_prev[i];
     }
+    /* The filter state accumulates codebook deltas across frames. Valid
+     * streams keep it in Q15 reflection-coefficient range; anything that
+     * would leave int32 range (signed overflow in the original arithmetic)
+     * cannot come from a valid stream, so reject it. */
     for (int k = 0; k < 8; k++) {
-        int sum = 0;
+        int64_t v = lpc_filter[k];
         for (int i = 0; i < 3; i++)
-            sum += s->ed.lpc_codebooks[i][lpc_idx[i]][k];
-        lpc_filter[k] += sum;
+            v += s->ed.lpc_codebooks[i][lpc_idx[i]][k];
+        if (v < INT_MIN || v > INT_MAX)
+            return AVERROR_INVALIDDATA;
+        lpc_filter[k] = (int)v;
     }
 
     distance = pulse_distance[pulse_packing_mode];
@@ -291,8 +297,12 @@ static int decode_aframe(AVCodecContext *avctx, VXAState *s, GetBitContext *gb,
         for (int i = 0; i < 8; i++) {
             int coeff = lpc_filter[i];
             memcpy(old, psi, sizeof(int) * len);
-            for (int j = 0; j < i; j++)
-                psi[j] = old[j] + (int)(((int64_t)old[i - j - 1] * coeff) >> 15);
+            for (int j = 0; j < i; j++) {
+                int64_t v = old[j] + (((int64_t)old[i - j - 1] * coeff) >> 15);
+                if (v < INT_MIN || v > INT_MAX)
+                    return AVERROR_INVALIDDATA;
+                psi[j] = (int)v;
+            }
             psi[i] = coeff;
             len = i + 1;
         }
@@ -319,7 +329,10 @@ static int decode_aframe(AVCodecContext *avctx, VXAState *s, GetBitContext *gb,
             int prev_sample = (si < 0) ? s->samples_prev[8 + si] : samples[si];
             sample += (int64_t)prev_sample * inf[j];
         }
-        samples[i] = (int)(sample >> 14);
+        sample >>= 14;
+        if (sample < INT_MIN || sample > INT_MAX)
+            return AVERROR_INVALIDDATA;
+        samples[i] = (int)sample;
     }
 
     for (int i = 0; i < AFRAME_SAMPLES; i++)
