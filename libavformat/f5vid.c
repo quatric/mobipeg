@@ -76,8 +76,8 @@
   *       "APCM" audio at 32000 Hz stereo, ~37 kB/s: DSP-ADPCM with 8-byte
   *       frames (predictor/scale header + 14 nibbles, THP-compatible framing;
   *       14 samples/8 bytes = 4.57 bits/sample = 36.6 kB/s stereo @32kHz).
-  *       Frames are interleaved L,R,L,R...; the demuxer deinterleaves to
-  *       channel-major for the adpcm_thp decoder. The per-file coef table
+  *       Frames are channel-planar per AUDD (all L frames, then all R),
+  *       followed by 16 zero pad bytes (so real size = AUDD_len - 32). The per-file coef table
   *       read from AUDH (see above) is exposed as codecpar extradata.
   *
   *   Timing: file order is display order and the container clock is strictly
@@ -1630,7 +1630,7 @@ const FFInputFormat ff_f5vid_demuxer = {
  * coefficient blocks (all escapes) are verbatim.
  *
  * Audio is DSP-ADPCM (adpcm_thp) in channel-major 8-byte frames, as emitted
- * by the encoder and by the demuxer; it is re-interleaved L,R,L,R per FRAM.
+ * by the encoder and by the demuxer, and written channel-planar per FRAM.
  *
  * Everything is buffered and the file is written in write_trailer, so VIDH
  * frame_count/max_FRAM_len are exact and non-seekable output works.
@@ -2221,7 +2221,9 @@ static int f5vid_write_trailer(AVFormatContext *s)
             uint32_t aud_bytes, audd_len, fram_len;
             uint8_t inner[12];
             aud_bytes = nf * 8 * (m->channels == 1 ? 1 : 2);
-            audd_len = 8 + 8 + aud_bytes;
+            /* Real files: AUDD = hdr(8) + inner(8) + audio + 16 zero pad
+             * bytes, inner size = audd_len - 32 = audio bytes. */
+            audd_len = 8 + 8 + aud_bytes + 16;
             fram_len = 8 + 24 + vidd_len + audd_len;
             if ((int)fram_len > maxfram)
                 maxfram = fram_len;
@@ -2239,12 +2241,13 @@ static int f5vid_write_trailer(AVFormatContext *s)
             for (k = 0; k < 4; k++)
                 avio_w8(pb, 0);
             avio_wb32(pb, audd_len - 32);
-            for (k = 0; k < nf; k++) {
-                avio_write(pb, m->al + aoff * 8, 8);
-                if (m->channels != 1)
-                    avio_write(pb, m->ar + aoff * 8, 8);
-                aoff++;
-            }
+            /* Channel-planar: all L frames, then all R frames. */
+            avio_write(pb, m->al + aoff * 8, nf * 8);
+            if (m->channels != 1)
+                avio_write(pb, m->ar + aoff * 8, nf * 8);
+            aoff += nf;
+            for (k = 0; k < 16; k++)
+                avio_w8(pb, 0);
         }
         if (s->pb->seekable) {
             int64_t end = avio_tell(pb);
