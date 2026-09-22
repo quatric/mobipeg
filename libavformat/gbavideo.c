@@ -104,7 +104,8 @@ static int64_t skip_name(AVIOContext *pb, int64_t pos)
 
 static int gbavideo_probe(const AVProbeData *p)
 {
-    uint32_t total, count, pos = 8;
+    uint32_t total, count;
+    uint64_t pos = 8;
     int audio_ok = 0;
 
     if (p->buf_size < 16)
@@ -142,7 +143,7 @@ static int gbavideo_probe(const AVProbeData *p)
 
         /* An audio resource carries a 0x000c marker at a fixed offset, which
          * is the closest thing this container has to a magic number. */
-        if (type == T_AUDIO && pos + 16 <= p->buf_size) {
+        if (type == T_AUDIO && pos + 18 <= p->buf_size) {
             if (AV_RL32(p->buf + pos + 12) || AV_RL16(p->buf + pos + 16) != 0x0c)
                 return 0;
             audio_ok = 1;
@@ -152,7 +153,7 @@ static int gbavideo_probe(const AVProbeData *p)
 
     /* The walk consumed every resource; insist it lands where the header
      * said it would. */
-    return pos == total + 4 ? AVPROBE_SCORE_MAX * 3 / 4 : AVPROBE_SCORE_MAX / 2;
+    return pos == (uint64_t)total + 4 ? AVPROBE_SCORE_MAX * 3 / 4 : AVPROBE_SCORE_MAX / 2;
 }
 
 static int parse_video_resource(AVFormatContext *avctx, int64_t off,
@@ -784,6 +785,7 @@ const FFInputFormat ff_gbavideo_demuxer = {
     .p.priv_class   = &gbavideo_class,
     .p.flags        = AVFMT_GENERIC_INDEX,
     .priv_data_size = sizeof(GBAVideoDemuxContext),
+    .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe     = gbavideo_probe,
     .read_header    = gbavideo_read_header,
     .read_packet    = gbavideo_read_packet,
@@ -804,6 +806,7 @@ const FFInputFormat ff_gbavideo_rom_demuxer = {
     .p.priv_class   = &gbavideo_rom_class,
     .p.flags        = AVFMT_GENERIC_INDEX,
     .priv_data_size = sizeof(GBAVideoDemuxContext),
+    .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe     = gbavideo_rom_probe,
     .read_header    = gbavideo_rom_read_header,
     .read_packet    = gbavideo_read_packet,
