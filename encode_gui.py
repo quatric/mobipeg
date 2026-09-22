@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 try:
     import sentry_sdk
+
     sentry_sdk.init(
         dsn="https://9cff5a454488188a77ee0c3a043d7c94@o107347.ingest.us.sentry.io/4512040240480256",
         send_default_pii=True,
@@ -15,7 +16,11 @@ import threading
 import os
 import sys
 
-_script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+_script_dir = (
+    os.path.dirname(os.path.abspath(__file__))
+    if "__file__" in globals()
+    else os.getcwd()
+)
 ENCODE_SCRIPT = os.path.join(_script_dir, "encode.py")
 
 
@@ -44,18 +49,32 @@ DECODER_FAMILIES = [
 
 # Formats with no video stream. The Encode tab hides every video-only control
 # for these, and encode.py decodes them to .wav rather than .mp4.
-AUDIO_ONLY_FORMATS = {"dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd",
-                      "wii_photo_m4a", "3ds_sound"}
+AUDIO_ONLY_FORMATS = {
+    "dsp",
+    "brstm",
+    "bfstm",
+    "bcstm",
+    "bns",
+    "ast",
+    "btsnd",
+    "wii_photo_m4a",
+    "3ds_sound",
+}
 
 # Output container extension per format, mirroring encode.py's out_ext map
 # (and AUDIO_FORMAT_EXTENSIONS for the audio-only formats) -- used only to
 # preview the default output filename before a run, not to pick the muxer.
 ENCODE_EXTENSIONS = {
-    "hvqm4": "h4m", "fastvideo": "fv",
-    "gba_ads": "mmstr", "gba_hydrogen": "mmstr",
-    "wii_photo": "avi", "nintendo_channel": "3gp",
-    "3ds_camera": "avi", "3ds_camera3d": "avi",
-    "wii_photo_m4a": "m4a", "3ds_sound": "m4a",
+    "hvqm4": "h4m",
+    "fastvideo": "fv",
+    "gba_ads": "mmstr",
+    "gba_hydrogen": "mmstr",
+    "wii_photo": "avi",
+    "nintendo_channel": "3gp",
+    "3ds_camera": "avi",
+    "3ds_camera3d": "avi",
+    "wii_photo_m4a": "m4a",
+    "3ds_sound": "m4a",
     "factor5": "vid",
 }
 
@@ -97,7 +116,9 @@ class CollapsibleSection(ttk.Frame):
         self._sync()
 
     def _sync(self):
-        arrow = "\u25be" if self._expanded else "\u25b8"   # BLACK DOWN/RIGHT-POINTING SMALL TRIANGLE
+        arrow = (
+            "\u25be" if self._expanded else "\u25b8"
+        )  # BLACK DOWN/RIGHT-POINTING SMALL TRIANGLE
         self._button.configure(text="%s  %s" % (arrow, self._title))
         if self._expanded:
             self.body.grid()
@@ -112,36 +133,36 @@ class EncodeGUI(tk.Tk):
         self.geometry("750x900")
         self.minsize(700, 750)
         self.configure(padx=15, pady=15)
-        
+
         try:
-            if hasattr(sys, '_MEIPASS'):
+            if hasattr(sys, "_MEIPASS"):
                 base_path = sys._MEIPASS
-            elif '__file__' in globals():
+            elif "__file__" in globals():
                 base_path = os.path.dirname(os.path.abspath(__file__))
             else:
                 base_path = os.getcwd()
-            if sys.platform != 'darwin':
+            if sys.platform != "darwin":
                 icon_path = os.path.join(base_path, "logo.png")
                 if os.path.exists(icon_path):
                     img = tk.PhotoImage(file=icon_path)
-                    self.tk.call('wm', 'iconphoto', self._w, img)
+                    self.tk.call("wm", "iconphoto", self._w, img)
         except Exception:
             pass
-        
+
         style = ttk.Style(self)
         if "aqua" in style.theme_names():
             style.theme_use("aqua")
         elif "clam" in style.theme_names():
             style.theme_use("clam")
-            
+
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
-        
+
         # --- ENCODE TAB ---
         self.encode_frame = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.encode_frame, text="Encode")
         self.setup_encode_tab()
-        
+
         # --- DECODE TAB ---
         self.decode_frame = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.decode_frame, text="Decode")
@@ -153,30 +174,40 @@ class EncodeGUI(tk.Tk):
         self.cia_frame = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.cia_frame, text="Package CIA")
         self.setup_cia_tab()
-        
+
         # --- CONSOLE ---
         ttk.Label(self, text="Console Output:").pack(anchor="w", pady=(10, 0))
         console_frame = ttk.Frame(self)
         console_frame.pack(fill=tk.BOTH, expand=True)
-        
+
         # bg is close enough to the window's own dark background that without
         # a visible border, the whole pane reads as empty dead space rather
         # than a text widget -- highlightthickness draws a border even though
         # this is a plain tk.Text (not ttk), which has no built-in themed one.
-        self.console = tk.Text(console_frame, height=10, state="disabled", bg="#1e1e1e", fg="#cccccc",
-                                font=("Menlo", 12), highlightthickness=1, highlightbackground="#3a3a3a",
-                                highlightcolor="#3a3a3a")
+        self.console = tk.Text(
+            console_frame,
+            height=10,
+            state="disabled",
+            bg="#1e1e1e",
+            fg="#cccccc",
+            font=("Menlo", 12),
+            highlightthickness=1,
+            highlightbackground="#3a3a3a",
+            highlightcolor="#3a3a3a",
+        )
         self.console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
+
         scrollbar = ttk.Scrollbar(console_frame, command=self.console.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.config(yscrollcommand=scrollbar.set)
-        
+
     def setup_encode_tab(self):
         self.encode_frame.columnconfigure(1, weight=1)
-        
+
         # Row 0: Format
-        ttk.Label(self.encode_frame, text="Format:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.encode_frame, text="Format:").grid(
+            row=0, column=0, sticky="e", padx=5, pady=5
+        )
         self.enc_fmt_var = tk.StringVar(value="Wii Mobiclip .mo")
         self.formats_map = {
             "Wii Mobiclip .mo": "mo",
@@ -213,13 +244,13 @@ class EncodeGUI(tk.Tk):
         #  - .vx carries only its own vx_audio codec, so codebook or none
         #  - .thp is always adpcm_thp
         self.audio_options = {
-            "mo":       ["adpcm", "fastaudio", "pcm", "vorbis", "none"],
-            "moflex":   ["adpcm", "fastaudio", "pcm", "none"],
+            "mo": ["adpcm", "fastaudio", "pcm", "vorbis", "none"],
+            "moflex": ["adpcm", "fastaudio", "pcm", "none"],
             "moflex3d": ["adpcm", "fastaudio", "pcm", "none"],
-            "mods":     ["adpcm", "fastaudio", "pcm", "codebook", "none"],
-            "vx":       ["codebook", "none"],
-            "ty":       ["mp2", "ac3", "none"],
-            "gba_ads":  ["none"],
+            "mods": ["adpcm", "fastaudio", "pcm", "codebook", "none"],
+            "vx": ["codebook", "none"],
+            "ty": ["mp2", "ac3", "none"],
+            "gba_ads": ["none"],
             "gba_hydrogen": ["none"],
             "wii_photo": ["pcm", "none"],
             "wii_photo_m4a": ["aac"],
@@ -227,95 +258,153 @@ class EncodeGUI(tk.Tk):
             "3ds_camera": ["adpcm", "none"],
             "3ds_camera3d": ["adpcm", "none"],
             "3ds_sound": ["aac"],
-            "thp":      ["adpcm", "none"],
-            "rvid":     ["pcm", "none"],
+            "thp": ["adpcm", "none"],
+            "rvid": ["pcm", "none"],
             # hvqm4 has no audio support yet -- video only.
-            "hvqm4":    ["none"],
-            "factor5":  ["adpcm", "none"],
+            "hvqm4": ["none"],
+            "factor5": ["adpcm", "none"],
             "fastvideo": ["adpcm", "none"],
-            "dpg":      ["mp2", "none"],
+            "dpg": ["mp2", "none"],
             # Audio-only formats: the choice is which of the container's own
             # codecs to write, so "none" is not on offer.
-            "dsp":      ["adpcm"],
-            "brstm":    ["adpcm", "pcm"],
-            "bfstm":    ["adpcm", "pcm"],
-            "bcstm":    ["adpcm", "pcm"],
-            "bns":      ["adpcm"],
-            "ast":      ["adpcm", "pcm"],
-            "btsnd":    ["pcm"],
+            "dsp": ["adpcm"],
+            "brstm": ["adpcm", "pcm"],
+            "bfstm": ["adpcm", "pcm"],
+            "bcstm": ["adpcm", "pcm"],
+            "bns": ["adpcm"],
+            "ast": ["adpcm", "pcm"],
+            "btsnd": ["pcm"],
         }
-        self.enc_fmt_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_fmt_var, values=list(self.formats_map.keys()), state="readonly", width=25)
+        self.enc_fmt_cb = ttk.Combobox(
+            self.encode_frame,
+            textvariable=self.enc_fmt_var,
+            values=list(self.formats_map.keys()),
+            state="readonly",
+            width=25,
+        )
         self.enc_fmt_cb.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
         self.enc_fmt_cb.bind("<<ComboboxSelected>>", self.on_enc_format_change)
-        
+
         # Row 1: Audio Codec
-        ttk.Label(self.encode_frame, text="Audio Codec:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.encode_frame, text="Audio Codec:").grid(
+            row=1, column=0, sticky="e", padx=5, pady=5
+        )
         self.enc_audio_var = tk.StringVar(value="pcm")
-        self.enc_audio_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_audio_var, state="readonly")
+        self.enc_audio_cb = ttk.Combobox(
+            self.encode_frame, textvariable=self.enc_audio_var, state="readonly"
+        )
         self.enc_audio_cb.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-        
+
         # Row 2: Input 1
-        ttk.Label(self.encode_frame, text="Input File:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.encode_frame, text="Input File:").grid(
+            row=2, column=0, sticky="e", padx=5, pady=5
+        )
         self.enc_input_var = tk.StringVar()
-        ttk.Entry(self.encode_frame, textvariable=self.enc_input_var).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.encode_frame, text="Browse...", command=lambda: self.browse_file(self.enc_input_var)).grid(row=2, column=2, padx=5, pady=5)
-        
+        ttk.Entry(self.encode_frame, textvariable=self.enc_input_var).grid(
+            row=2, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.encode_frame,
+            text="Browse...",
+            command=lambda: self.browse_file(self.enc_input_var),
+        ).grid(row=2, column=2, padx=5, pady=5)
+
         # Row 3: Input 2 (3D Right Eye)
         self.enc_input2_label = ttk.Label(self.encode_frame, text="Right Eye (3D):")
         self.enc_input2_label.grid(row=3, column=0, sticky="e", padx=5, pady=5)
         self.enc_input2_var = tk.StringVar()
-        self.enc_input2_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_input2_var)
+        self.enc_input2_entry = ttk.Entry(
+            self.encode_frame, textvariable=self.enc_input2_var
+        )
         self.enc_input2_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
-        self.enc_input2_btn = ttk.Button(self.encode_frame, text="Browse...", command=lambda: self.browse_file(self.enc_input2_var))
+        self.enc_input2_btn = ttk.Button(
+            self.encode_frame,
+            text="Browse...",
+            command=lambda: self.browse_file(self.enc_input2_var),
+        )
         self.enc_input2_btn.grid(row=3, column=2, padx=5, pady=5)
 
         # Row 4: MO3D Layout (3D)
-        self.enc_layout_label = ttk.Label(self.encode_frame, text="MO3D Layout (default 4):")
+        self.enc_layout_label = ttk.Label(
+            self.encode_frame, text="MO3D Layout (default 4):"
+        )
         self.enc_layout_label.grid(row=4, column=0, sticky="e", padx=5, pady=5)
         self.enc_layout_var = tk.StringVar(value="4")
-        self.enc_layout_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_layout_var, width=8)
+        self.enc_layout_entry = ttk.Entry(
+            self.encode_frame, textvariable=self.enc_layout_var, width=8
+        )
         self.enc_layout_entry.grid(row=4, column=1, sticky="w", padx=5, pady=5)
-        
+
         # Row 5: Output Dir
-        ttk.Label(self.encode_frame, text="Output Dir:").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.encode_frame, text="Output Dir:").grid(
+            row=5, column=0, sticky="e", padx=5, pady=5
+        )
         self.enc_outdir_var = tk.StringVar(value="")
-        ttk.Entry(self.encode_frame, textvariable=self.enc_outdir_var).grid(row=5, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.encode_frame, text="Browse...", command=lambda: self.browse_dir(self.enc_outdir_var)).grid(row=5, column=2, padx=5, pady=5)
+        ttk.Entry(self.encode_frame, textvariable=self.enc_outdir_var).grid(
+            row=5, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.encode_frame,
+            text="Browse...",
+            command=lambda: self.browse_dir(self.enc_outdir_var),
+        ).grid(row=5, column=2, padx=5, pady=5)
 
         # Row 6: Output File (optional exact path; defaults to basename + the
         # format's own extension in Output Dir above, but "Save As..." lets
         # you point at a specific file instead of only picking a directory).
-        ttk.Label(self.encode_frame, text="Output File (optional):").grid(row=6, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.encode_frame, text="Output File (optional):").grid(
+            row=6, column=0, sticky="e", padx=5, pady=5
+        )
         self.enc_output_var = tk.StringVar(value="")
-        ttk.Entry(self.encode_frame, textvariable=self.enc_output_var).grid(row=6, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.encode_frame, text="Save As...", command=self.browse_save_encode).grid(row=6, column=2, padx=5, pady=5)
+        ttk.Entry(self.encode_frame, textvariable=self.enc_output_var).grid(
+            row=6, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.encode_frame, text="Save As...", command=self.browse_save_encode
+        ).grid(row=6, column=2, padx=5, pady=5)
 
         # Row 6: Scale
-        self.enc_scale_label = ttk.Label(self.encode_frame, text="Scale (e.g. 384x288):")
+        self.enc_scale_label = ttk.Label(
+            self.encode_frame, text="Scale (e.g. 384x288):"
+        )
         self.enc_scale_label.grid(row=7, column=0, sticky="e", padx=5, pady=5)
         self.enc_scale_var = tk.StringVar()
-        self.enc_scale_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_scale_var)
+        self.enc_scale_entry = ttk.Entry(
+            self.encode_frame, textvariable=self.enc_scale_var
+        )
         self.enc_scale_entry.grid(row=7, column=1, sticky="ew", padx=5, pady=5)
 
         # Row 7: Keyframes
-        self.enc_keyframes_label = ttk.Label(self.encode_frame, text="Keyframes (0=auto):")
+        self.enc_keyframes_label = ttk.Label(
+            self.encode_frame, text="Keyframes (0=auto):"
+        )
         self.enc_keyframes_label.grid(row=8, column=0, sticky="e", padx=5, pady=5)
         self.enc_keyframes_var = tk.StringVar(value="0")
-        self.enc_keyframes_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_keyframes_var, width=8)
+        self.enc_keyframes_entry = ttk.Entry(
+            self.encode_frame, textvariable=self.enc_keyframes_var, width=8
+        )
         self.enc_keyframes_entry.grid(row=8, column=1, sticky="w", padx=5, pady=5)
 
         # Row 8: Quantizer / QP (0=default)
-        self.enc_quant_label = ttk.Label(self.encode_frame, text="Quantizer / QP (0=default):")
+        self.enc_quant_label = ttk.Label(
+            self.encode_frame, text="Quantizer / QP (0=default):"
+        )
         self.enc_quant_label.grid(row=9, column=0, sticky="e", padx=5, pady=5)
         self.enc_quant_var = tk.StringVar(value="12")
-        self.enc_quant_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_quant_var, width=8)
+        self.enc_quant_entry = ttk.Entry(
+            self.encode_frame, textvariable=self.enc_quant_var, width=8
+        )
         self.enc_quant_entry.grid(row=9, column=1, sticky="w", padx=5, pady=5)
 
         # Row 9: Audio rate (vx / mods codebook / thp / rvid) — match the clip you're replacing.
-        self.enc_arate_label = ttk.Label(self.encode_frame, text="Audio rate (Hz, 0=source):")
+        self.enc_arate_label = ttk.Label(
+            self.encode_frame, text="Audio rate (Hz, 0=source):"
+        )
         self.enc_arate_label.grid(row=10, column=0, sticky="e", padx=5, pady=5)
         self.enc_audio_rate_var = tk.StringVar(value="0")
-        self.enc_arate_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_audio_rate_var, width=8)
+        self.enc_arate_entry = ttk.Entry(
+            self.encode_frame, textvariable=self.enc_audio_rate_var, width=8
+        )
         self.enc_arate_entry.grid(row=10, column=1, sticky="w", padx=5, pady=5)
 
         # Row 10: FPS — applies to every format; match the clip you're replacing
@@ -323,14 +412,22 @@ class EncodeGUI(tk.Tk):
         self.enc_fps_label = ttk.Label(self.encode_frame, text="FPS (blank=source):")
         self.enc_fps_label.grid(row=11, column=0, sticky="e", padx=5, pady=5)
         self.enc_fps_var = tk.StringVar(value="")
-        self.enc_fps_entry = ttk.Entry(self.encode_frame, textvariable=self.enc_fps_var, width=12)
+        self.enc_fps_entry = ttk.Entry(
+            self.encode_frame, textvariable=self.enc_fps_var, width=12
+        )
         self.enc_fps_entry.grid(row=11, column=1, sticky="w", padx=5, pady=5)
 
         # Row 11: RVID Mode (rvid only)
         self.enc_rvid_mode_label = ttk.Label(self.encode_frame, text="RVID Mode:")
         self.enc_rvid_mode_label.grid(row=12, column=0, sticky="e", padx=5, pady=5)
         self.enc_rvid_mode_var = tk.StringVar(value="rgb555")
-        self.enc_rvid_mode_cb = ttk.Combobox(self.encode_frame, textvariable=self.enc_rvid_mode_var, values=["rgb555", "rgb565", "256"], state="readonly", width=10)
+        self.enc_rvid_mode_cb = ttk.Combobox(
+            self.encode_frame,
+            textvariable=self.enc_rvid_mode_var,
+            values=["rgb555", "rgb565", "256"],
+            state="readonly",
+            width=10,
+        )
         self.enc_rvid_mode_cb.grid(row=12, column=1, sticky="w", padx=5, pady=5)
 
         # Row 12: Checkboxes
@@ -338,14 +435,16 @@ class EncodeGUI(tk.Tk):
         self.enc_fast_audio_chk = ttk.Checkbutton(
             self.encode_frame,
             text="Fast audio (skip LTP search — ~90x faster, ~2 dB lower quality)",
-            variable=self.enc_fast_audio_var)
+            variable=self.enc_fast_audio_var,
+        )
         self.enc_fast_audio_chk.grid(row=13, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_roundtrip_var = tk.BooleanVar(value=False)
         self.enc_roundtrip_chk = ttk.Checkbutton(
             self.encode_frame,
             text="Enable round-trip decoding validation",
-            variable=self.enc_roundtrip_var)
+            variable=self.enc_roundtrip_var,
+        )
         self.enc_roundtrip_chk.grid(row=14, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_hq_var = tk.BooleanVar(value=True)
@@ -353,28 +452,32 @@ class EncodeGUI(tk.Tk):
             self.encode_frame,
             text="Use Highest Quality (Largest Filesize)",
             variable=self.enc_hq_var,
-            command=self.on_toggle_hq)
+            command=self.on_toggle_hq,
+        )
         self.enc_hq_chk.grid(row=15, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_rvid_nocompress_var = tk.BooleanVar(value=False)
         self.enc_rvid_nocompress_chk = ttk.Checkbutton(
             self.encode_frame,
             text="RVID: Raw 16bpp (no LZ10 compression)",
-            variable=self.enc_rvid_nocompress_var)
+            variable=self.enc_rvid_nocompress_var,
+        )
         self.enc_rvid_nocompress_chk.grid(row=16, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_rvid_interlaced_var = tk.BooleanVar(value=False)
         self.enc_rvid_interlaced_chk = ttk.Checkbutton(
             self.encode_frame,
             text="RVID: Interlaced (one field per frame)",
-            variable=self.enc_rvid_interlaced_var)
+            variable=self.enc_rvid_interlaced_var,
+        )
         self.enc_rvid_interlaced_chk.grid(row=17, column=1, sticky="w", padx=5, pady=2)
 
         self.enc_rvid_nodither_var = tk.BooleanVar(value=False)
         self.enc_rvid_nodither_chk = ttk.Checkbutton(
             self.encode_frame,
             text="RVID: Disable 16bpp dithering",
-            variable=self.enc_rvid_nodither_var)
+            variable=self.enc_rvid_nodither_var,
+        )
         self.enc_rvid_nodither_chk.grid(row=18, column=1, sticky="w", padx=5, pady=2)
 
         # Row 18: Toggle Advanced Options
@@ -383,66 +486,169 @@ class EncodeGUI(tk.Tk):
             self.encode_frame,
             text="⚙ Show Advanced MobiClip Encoder Options (MOBI_*)",
             variable=self.enc_adv_toggle_var,
-            command=self.on_toggle_advanced)
+            command=self.on_toggle_advanced,
+        )
         self.enc_adv_toggle_chk.grid(row=19, column=1, sticky="w", padx=5, pady=4)
 
         # Row 19: Advanced Options Frame
-        self.enc_adv_frame = ttk.LabelFrame(self.encode_frame, text="Advanced MobiClip Tuning", padding=8)
-        self.enc_adv_frame.grid(row=20, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        self.enc_adv_frame = ttk.LabelFrame(
+            self.encode_frame, text="Advanced MobiClip Tuning", padding=8
+        )
+        self.enc_adv_frame.grid(
+            row=20, column=0, columnspan=3, sticky="ew", padx=5, pady=5
+        )
         self.enc_adv_frame.columnconfigure(1, weight=1)
 
         # Bitrate (average-bitrate mode; overrides the quantizer)
-        ttk.Label(self.enc_adv_frame, text="Bitrate (e.g. 700k, blank = use QP):").grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        ttk.Label(self.enc_adv_frame, text="Bitrate (e.g. 700k, blank = use QP):").grid(
+            row=0, column=0, sticky="e", padx=5, pady=2
+        )
         self.enc_bitrate_var = tk.StringVar(value="")
-        ttk.Entry(self.enc_adv_frame, textvariable=self.enc_bitrate_var, width=10).grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        ttk.Entry(self.enc_adv_frame, textvariable=self.enc_bitrate_var, width=10).grid(
+            row=0, column=1, sticky="w", padx=5, pady=2
+        )
 
         # Multipass
         self.enc_multipass_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.enc_adv_frame, text="Two-pass rate control (needs a bitrate)",
-                        variable=self.enc_multipass_var).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+        ttk.Checkbutton(
+            self.enc_adv_frame,
+            text="Two-pass rate control (needs a bitrate)",
+            variable=self.enc_multipass_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         # MOBI_SUBME
-        ttk.Label(self.enc_adv_frame, text="Subpel/RD refine 2-9 (blank = preset):").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        ttk.Label(
+            self.enc_adv_frame, text="Subpel/RD refine 2-9 (blank = preset):"
+        ).grid(row=2, column=0, sticky="e", padx=5, pady=2)
         self.enc_mobi_subme_var = tk.StringVar(value="9")
-        ttk.Entry(self.enc_adv_frame, textvariable=self.enc_mobi_subme_var, width=6).grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        ttk.Entry(
+            self.enc_adv_frame, textvariable=self.enc_mobi_subme_var, width=6
+        ).grid(row=2, column=1, sticky="w", padx=5, pady=2)
 
         # MOBI_SKIP
-        ttk.Label(self.enc_adv_frame, text="MOBI_SKIP (MB Skip Threshold, default 512):").grid(row=3, column=0, sticky="e", padx=5, pady=2)
+        ttk.Label(
+            self.enc_adv_frame, text="MOBI_SKIP (MB Skip Threshold, default 512):"
+        ).grid(row=3, column=0, sticky="e", padx=5, pady=2)
         self.enc_mobi_skip_var = tk.StringVar(value="0")
-        ttk.Entry(self.enc_adv_frame, textvariable=self.enc_mobi_skip_var, width=6).grid(row=3, column=1, sticky="w", padx=5, pady=2)
+        ttk.Entry(
+            self.enc_adv_frame, textvariable=self.enc_mobi_skip_var, width=6
+        ).grid(row=3, column=1, sticky="w", padx=5, pady=2)
 
         # MOBI_INTRA_ONLY
         self.enc_mobi_intra_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.enc_adv_frame, text="MOBI_INTRA_ONLY (Force Keyframes Only)", variable=self.enc_mobi_intra_var).grid(row=4, column=1, sticky="w", padx=5, pady=2)
+        ttk.Checkbutton(
+            self.enc_adv_frame,
+            text="MOBI_INTRA_ONLY (Force Keyframes Only)",
+            variable=self.enc_mobi_intra_var,
+        ).grid(row=4, column=1, sticky="w", padx=5, pady=2)
 
         # Extra ffmpeg parameters. Always visible: it's the escape hatch for
         # every option this tab doesn't have a widget for, and it goes on the
         # ffmpeg command line last, so it overrides the format preset.
-        ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(row=21, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(
+            row=21, column=0, sticky="e", padx=5, pady=5
+        )
         self.enc_ffargs_var = tk.StringVar(value="")
-        ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(row=21, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Label(self.encode_frame, foreground="grey", wraplength=440,
-                  text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)"
-                  ).grid(row=21, column=1, columnspan=2, sticky="w", padx=5)
+        ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(
+            row=21, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Label(
+            self.encode_frame,
+            foreground="grey",
+            wraplength=440,
+            text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)",
+        ).grid(row=21, column=1, columnspan=2, sticky="w", padx=5)
 
         # Run Button
-        self.enc_run_btn = ttk.Button(self.encode_frame, text="▶ Run Encoding", command=self.run_encoding)
+        self.enc_run_btn = ttk.Button(
+            self.encode_frame, text="▶ Run Encoding", command=self.run_encoding
+        )
         self.enc_run_btn.grid(row=23, column=1, pady=15)
 
         # Widgets that only appear for certain formats, keyed by the formats
         # that should show them. Hiding uses grid_remove() (not state=disabled)
         # so rows collapse instead of sitting there greyed out.
         self.enc_conditional_widgets = [
-            ({"moflex3d", "3ds_camera3d"}, (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn)),
+            (
+                {"moflex3d", "3ds_camera3d"},
+                (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn),
+            ),
             ({"moflex3d"}, (self.enc_layout_label, self.enc_layout_entry)),
-            ({"mo", "moflex", "moflex3d", "vx"}, (self.enc_keyframes_label, self.enc_keyframes_entry)),
-            ({"vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d", "factor5"}, (self.enc_quant_label, self.enc_quant_entry)),
-            ({"vx", "mods", "ty", "thp", "rvid", "dpg", "wii_photo", "3ds_camera", "factor5"} | AUDIO_ONLY_FORMATS,
-             (self.enc_arate_label, self.enc_arate_entry)),
+            (
+                {"mo", "moflex", "moflex3d", "vx"},
+                (self.enc_keyframes_label, self.enc_keyframes_entry),
+            ),
+            (
+                {
+                    "vx",
+                    "mo",
+                    "moflex",
+                    "moflex3d",
+                    "mods",
+                    "ty",
+                    "thp",
+                    "wii_photo",
+                    "3ds_camera",
+                    "3ds_camera3d",
+                    "factor5",
+                },
+                (self.enc_quant_label, self.enc_quant_entry),
+            ),
+            (
+                {
+                    "vx",
+                    "mods",
+                    "ty",
+                    "thp",
+                    "rvid",
+                    "dpg",
+                    "wii_photo",
+                    "3ds_camera",
+                    "factor5",
+                }
+                | AUDIO_ONLY_FORMATS,
+                (self.enc_arate_label, self.enc_arate_entry),
+            ),
             # Scale and FPS describe a video stream, so they go away entirely
             # for the audio-only containers.
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg", "factor5"}, (self.enc_scale_label, self.enc_scale_entry)),
-            ({"mo", "moflex", "moflex3d", "mods", "vx", "ty", "gba_ads", "gba_hydrogen", "wii_photo", "nintendo_channel", "thp", "rvid", "dpg", "factor5"}, (self.enc_fps_label, self.enc_fps_entry)),
+            (
+                {
+                    "mo",
+                    "moflex",
+                    "moflex3d",
+                    "mods",
+                    "vx",
+                    "ty",
+                    "gba_ads",
+                    "gba_hydrogen",
+                    "wii_photo",
+                    "nintendo_channel",
+                    "thp",
+                    "rvid",
+                    "dpg",
+                    "factor5",
+                },
+                (self.enc_scale_label, self.enc_scale_entry),
+            ),
+            (
+                {
+                    "mo",
+                    "moflex",
+                    "moflex3d",
+                    "mods",
+                    "vx",
+                    "ty",
+                    "gba_ads",
+                    "gba_hydrogen",
+                    "wii_photo",
+                    "nintendo_channel",
+                    "thp",
+                    "rvid",
+                    "dpg",
+                    "factor5",
+                },
+                (self.enc_fps_label, self.enc_fps_entry),
+            ),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),
@@ -451,11 +657,20 @@ class EncodeGUI(tk.Tk):
             ({"mo", "moflex", "moflex3d", "mods"}, (self.enc_adv_toggle_chk,)),
         ]
 
-        self.enc_input_var.trace_add("write", lambda *a: self.on_input_changed(self.enc_input_var, self.enc_outdir_var))
+        self.enc_input_var.trace_add(
+            "write",
+            lambda *a: self.on_input_changed(self.enc_input_var, self.enc_outdir_var),
+        )
         self.enc_input_var.trace_add("write", lambda *a: self.on_encode_input_changed())
-        self.enc_outdir_var.trace_add("write", lambda *a: self.on_encode_input_changed())
+        self.enc_outdir_var.trace_add(
+            "write", lambda *a: self.on_encode_input_changed()
+        )
         self.enc_fmt_var.trace_add("write", lambda *a: self.on_encode_input_changed())
-        for var in (self.enc_quant_var, self.enc_mobi_subme_var, self.enc_mobi_skip_var):
+        for var in (
+            self.enc_quant_var,
+            self.enc_mobi_subme_var,
+            self.enc_mobi_skip_var,
+        ):
             var.trace_add("write", self.update_hq_state_from_fields)
         self.on_enc_format_change()
 
@@ -479,9 +694,9 @@ class EncodeGUI(tk.Tk):
 
     def update_hq_state_from_fields(self, *args):
         is_hq = (
-            self.enc_quant_var.get().strip() == "12" and
-            self.enc_mobi_subme_var.get().strip() == "9" and
-            self.enc_mobi_skip_var.get().strip() == "0"
+            self.enc_quant_var.get().strip() == "12"
+            and self.enc_mobi_subme_var.get().strip() == "9"
+            and self.enc_mobi_skip_var.get().strip() == "0"
         )
         if is_hq and not self.enc_hq_var.get():
             self.enc_hq_var.set(True)
@@ -490,49 +705,70 @@ class EncodeGUI(tk.Tk):
 
     def setup_decode_tab(self):
         self.decode_frame.columnconfigure(1, weight=1)
-        
+
         # Input File. The supported extensions used to sit in the label, which
         # made one very wide line; they live in the file dialog's type filter
         # and in the wrapped hint underneath instead.
-        ttk.Label(self.decode_frame, text="Input File:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="Input File:").grid(
+            row=0, column=0, sticky="e", padx=5, pady=5
+        )
         self.dec_input_var = tk.StringVar()
-        ttk.Entry(self.decode_frame, textvariable=self.dec_input_var).grid(row=0, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.decode_frame, text="Browse...",
-                   command=lambda: self.browse_file(self.dec_input_var,
-                                                    DECODE_FILETYPES)
-                   ).grid(row=0, column=2, padx=5, pady=5)
+        ttk.Entry(self.decode_frame, textvariable=self.dec_input_var).grid(
+            row=0, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.decode_frame,
+            text="Browse...",
+            command=lambda: self.browse_file(self.dec_input_var, DECODE_FILETYPES),
+        ).grid(row=0, column=2, padx=5, pady=5)
 
         # Collapsed by default: the file dialog's own type filter is what
         # people actually need day to day, this is just for "does it support
         # X" questions.
         formats = CollapsibleSection(self.decode_frame, "Supported formats")
-        formats.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5,
-                     pady=(0, 8))
+        formats.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=(0, 8))
         for i, (name, exts) in enumerate(DECODER_FAMILIES):
             cell = ttk.Frame(formats.body)
-            cell.grid(row=i // DECODER_GRID_COLUMNS,
-                      column=i % DECODER_GRID_COLUMNS,
-                      sticky="nw", padx=(0, 24), pady=(0, 6))
+            cell.grid(
+                row=i // DECODER_GRID_COLUMNS,
+                column=i % DECODER_GRID_COLUMNS,
+                sticky="nw",
+                padx=(0, 24),
+                pady=(0, 6),
+            )
             ttk.Label(cell, text=name).pack(anchor="w")
-            ttk.Label(cell, foreground="grey",
-                      text="  ".join(e.lstrip("*") for e in exts.split())
-                      ).pack(anchor="w")
+            ttk.Label(
+                cell,
+                foreground="grey",
+                text="  ".join(e.lstrip("*") for e in exts.split()),
+            ).pack(anchor="w")
         for col in range(DECODER_GRID_COLUMNS):
             formats.body.columnconfigure(col, weight=1, uniform="fmt")
-        ttk.Label(formats.body, foreground="grey",
-                  text="(plus any format ffmpeg reads)").grid(
+        ttk.Label(
+            formats.body, foreground="grey", text="(plus any format ffmpeg reads)"
+        ).grid(
             row=(len(DECODER_FAMILIES) - 1) // DECODER_GRID_COLUMNS + 1,
-            column=0, columnspan=DECODER_GRID_COLUMNS, sticky="w", pady=(2, 0))
+            column=0,
+            columnspan=DECODER_GRID_COLUMNS,
+            sticky="w",
+            pady=(2, 0),
+        )
 
         # Output file: directory + filename in one field ("Save As..." picks
         # both at once). For a stereoscopic input with "Both" eyes, the eye
         # name is appended to this same location (name_left.mp4 / name_right.mp4)
         # -- there's no separate output-directory field, since it would just be
         # redundant with this path's dirname.
-        ttk.Label(self.decode_frame, text="Output File:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="Output File:").grid(
+            row=3, column=0, sticky="e", padx=5, pady=5
+        )
         self.dec_output_var = tk.StringVar(value="")
-        ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(row=3, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.decode_frame, text="Save As...", command=self.browse_save_decode).grid(row=3, column=2, padx=5, pady=5)
+        ttk.Entry(self.decode_frame, textvariable=self.dec_output_var).grid(
+            row=3, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.decode_frame, text="Save As...", command=self.browse_save_decode
+        ).grid(row=3, column=2, padx=5, pady=5)
 
         # A stereoscopic input is always detected and split into separate
         # left/right files automatically -- no eye picker, no layout override.
@@ -543,24 +779,33 @@ class EncodeGUI(tk.Tk):
         # Buttons. Play is the no-output-file path: it decodes straight to a
         # window, so it's the quick way to check a file before committing to a
         # full decode.
-        ttk.Label(self.decode_frame, text="Extra FFmpeg parameters:").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.decode_frame, text="Extra FFmpeg parameters:").grid(
+            row=5, column=0, sticky="e", padx=5, pady=5
+        )
         self.dec_ffargs_var = tk.StringVar(value="")
-        ttk.Entry(self.decode_frame, textvariable=self.dec_ffargs_var).grid(row=5, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Entry(self.decode_frame, textvariable=self.dec_ffargs_var).grid(
+            row=5, column=1, sticky="ew", padx=5, pady=5
+        )
         # On its own row, spanning columns 1-2 with a wraplength: an unwrapped
         # single-line hint here (as a same-row column-2 sibling) forces column
         # 2 wide enough to fit the whole sentence, which starves column 1 --
         # the column the actual input fields live in -- down to a few pixels.
         # This tab has fewer competing rows than Encode's to counteract that
         # pull, so it showed up here as entries rendering only a few px wide.
-        ttk.Label(self.decode_frame, foreground="grey", wraplength=440,
-                  text="passed to ffmpeg verbatim, after the settings above (applies to Play too)"
-                  ).grid(row=6, column=1, columnspan=2, sticky="w", padx=5)
+        ttk.Label(
+            self.decode_frame,
+            foreground="grey",
+            wraplength=440,
+            text="passed to ffmpeg verbatim, after the settings above (applies to Play too)",
+        ).grid(row=6, column=1, columnspan=2, sticky="w", padx=5)
 
         btns = ttk.Frame(self.decode_frame)
         btns.grid(row=7, column=1, pady=15, sticky="w")
         self.dec_play_btn = ttk.Button(btns, text="▶ Play", command=self.run_play)
         self.dec_play_btn.grid(row=0, column=0, padx=(0, 10))
-        self.dec_run_btn = ttk.Button(btns, text="▶ Run Decoding", command=self.run_decoding)
+        self.dec_run_btn = ttk.Button(
+            btns, text="▶ Run Decoding", command=self.run_decoding
+        )
         self.dec_run_btn.grid(row=0, column=1)
 
         self.dec_input_var.trace_add("write", lambda *a: self.on_decode_input_changed())
@@ -573,10 +818,13 @@ class EncodeGUI(tk.Tk):
         if val and os.path.isfile(val):
             directory = os.path.dirname(val)
             outdir_var.set(directory)
-            
+
     def on_toggle_advanced(self):
         fmt = self.formats_map.get(self.enc_fmt_var.get())
-        if fmt in ("mo", "moflex", "moflex3d", "mods") and self.enc_adv_toggle_var.get():
+        if (
+            fmt in ("mo", "moflex", "moflex3d", "mods")
+            and self.enc_adv_toggle_var.get()
+        ):
             self.enc_adv_frame.grid()
         else:
             self.enc_adv_frame.grid_remove()
@@ -602,10 +850,12 @@ class EncodeGUI(tk.Tk):
             self.enc_audio_var.set(options[0])
 
     def browse_file(self, var, filetypes=None):
-        filename = filedialog.askopenfilename(filetypes=filetypes or [("All files", "*.*")])
+        filename = filedialog.askopenfilename(
+            filetypes=filetypes or [("All files", "*.*")]
+        )
         if filename:
             var.set(filename)
-            
+
     def browse_dir(self, var):
         directory = filedialog.askdirectory()
         if directory:
@@ -621,7 +871,8 @@ class EncodeGUI(tk.Tk):
             initialfile=initial or "decoded.mp4",
             initialdir=initialdir or None,
             defaultextension=".mp4",
-            filetypes=[("MP4 video", "*.mp4"), ("All files", "*.*")])
+            filetypes=[("MP4 video", "*.mp4"), ("All files", "*.*")],
+        )
         if filename:
             self.dec_output_var.set(filename)
 
@@ -651,7 +902,8 @@ class EncodeGUI(tk.Tk):
         filename = filedialog.asksaveasfilename(
             initialfile=self.derived_encode_name(),
             defaultextension="." + ext,
-            filetypes=[(f"{ext} file", f"*.{ext}"), ("All files", "*.*")])
+            filetypes=[(f"{ext} file", f"*.{ext}"), ("All files", "*.*")],
+        )
         if filename:
             self.enc_output_var.set(filename)
 
@@ -685,9 +937,12 @@ class EncodeGUI(tk.Tk):
         if inp and os.path.isfile(inp):
             try:
                 import encode as _enc
+
                 kind, inverted = _enc.stereo_layout(inp, _enc.input_fmt(inp))
                 if kind:
-                    note = f"stereoscopic ({kind}{', eyes swapped' if inverted else ''})"
+                    note = (
+                        f"stereoscopic ({kind}{', eyes swapped' if inverted else ''})"
+                    )
                 else:
                     note = "2D input - eye selection ignored"
             except Exception:
@@ -707,7 +962,7 @@ class EncodeGUI(tk.Tk):
         self.console.delete(1.0, tk.END)
         self.console.config(state="disabled")
         self.append_console(f"$ {' '.join(cmd)}\n\n")
-        
+
         def run_thread():
             # --windowed builds have no console, so on Linux/Windows/macOS an
             # uncaught exception here (e.g. a bundled binary that lost its
@@ -720,13 +975,17 @@ class EncodeGUI(tk.Tk):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    bufsize=1
+                    bufsize=1,
                 )
                 for line in process.stdout:
                     self.after(0, self.append_console, line)
 
                 process.wait()
-                self.after(0, self.append_console, f"\nProcess finished with exit code {process.returncode}\n")
+                self.after(
+                    0,
+                    self.append_console,
+                    f"\nProcess finished with exit code {process.returncode}\n",
+                )
             except Exception as e:
                 self.after(0, self.append_console, f"\nFailed to run command: {e}\n")
             finally:
@@ -735,10 +994,12 @@ class EncodeGUI(tk.Tk):
         threading.Thread(target=run_thread, daemon=True).start()
 
     def run_encoding(self):
-        if not getattr(sys, 'frozen', False) and not os.path.exists(ENCODE_SCRIPT):
-            messagebox.showerror("Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}")
+        if not getattr(sys, "frozen", False) and not os.path.exists(ENCODE_SCRIPT):
+            messagebox.showerror(
+                "Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}"
+            )
             return
-            
+
         fmt = self.formats_map.get(self.enc_fmt_var.get())
         audio = self.enc_audio_var.get()
         inp1 = self.enc_input_var.get()
@@ -751,7 +1012,11 @@ class EncodeGUI(tk.Tk):
             messagebox.showwarning("Warning", "Please select an input file.")
             return
 
-        cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
+        cmd = (
+            [sys.executable, "--encode-script"]
+            if getattr(sys, "frozen", False)
+            else [sys.executable, ENCODE_SCRIPT]
+        )
         cmd.extend([fmt, audio, inp1])
 
         if fmt in ("moflex3d", "3ds_camera3d"):
@@ -780,7 +1045,19 @@ class EncodeGUI(tk.Tk):
             cmd.append("--hq")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
             cmd.append("--fast-audio")
-        if fmt in ("vx", "mo", "moflex", "moflex3d", "mods", "ty", "thp", "wii_photo", "3ds_camera", "3ds_camera3d", "factor5"):
+        if fmt in (
+            "vx",
+            "mo",
+            "moflex",
+            "moflex3d",
+            "mods",
+            "ty",
+            "thp",
+            "wii_photo",
+            "3ds_camera",
+            "3ds_camera3d",
+            "factor5",
+        ):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
                 cmd.extend(["--quantizer", q])
@@ -792,7 +1069,10 @@ class EncodeGUI(tk.Tk):
             arate = self.enc_audio_rate_var.get().strip()
             if arate and arate != "0":
                 cmd.extend(["--audio-rate", arate])
-        if fmt in ("mo", "moflex", "moflex3d", "mods") and self.enc_adv_toggle_var.get():
+        if (
+            fmt in ("mo", "moflex", "moflex3d", "mods")
+            and self.enc_adv_toggle_var.get()
+        ):
             bitrate = self.enc_bitrate_var.get().strip()
             if bitrate:
                 cmd.extend(["--bitrate", bitrate])
@@ -833,8 +1113,10 @@ class EncodeGUI(tk.Tk):
 
     def run_play(self):
         """Play the selected file in a window without writing an output file."""
-        if not getattr(sys, 'frozen', False) and not os.path.exists(ENCODE_SCRIPT):
-            messagebox.showerror("Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}")
+        if not getattr(sys, "frozen", False) and not os.path.exists(ENCODE_SCRIPT):
+            messagebox.showerror(
+                "Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}"
+            )
             return
 
         inp = self.dec_input_var.get()
@@ -842,24 +1124,34 @@ class EncodeGUI(tk.Tk):
             messagebox.showwarning("Warning", "Please select a file to play.")
             return
 
-        cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
+        cmd = (
+            [sys.executable, "--encode-script"]
+            if getattr(sys, "frozen", False)
+            else [sys.executable, ENCODE_SCRIPT]
+        )
         cmd.extend(["play", inp])
         self.add_ffargs(cmd, self.dec_ffargs_var)
 
         self.execute_cmd(cmd, self.dec_play_btn)
 
     def run_decoding(self):
-        if not getattr(sys, 'frozen', False) and not os.path.exists(ENCODE_SCRIPT):
-            messagebox.showerror("Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}")
+        if not getattr(sys, "frozen", False) and not os.path.exists(ENCODE_SCRIPT):
+            messagebox.showerror(
+                "Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}"
+            )
             return
-            
+
         inp = self.dec_input_var.get()
 
         if not inp:
             messagebox.showwarning("Warning", "Please select an input file to decode.")
             return
 
-        cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
+        cmd = (
+            [sys.executable, "--encode-script"]
+            if getattr(sys, "frozen", False)
+            else [sys.executable, ENCODE_SCRIPT]
+        )
         cmd.extend(["decode", inp])
 
         outfile = self.dec_output_var.get().strip()
@@ -872,55 +1164,97 @@ class EncodeGUI(tk.Tk):
     def setup_cia_tab(self):
         self.cia_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(self.cia_frame, text="Input .moflex:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.cia_frame, text="Input .moflex:").grid(
+            row=0, column=0, sticky="e", padx=5, pady=5
+        )
         self.cia_input_var = tk.StringVar()
-        ttk.Entry(self.cia_frame, textvariable=self.cia_input_var).grid(row=0, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.cia_frame, text="Browse...",
-                   command=lambda: self.browse_file(
-                       self.cia_input_var,
-                       [("MobiClip MOFLEX", "*.moflex"), ("All files", "*.*")])
-                   ).grid(row=0, column=2, padx=5, pady=5)
+        ttk.Entry(self.cia_frame, textvariable=self.cia_input_var).grid(
+            row=0, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.cia_frame,
+            text="Browse...",
+            command=lambda: self.browse_file(
+                self.cia_input_var,
+                [("MobiClip MOFLEX", "*.moflex"), ("All files", "*.*")],
+            ),
+        ).grid(row=0, column=2, padx=5, pady=5)
 
-        ttk.Label(self.cia_frame, text="Title:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.cia_frame, text="Title:").grid(
+            row=1, column=0, sticky="e", padx=5, pady=5
+        )
         self.cia_title_var = tk.StringVar()
-        ttk.Entry(self.cia_frame, textvariable=self.cia_title_var).grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Label(self.cia_frame, foreground="grey",
-                  text="shown on the HOME Menu; leave blank to use the file name"
-                  ).grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Entry(self.cia_frame, textvariable=self.cia_title_var).grid(
+            row=1, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Label(
+            self.cia_frame,
+            foreground="grey",
+            text="shown on the HOME Menu; leave blank to use the file name",
+        ).grid(row=2, column=1, sticky="w", padx=5)
 
-        ttk.Label(self.cia_frame, text="Publisher:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.cia_frame, text="Publisher:").grid(
+            row=3, column=0, sticky="e", padx=5, pady=5
+        )
         self.cia_publisher_var = tk.StringVar(value="mobipeg")
-        ttk.Entry(self.cia_frame, textvariable=self.cia_publisher_var).grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Entry(self.cia_frame, textvariable=self.cia_publisher_var).grid(
+            row=3, column=1, sticky="ew", padx=5, pady=5
+        )
 
-        ttk.Label(self.cia_frame, text="Icon (optional):").grid(row=4, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.cia_frame, text="Icon (optional):").grid(
+            row=4, column=0, sticky="e", padx=5, pady=5
+        )
         self.cia_icon_var = tk.StringVar()
-        ttk.Entry(self.cia_frame, textvariable=self.cia_icon_var).grid(row=4, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.cia_frame, text="Browse...",
-                   command=lambda: self.browse_file(
-                       self.cia_icon_var,
-                       [("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")])
-                   ).grid(row=4, column=2, padx=5, pady=5)
+        ttk.Entry(self.cia_frame, textvariable=self.cia_icon_var).grid(
+            row=4, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.cia_frame,
+            text="Browse...",
+            command=lambda: self.browse_file(
+                self.cia_icon_var,
+                [("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
+            ),
+        ).grid(row=4, column=2, padx=5, pady=5)
 
-        ttk.Label(self.cia_frame, text="Banner (optional):").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.cia_frame, text="Banner (optional):").grid(
+            row=5, column=0, sticky="e", padx=5, pady=5
+        )
         self.cia_banner_var = tk.StringVar()
-        ttk.Entry(self.cia_frame, textvariable=self.cia_banner_var).grid(row=5, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.cia_frame, text="Browse...",
-                   command=lambda: self.browse_file(
-                       self.cia_banner_var,
-                       [("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")])
-                   ).grid(row=5, column=2, padx=5, pady=5)
-        ttk.Label(self.cia_frame, foreground="grey", wraplength=440,
-                  text="leave icon/banner blank to use VidInjector's built-in placeholders"
-                  ).grid(row=6, column=1, columnspan=2, sticky="w", padx=5)
+        ttk.Entry(self.cia_frame, textvariable=self.cia_banner_var).grid(
+            row=5, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.cia_frame,
+            text="Browse...",
+            command=lambda: self.browse_file(
+                self.cia_banner_var,
+                [("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
+            ),
+        ).grid(row=5, column=2, padx=5, pady=5)
+        ttk.Label(
+            self.cia_frame,
+            foreground="grey",
+            wraplength=440,
+            text="leave icon/banner blank to use VidInjector's built-in placeholders",
+        ).grid(row=6, column=1, columnspan=2, sticky="w", padx=5)
 
-        ttk.Label(self.cia_frame, text="Output .cia:").grid(row=7, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(self.cia_frame, text="Output .cia:").grid(
+            row=7, column=0, sticky="e", padx=5, pady=5
+        )
         self.cia_output_var = tk.StringVar()
-        ttk.Entry(self.cia_frame, textvariable=self.cia_output_var).grid(row=7, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(self.cia_frame, text="Save As...", command=self.browse_save_cia).grid(row=7, column=2, padx=5, pady=5)
+        ttk.Entry(self.cia_frame, textvariable=self.cia_output_var).grid(
+            row=7, column=1, sticky="ew", padx=5, pady=5
+        )
+        ttk.Button(
+            self.cia_frame, text="Save As...", command=self.browse_save_cia
+        ).grid(row=7, column=2, padx=5, pady=5)
 
         btns = ttk.Frame(self.cia_frame)
         btns.grid(row=8, column=1, pady=15, sticky="w")
-        self.cia_run_btn = ttk.Button(btns, text="▶ Package CIA", command=self.run_cia_packaging)
+        self.cia_run_btn = ttk.Button(
+            btns, text="▶ Package CIA", command=self.run_cia_packaging
+        )
         self.cia_run_btn.grid(row=0, column=0)
 
         self.cia_input_var.trace_add("write", lambda *a: self.on_cia_input_changed())
@@ -942,7 +1276,11 @@ class EncodeGUI(tk.Tk):
 
     def browse_save_cia(self):
         current = self.cia_output_var.get().strip()
-        stem = os.path.splitext(os.path.basename(self.cia_input_var.get()))[0] if self.cia_input_var.get() else "package"
+        stem = (
+            os.path.splitext(os.path.basename(self.cia_input_var.get()))[0]
+            if self.cia_input_var.get()
+            else "package"
+        )
         initial = os.path.basename(current) if current else stem + ".cia"
         initialdir = os.path.dirname(current) if current else ""
         filename = filedialog.asksaveasfilename(
@@ -950,21 +1288,30 @@ class EncodeGUI(tk.Tk):
             initialfile=initial,
             initialdir=initialdir or None,
             defaultextension=".cia",
-            filetypes=[("3DS CIA", "*.cia"), ("All files", "*.*")])
+            filetypes=[("3DS CIA", "*.cia"), ("All files", "*.*")],
+        )
         if filename:
             self.cia_output_var.set(filename)
 
     def run_cia_packaging(self):
-        if not getattr(sys, 'frozen', False) and not os.path.exists(ENCODE_SCRIPT):
-            messagebox.showerror("Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}")
+        if not getattr(sys, "frozen", False) and not os.path.exists(ENCODE_SCRIPT):
+            messagebox.showerror(
+                "Error", f"Could not find encode script at:\n{ENCODE_SCRIPT}"
+            )
             return
 
         inp = self.cia_input_var.get().strip()
         if not inp:
-            messagebox.showwarning("Warning", "Please select a .moflex file to package.")
+            messagebox.showwarning(
+                "Warning", "Please select a .moflex file to package."
+            )
             return
 
-        cmd = [sys.executable, "--encode-script"] if getattr(sys, 'frozen', False) else [sys.executable, ENCODE_SCRIPT]
+        cmd = (
+            [sys.executable, "--encode-script"]
+            if getattr(sys, "frozen", False)
+            else [sys.executable, ENCODE_SCRIPT]
+        )
         cmd.extend(["cia", inp])
 
         title = self.cia_title_var.get().strip()
@@ -992,6 +1339,7 @@ MobipegGUI = EncodeGUI
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--encode-script":
         import encode
+
         sys.argv = [sys.argv[0]] + sys.argv[2:]
         encode.main()
         sys.exit(0)
