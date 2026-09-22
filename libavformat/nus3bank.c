@@ -456,6 +456,8 @@ const FFInputFormat ff_nus3bank_demuxer = {
 
 typedef struct NUS3MuxTrack {
     AVIOContext *buf;
+    AVIOContext *ch_buf[8]; /* per-channel ADPCM, for planar packets */
+    int          nb_ch_buf;
     int64_t      sample_count;
     uint32_t     pack_offset;
     uint32_t     pack_size;
@@ -493,7 +495,27 @@ static int nus3bank_write_packet(AVFormatContext *s, AVPacket *pkt)
         return AVERROR(EINVAL);
 
     NUS3MuxTrack *t = &ctx->tracks[pkt->stream_index];
-    avio_write(t->buf, pkt->data, pkt->size);
+    AVCodecParameters *par = s->streams[pkt->stream_index]->codecpar;
+    int channels = par->ch_layout.nb_channels;
+
+    /* adpcm_thp packets are planar (all of channel 0, then channel 1...);
+     * gather each channel separately so that a stream split over several
+     * packets ends up laid out exactly like a single packet would. */
+    if (par->codec_id == AV_CODEC_ID_ADPCM_THP && channels > 1 &&
+        channels <= FF_ARRAY_ELEMS(t->ch_buf) && !(pkt->size % channels)) {
+        int per_ch = pkt->size / channels;
+        for (int ch = 0; ch < channels; ch++) {
+            if (!t->ch_buf[ch]) {
+                int ret = avio_open_dyn_buf(&t->ch_buf[ch]);
+                if (ret < 0)
+                    return ret;
+            }
+            avio_write(t->ch_buf[ch], pkt->data + (size_t)ch * per_ch, per_ch);
+        }
+        t->nb_ch_buf = channels;
+    } else {
+        avio_write(t->buf, pkt->data, pkt->size);
+    }
     if (pkt->duration > 0)
         t->sample_count += pkt->duration;
     else
@@ -516,7 +538,17 @@ static int nus3bank_write_trailer(AVFormatContext *s)
         NUS3MuxTrack *t = &ctx->tracks[i];
         AVStream *st = s->streams[i];
         uint8_t *raw_audio = NULL;
-        int raw_size = avio_close_dyn_buf(t->buf, &raw_audio);
+        int raw_size;
+
+        for (int ch = 0; ch < t->nb_ch_buf; ch++) {
+            uint8_t *cd = NULL;
+            int cs = avio_close_dyn_buf(t->ch_buf[ch], &cd);
+            t->ch_buf[ch] = NULL;
+            if (cs > 0)
+                avio_write(t->buf, cd, cs);
+            av_free(cd);
+        }
+        raw_size = avio_close_dyn_buf(t->buf, &raw_audio);
         t->buf = NULL;
 
         t->pack_offset = avio_tell(pack_buf);
