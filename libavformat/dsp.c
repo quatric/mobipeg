@@ -215,12 +215,30 @@ static int dsp_read_packet(AVFormatContext *s, AVPacket *pkt)
     }
 
     pkt->stream_index = 0;
+    pkt->pts = pkt->dts = s->streams[0]->duration - c->samples_left;
     pkt->duration     = want;
     c->samples_left  -= want;
 
     return dsp_trim_packet(pkt,
                            (int64_t)per_ch / FF_DSP_ADPCM_BYTES_PER_FRAME *
                            FF_DSP_ADPCM_SAMPLES_PER_FRAME, want);
+}
+
+static int dsp_read_seek(AVFormatContext *s, int stream_index,
+                         int64_t timestamp, int flags)
+{
+    DSPDemuxContext *c = s->priv_data;
+    AVStream *st = s->streams[0];
+    int64_t ret;
+
+    /* Blocks depend on the previous predictor history, which is not stored
+     * in an index entry. Decode from the beginning to reconstruct it. */
+    ret = avio_seek(s->pb, c->data_start, SEEK_SET);
+    if (ret < 0)
+        return ret;
+    c->samples_left = st->duration;
+    avpriv_update_cur_dts(s, st, 0);
+    return 0;
 }
 
 const FFInputFormat ff_dsp_demuxer = {
@@ -232,4 +250,5 @@ const FFInputFormat ff_dsp_demuxer = {
     .read_probe     = dsp_probe,
     .read_header    = dsp_read_header,
     .read_packet    = dsp_read_packet,
+    .read_seek      = dsp_read_seek,
 };
