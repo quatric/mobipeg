@@ -1446,10 +1446,18 @@ static int mo_write_packet(AVFormatContext *s, AVPacket *pkt)
         /* Extract the pure MobiClip bitstream from the Annex-B NAL packet.
          * Strips SPS/PPS/SEI NALs, the NAL header byte, and emulation-prevention
          * bytes so the decoder receives raw mobiclip bitstream data. */
-        ret = ff_extract_mobiclip_payload(pkt->data, pkt->size, &v_payload, &v_payload_size);
-        if (ret < 0) {
-            av_log(s, AV_LOG_ERROR, "Failed to extract MobiClip payload from video packet\n");
-            return ret;
+        if (ff_has_annexb_startcode(pkt->data, pkt->size)) {
+            ret = ff_extract_mobiclip_payload(pkt->data, pkt->size, &v_payload, &v_payload_size);
+            if (ret < 0) {
+                av_log(s, AV_LOG_ERROR, "Failed to extract MobiClip payload from video packet\n");
+                return ret;
+            }
+        } else {
+            /* Raw MobiClip bitstream (stream copy from a demuxer): keep as is. */
+            v_payload = av_memdup(pkt->data, pkt->size);
+            if (!v_payload && pkt->size)
+                return AVERROR(ENOMEM);
+            v_payload_size = pkt->size;
         }
 
         mo->video_buf    = v_payload;
@@ -1508,9 +1516,16 @@ static int mo_write_packet(AVFormatContext *s, AVPacket *pkt)
              * video chunk before all audio is buffered drops the tail. Defer
              * it to the next video / trailer too. */
             int defer_for_fastaudio = (mo->audio_codec == 0 && mo->fa_active);
+            /* ADPCM/PCM chunks take a fixed per-frame sample budget (base or
+             * base + 1 with the fractional accumulator); flushing before that
+             * much PCM is buffered would pad the chunk with silence and
+             * delay everything after it. */
+            int need = mo->audio_codec == 2 ? mo->samples_per_chunk_base + 1
+                                            : mo->samples_per_chunk_base;
             if (!defer_for_vorbis && !defer_for_fastaudio &&
-                (!mo->adpcm_mode || mo->audio_codec != 1 ||
-                 mo->pcm_samples >= mo->samples_per_chunk_base)) {
+                (!mo->adpcm_mode ||
+                 (mo->audio_codec != 1 && mo->audio_codec != 2) ||
+                 mo->pcm_samples >= need)) {
                 ret = flush_chunk(s);
                 if (ret < 0) return ret;
             }
