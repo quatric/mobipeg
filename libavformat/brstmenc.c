@@ -162,6 +162,12 @@ static int brstm_common_init(AVFormatContext *s)
         return AVERROR(EINVAL);
     }
 
+    if (par->sample_rate <= 0 ||
+        (c->variant == BRSTM_RSTM && par->sample_rate > UINT16_MAX)) {
+        av_log(s, AV_LOG_ERROR, "sample rate does not fit the stream header\n");
+        return AVERROR(EINVAL);
+    }
+
     if (c->little_endian < 0)
         c->little_endian = c->variant == BRSTM_CSTM;
 
