@@ -576,6 +576,17 @@ static int moflex_write_header(AVFormatContext *s)
 
     if (m->audio_stream_index >= 0) {
         AVCodecParameters *apar = s->streams[m->audio_stream_index]->codecpar;
+        /* The main audio track is always encoded here from interleaved s16
+         * PCM; compressed input ("-c:a copy" of FastAudio/ADPCM) would be
+         * misread as PCM and come out as noise, so refuse it. */
+        if (apar->codec_id != AV_CODEC_ID_PCM_S16LE) {
+            av_log(s, AV_LOG_ERROR,
+                   "moflex: audio input must be pcm_s16le (the muxer encodes "
+                   "it itself); got %s. Stream copy of compressed audio is "
+                   "not supported -- decode it, or use -an.\n",
+                   avcodec_get_name(apar->codec_id));
+            return AVERROR(EINVAL);
+        }
         if (m->audio_codec < 0)
             m->audio_codec = MOBI_AUDIO_ADPCM;
         int ret = mobi_aenc_init(&m->aenc, m->audio_codec,
