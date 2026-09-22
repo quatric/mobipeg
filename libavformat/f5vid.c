@@ -103,6 +103,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <math.h>
+
 #include "libavutil/intreadwrite.h"
 #include "libavutil/avassert.h"
 #include "libavutil/mem.h"
@@ -2323,13 +2325,13 @@ static int f5vid_write_trailer(AVFormatContext *s)
     int al_frames = m->al_len / 8; /* per-channel DSP frames */
     int aoff = 0;                  /* running per-channel frame offset */
     int rate = m->rate ? m->rate : 32000;
+    /* audio schedule state, see the FRAM loop; must stay single precision */
+    const float afinc = (float)(rate * (double)m->fps_den / m->fps_num);
+    float afacc = (float)(int)(2 * afinc);
     if (m->channels && !al_frames && m->nb_frames)
         av_log(s, AV_LOG_WARNING,
                "f5vid: the audio stream delivered no packets; every AUDD "
-               "chunk will be empty. adpcm_thp emits the whole stream as one "
-               "packet at the end, which -shortest discards when it outlasts "
-               "the video; this muxer already trims audio to the video, so "
-               "drop -shortest.\n");
+               "chunk will be empty.\n");
     /* VID1 */
     avio_wb32(pb, MKBETAG('V', 'I', 'D', '1'));
     avio_wb32(pb, 0x20);
@@ -2367,18 +2369,29 @@ static int f5vid_write_trailer(AVFormatContext *s)
         for (i = 0; i < m->nb_frames; i++) {
             F5MUXFrame *fr = &m->frames[i];
             int nf, k;
-            /* Retail audio schedule: after FRAM i the stream holds enough
-             * audio for frames 0..i plus a lead that ramps up by half a
-             * frame per FRAM over the first four (two frames' worth from
-             * then on), allocated in whole 4-DSP-frame (56-sample) units.
-             * All retail files follow this (116,116,112,116, then 76/80
-             * frames per channel at 32 kHz); it also trims audio that
-             * outlasts the video, which is what -shortest would do. */
+            /* Retail audio schedule, reproduced exactly from all five
+             * shipped files (A2M, Bam, Demo, LS, River). Audio goes out in
+             * whole 4-DSP-frame (56-sample) units; after FRAM i the stream
+             * holds ceil(target / 56) units, where
+             *  - FRAMs 0..2 (lead-in): target = (i + 1) * 1.5 frames of
+             *    audio, i.e. a half-frame lead growing per FRAM;
+             *  - from FRAM 3 on: target is a single-precision accumulator
+             *    that starts at 2135 samples (two frames, truncated) and
+             *    gains (float)(rate / 29.97) = 1067.734375 samples per FRAM.
+             * The float accumulator matters: once it passes 2^18 samples
+             * its additions round, and past 2^19 each one adds exactly
+             * 1067.75, which is what moves the occasional 80-frame FRAM
+             * (76 otherwise) one step earlier every 224 frames in Demo.vid.
+             * Rounding a plain rational rate places them differently.
+             * The result is clamped to the available audio, which also
+             * trims audio that outlasts the video. */
             {
-                int64_t num = (int64_t)rate * m->fps_den *
-                              (2 * (i + 1) + FFMIN(i + 1, 4));
-                int64_t den = (int64_t)m->fps_num * 2 * 56;
-                int64_t cum = (num + den - 1) / den * 4;
+                int64_t cum;
+                afacc += afinc;
+                if (i < 3)
+                    cum = (int64_t)ceil((i + 1) * 1.5 * afinc / 56.0) * 4;
+                else
+                    cum = (int64_t)ceil(afacc / 56.0) * 4;
                 if (cum > al_frames)
                     cum = al_frames;
                 nf = cum > aoff ? (int)(cum - aoff) : 0;
