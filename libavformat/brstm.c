@@ -296,16 +296,18 @@ static int read_header(AVFormatContext *s)
         start = read32(s);
     b->current_block = 0;
     b->block_count = read32(s);
-    if (b->block_count > UINT16_MAX) {
-        av_log(s, AV_LOG_WARNING, "too many blocks: %"PRIu32"\n", b->block_count);
+    if (!b->block_count || b->block_count > UINT16_MAX) {
+        av_log(s, AV_LOG_WARNING, "invalid block count: %"PRIu32"\n", b->block_count);
         return AVERROR_INVALIDDATA;
     }
 
     b->block_size = read32(s);
-    if (b->block_size > UINT32_MAX / st->codecpar->ch_layout.nb_channels)
+    if (!b->block_size || b->block_size > INT_MAX / st->codecpar->ch_layout.nb_channels)
         return AVERROR_INVALIDDATA;
 
     b->samples_per_block = read32(s);
+    if (!b->samples_per_block)
+        return AVERROR_INVALIDDATA;
     b->last_block_used_bytes = read32(s);
     b->last_block_samples = read32(s);
     b->last_block_size = read32(s);
