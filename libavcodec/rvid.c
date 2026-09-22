@@ -368,12 +368,21 @@ static int rvid_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     stored = c->payload;
     stored_size = raw_payload;
     if (c->compress) {
+        /* The compressed flag is per file and the decoder LZ10-decompresses
+         * every frame, so a frame cannot fall back to raw storage. lzbuf
+         * holds 2 * npix + npix / 4 + 64 bytes, which covers the LZ10 bound
+         * for either payload size. */
         int lz = avpriv_nintendo_lz10_compress(c->payload, raw_payload, c->lzbuf,
-                                    raw_payload * 2 + raw_payload / 4 + 64);
-        if (lz > 0 && lz < raw_payload) {
-            stored = c->lzbuf;
-            stored_size = lz;
+                                    avpriv_nintendo_lz10_bound(raw_payload));
+        if (lz <= 0)
+            return lz < 0 ? lz : AVERROR_BUG;
+        if (bmp == RVID_BMP_8BPP && lz > UINT16_MAX) {
+            av_log(avctx, AV_LOG_ERROR,
+                   "rvid: compressed 8bpp frame exceeds the 16-bit size field\n");
+            return AVERROR(EINVAL);
         }
+        stored = c->lzbuf;
+        stored_size = lz;
     }
 
     if ((ret = ff_get_encode_buffer(avctx, pkt, pal_bytes + stored_size, 0)) < 0)

@@ -264,6 +264,19 @@ static int rvid_write_trailer(AVFormatContext *s)
         }
     }
     size_no_audio = frames_base + cursor;
+    if (size_no_audio + m->left_size + m->right_size > UINT32_MAX) {
+        av_log(s, AV_LOG_ERROR, "rvid: output exceeds the 32-bit offset range\n");
+        return AVERROR(EINVAL);
+    }
+    if (m->compressed) {
+        for (i = 0; i < n; i++) {
+            int payload = m->frames[i].size - pal;
+            if (payload < 0 || (m->bmp_mode == 0 && payload > UINT16_MAX)) {
+                av_log(s, AV_LOG_ERROR, "rvid: frame %d size does not fit the size table\n", i);
+                return AVERROR_INVALIDDATA;
+            }
+        }
+    }
 
     snd_left_off  = m->left_size  ? size_no_audio                     : 0;
     snd_right_off = m->right_size ? size_no_audio + m->left_size      : 0;
