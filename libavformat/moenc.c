@@ -1065,6 +1065,13 @@ static int flush_chunk(AVFormatContext *s)
                     int got = 0;
                     if (avcodec_send_frame(mo->fa_enc, mo->fa_frame) >= 0 &&
                         avcodec_receive_packet(mo->fa_enc, fa_pkt) >= 0) {
+                        if (fa_pkt->size > 40 * mo->channels) {
+                            av_log(s, AV_LOG_ERROR, "FastAudio packet too large "
+                                   "(%d > %d bytes)\n", fa_pkt->size, 40 * mo->channels);
+                            av_packet_free(&fa_pkt);
+                            av_free(fa_out);
+                            return AVERROR_BUG;
+                        }
                         memcpy(fa_out + fa_out_len, fa_pkt->data, fa_pkt->size);
                         fa_out_len += fa_pkt->size;
                         (void)got;
@@ -1525,8 +1532,11 @@ static int mo_write_trailer(AVFormatContext *s)
 
     /* Drain ALL remaining buffered audio into the final chunk. */
     mo->draining = 1;
-    if (mo->video_buf)
-        flush_chunk(s);
+    if (mo->video_buf) {
+        int ret = flush_chunk(s);
+        if (ret < 0)
+            return ret;
+    }
 
     if (!mo->adpcm_mode) {
         av_freep(&mo->audio_buf);
