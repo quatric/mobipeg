@@ -431,6 +431,10 @@ static int ty_write_audio(AVFormatContext *s, AVPacket *pkt)
     hlen = ty_build_pes(ty->audio_is_ac3 ? TY_PRIVATE_STREAM_1_ID : AUDIO_ID,
                          ty->audio_is_ac3 ? 0 : 2, pts, hdr);
 
+    if (pkt->size > 0xffff + PES_LEN_OFFSET - hlen) {
+        av_log(s, AV_LOG_ERROR, "ty: audio packet of %d bytes is too large\n", pkt->size);
+        return AVERROR(EINVAL);
+    }
     total = hlen + pkt->size;
     AV_WB16(hdr + 4, total - PES_LEN_OFFSET);
 
