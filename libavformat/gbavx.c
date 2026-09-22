@@ -150,7 +150,7 @@ static int header_ok(const GBAVXStream *st, int64_t filesize)
            st->sample_rate >= 4000 && st->sample_rate <= 48000 &&
            st->nb_seek > 0 && st->nb_seek < (1 << 16) &&
            st->audio_off > VX_HEADER_SIZE &&
-           st->audio_off + VX_AUDIO_EXTRADATA_SIZE <= st->chapter_off &&
+           (int64_t)st->audio_off + VX_AUDIO_EXTRADATA_SIZE <= st->chapter_off &&
            st->seek_off > st->audio_off &&
            st->off + st->chapter_off <= filesize;
 }
