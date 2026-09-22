@@ -152,6 +152,10 @@ jobs:
               zlib1g-dev${FOREIGN} \
               ${CROSS_CC} \
               ${MULTILIB} && break
+            if [ "$attempt" = 3 ]; then
+              echo "apt-get install failed after 3 attempts" >&2
+              exit 1
+            fi
             echo "apt-get install failed (attempt ${attempt}), retrying after apt-get update..."
             sleep 15
             sudo apt-get update -qq
