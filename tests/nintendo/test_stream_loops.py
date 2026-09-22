@@ -169,3 +169,25 @@ class StreamLoopTests(unittest.TestCase):
                             result = subprocess.run([FFMPEG, '-v', 'error', '-xerror', '-i', str(path),
                                                      '-f', 'null', '-'], capture_output=True, timeout=15)
                             self.assertGreater(result.returncode, 0)
+
+    def test_reader_rejects_zero_block_geometry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for fmt in ('brstm', 'bfstm', 'bcstm'):
+                for endian in ('be', 'le'):
+                    result, path = self.encode(directory, fmt, endian, 29)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    original = path.read_bytes()
+                    order = '>' if endian == 'be' else '<'
+                    u32 = lambda off: struct.unpack_from(order + 'I', original, off)[0]
+                    body = u32(0x10 if fmt == 'brstm' else 0x18) + 8
+                    stream = body + u32(body + 4)
+                    geometry = stream + (20 if fmt == 'brstm' else 16)
+                    for field in range(3):
+                        with self.subTest(fmt=fmt, endian=endian, field=field):
+                            data = bytearray(original)
+                            struct.pack_into(order + 'I', data, geometry + 4 * field, 0)
+                            path.write_bytes(data)
+                            result = subprocess.run([FFMPEG, '-v', 'error', '-xerror', '-ss', '0.01',
+                                                     '-i', str(path), '-f', 'null', '-'],
+                                                    capture_output=True, timeout=15)
+                            self.assertGreater(result.returncode, 0, result.stderr.decode())
