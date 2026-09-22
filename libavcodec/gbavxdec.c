@@ -188,6 +188,7 @@ static av_cold int gbavx_init(AVCodecContext *avctx)
 
     avctx->pix_fmt = AV_PIX_FMT_RGB24;
     if (avctx->width < 16 || avctx->height < 16 ||
+        avctx->width > GBA_STRIDE || avctx->height > GBA_LUMA_ALLOC / GBA_STRIDE ||
         avctx->width % 16 || avctx->height % 16 ||
         avctx->extradata_size < GBA_VX_EXTRADATA_SIZE)
         return AVERROR_INVALIDDATA;
