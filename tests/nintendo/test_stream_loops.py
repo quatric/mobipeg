@@ -191,3 +191,25 @@ class StreamLoopTests(unittest.TestCase):
                                                      '-i', str(path), '-f', 'null', '-'],
                                                     capture_output=True, timeout=15)
                             self.assertGreater(result.returncode, 0, result.stderr.decode())
+
+    def test_pcm_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.raw'
+            for channels in (1, 2):
+                raw = b''.join(struct.pack('<h', ((i * 317 + ch * 19001) % 60000) - 30000)
+                               for i in range(79) for ch in range(channels))
+                source.write_bytes(raw)
+                for fmt in ('brstm', 'bfstm', 'bcstm'):
+                    for endian in ('be', 'le'):
+                        with self.subTest(fmt=fmt, endian=endian, channels=channels):
+                            path = Path(directory) / ('audio.' + fmt)
+                            result = subprocess.run([FFMPEG, '-v', 'error', '-y', '-f', 's16le',
+                                                     '-ar', '32000', '-ac', str(channels), '-i', str(source),
+                                                     '-c:a', 'pcm_s16' + endian + '_planar',
+                                                     '-endian', endian, '-block_size', '32', str(path)],
+                                                    capture_output=True, timeout=15)
+                            self.assertEqual(result.returncode, 0, result.stderr.decode())
+                            result = subprocess.run([FFMPEG, '-v', 'error', '-xerror', '-i', str(path),
+                                                     '-f', 's16le', '-'], capture_output=True, timeout=15)
+                            self.assertEqual(result.returncode, 0, result.stderr.decode())
+                            self.assertEqual(result.stdout, raw)
