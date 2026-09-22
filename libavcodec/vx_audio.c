@@ -134,7 +134,9 @@ static av_cold int vx_audio_init(AVCodecContext *avctx)
 
         s->scratch_ls_y  = FFALIGN(s->width, 16);
         s->scratch_ls_uv = FFALIGN(s->width / 2, 16);
-        s->scratch_y = av_calloc((size_t)s->scratch_ls_y * s->height, 1);
+        /* intra prediction may read a few bytes past the last row */
+        s->scratch_y = av_calloc((size_t)s->scratch_ls_y * s->height +
+                                 AV_INPUT_BUFFER_PADDING_SIZE, 1);
         s->scratch_u = av_calloc((size_t)s->scratch_ls_uv * (s->height / 2), 1);
         s->scratch_v = av_calloc((size_t)s->scratch_ls_uv * (s->height / 2), 1);
         if (!s->scratch_y || !s->scratch_u || !s->scratch_v)
@@ -242,7 +244,8 @@ static int decode_aframe(AVCodecContext *avctx, VXAState *s, GetBitContext *gb,
     scale = s->have_prev ? s->scale_prev : (int)s->ed.scale_initial;
     if (prev_frame_offset == 0x7f)
         scale = (int)s->ed.scale_initial;
-    scale = (scale * (int)s->ed.scale_modifiers[scale_modifier_index]) >> 13;
+    scale = av_clip64(((int64_t)scale * s->ed.scale_modifiers[scale_modifier_index]) >> 13,
+                      -(INT_MAX / 16), INT_MAX / 16);
 
     if (prev_frame_offset == 0x7f) {
         for (int i = 0; i < 8; i++) lpc_filter[i] = s->ed.lpc_base[i];
@@ -351,8 +354,11 @@ static int vx_audio_decode(AVCodecContext *avctx, AVFrame *frame,
         *got_frame = 0;
         return pkt->size;
     }
+    /* every AFrame takes at least 32 bits */
+    if (nb_aframes > (pkt->size - 4) / 4)
+        return AVERROR_INVALIDDATA;
 
-    bitstream = av_malloc(FFALIGN(pkt->size - 4, 2));
+    bitstream = av_mallocz(FFALIGN(pkt->size - 4, 2) + AV_INPUT_BUFFER_PADDING_SIZE);
     if (!bitstream)
         return AVERROR(ENOMEM);
     memcpy(bitstream, pkt->data + 4, pkt->size - 4);
