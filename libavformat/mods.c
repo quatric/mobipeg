@@ -60,6 +60,7 @@ typedef struct MODSDemuxContext {
     int64_t  frame_data_end;  /* frames live in [first_frame, frame_data_end) */
     int64_t  kf_table_off;
     int      nb_video_frames;
+    uint8_t *key_frames;      /* per-frame flag from the key-frame table */
 
     /* Retail DS .mods SX audio. The demuxer splits each frame into video/audio
      * using its own private mobiclip decoder (m->vdec), then emits the audio
@@ -94,6 +95,7 @@ static int mods_read_header(AVFormatContext *s)
     AVIOContext *pb = s->pb;
     AVRational fps;
     int64_t pos;
+    uint32_t kf_count;
 
     AVStream *st = avformat_new_stream(s, NULL);
     if (!st)
@@ -127,7 +129,7 @@ static int mods_read_header(AVFormatContext *s)
         avio_skip(pb, 4);                          /* 0x20 */
         uint32_t acodec_info_off = avio_rl32(pb);          /* 0x24 */
         m->kf_table_off          = avio_rl32(pb);          /* 0x28 */
-        /* (key-frame count at 0x2C is not needed here) */
+        kf_count                 = avio_rl32(pb);          /* 0x2C */
 
         if (acodec > 1 && acodec != 0xFF)
             m->embedded_audio = 1;
@@ -244,10 +246,32 @@ static int mods_read_header(AVFormatContext *s)
         }
     }
 
-    /* First frame = first key-frame table entry's data offset (the entry is
-     * [u32 frame_number][u32 data_offset]; +4 skips the frame number). */
-    avio_seek(pb, m->kf_table_off + 4, SEEK_SET);
-    pos = avio_rl32(pb);
+    /* Key-frame table: [u32 frame_number][u32 data_offset] pairs.  It is
+     * the only record of which chunks are intra frames, so packet key flags
+     * come from it.  The first entry's data offset is
+     * where the first frame starts. */
+    if (m->nb_video_frames > 0) {
+        m->key_frames = av_mallocz(m->nb_video_frames);
+        if (!m->key_frames)
+            return AVERROR(ENOMEM);
+    }
+    avio_seek(pb, m->kf_table_off, SEEK_SET);
+    pos = -1;
+    for (uint32_t i = 0; i < kf_count && !avio_feof(pb); i++) {
+        uint32_t frame = avio_rl32(pb);
+        uint32_t off   = avio_rl32(pb);
+        if (i == 0)
+            pos = off;
+        if (frame < (uint32_t)m->nb_video_frames)
+            m->key_frames[frame] = 1;
+    }
+    if (pos < 0) {
+        /* No table: nothing says which frames are intra, so flag them all
+         * (the old behaviour) and read the first entry slot as before. */
+        av_freep(&m->key_frames);
+        avio_seek(pb, m->kf_table_off + 4, SEEK_SET);
+        pos = avio_rl32(pb);
+    }
     avio_seek(pb, pos, SEEK_SET);
 
     {
@@ -682,7 +706,9 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
     pkt->pts = m->frame_index;
     pkt->dts = m->frame_index;
     pkt->duration = 1;
-    pkt->flags |= AV_PKT_FLAG_KEY;
+    if (!m->key_frames || m->frame_index >= m->nb_video_frames ||
+        m->key_frames[m->frame_index])
+        pkt->flags |= AV_PKT_FLAG_KEY;
     m->frame_index++;
 
     return ret;
@@ -692,6 +718,7 @@ static int mods_read_close(AVFormatContext *s)
 {
     MODSDemuxContext *m = s->priv_data;
     av_freep(&m->aud_buf);
+    av_freep(&m->key_frames);
     avcodec_free_context(&m->vdec);
     av_frame_free(&m->vframe);
     av_packet_free(&m->vpkt);
