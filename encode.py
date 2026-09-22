@@ -1986,8 +1986,25 @@ def main():
             if audio_rate > 0:
                 enc_opts.extend(["-ar", str(audio_rate)])
     elif fmt in ("factor5", "f5vid"):
-        # GameCube Factor 5 DivX: MPEG-4 ASP video + DSP-ADPCM audio.
-        enc_opts.extend(["-vtag", "DIVX", "-pix_fmt", "yuv420p", "-bf", "0"])
+        # GameCube Factor 5 DivX: MPEG-4 ASP video + DSP-ADPCM audio. The
+        # f5vid muxer re-codes each VOP into Factor 5's entropy layout, which
+        # has no resync markers: the mpeg4 encoder adds those whenever it
+        # slice-threads, so keep it to one thread (one slice per frame).
+        enc_opts.extend(
+            [
+                "-vtag",
+                "DIVX",
+                "-pix_fmt",
+                "yuv420p",
+                "-bf",
+                "0",
+                "-threads:v",
+                "1",
+                # A P-VOP's quantizer is a 4-bit field in the VIDD header.
+                "-qmax",
+                "15",
+            ]
+        )
         if vx_quant > 0:
             enc_opts.extend(["-qscale:v", str(vx_quant)])
         elif mobi_bitrate:
@@ -1997,9 +2014,24 @@ def main():
         if audio == "none":
             enc_opts.append("-an")
         else:
-            enc_opts.extend(["-c:a", "adpcm_thp"])
-            if audio_rate > 0:
-                enc_opts.extend(["-ar", str(audio_rate)])
+            # Every retail .vid carries 32 kHz stereo. No -shortest: the
+            # adpcm_thp encoder emits the whole stream as one packet at the
+            # end, which -shortest drops, and the muxer trims audio to the
+            # video length on its own. Retail audio runs two frames ahead of
+            # the video, so pad a little silence to keep the last AUDD
+            # chunks from running dry.
+            enc_opts.extend(
+                [
+                    "-c:a",
+                    "adpcm_thp",
+                    "-ac",
+                    "2",
+                    "-ar",
+                    str(audio_rate or 32000),
+                    "-af",
+                    "apad=pad_dur=0.25",
+                ]
+            )
     elif fmt in ("gba_ads", "gba_hydrogen"):
         # GBA audio remains decode-only. The encoder writes a video-only
         # .mmstr and selects the compressor used by the requested lineage.
