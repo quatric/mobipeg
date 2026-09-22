@@ -266,7 +266,7 @@ end:
 #define OFFSET(x) offsetof(DSPMuxContext, x)
 static const AVOption dsp_options[] = {
     { "interleave", "frames per channel in each interleave block (multi-channel only)",
-      OFFSET(interleave), AV_OPT_TYPE_INT, { .i64 = 1024 }, 1, 1 << 20, AV_OPT_FLAG_ENCODING_PARAM },
+      OFFSET(interleave), AV_OPT_TYPE_INT, { .i64 = 1024 }, 1, UINT16_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     { "loop", "mark the stream as looping", OFFSET(loop), AV_OPT_TYPE_BOOL,
       { .i64 = 0 }, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { "loop_start", "loop start, in samples", OFFSET(loop_start), AV_OPT_TYPE_INT64,

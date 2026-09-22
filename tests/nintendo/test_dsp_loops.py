@@ -10,6 +10,30 @@ FFMPEG = os.environ.get('FFMPEG', str(Path(__file__).resolve().parents[2] / 'ffm
 
 
 class DSPLoopTests(unittest.TestCase):
+    def test_dsp_interleave_fits_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'interleave.dsp'
+            for interleave in (65535, 65536, 1 << 20):
+                with self.subTest(interleave=interleave):
+                    encoded = subprocess.run([
+                        FFMPEG, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                        'sine=frequency=731:sample_rate=32000', '-t', '0.02',
+                        '-ac', '2', '-c:a', 'adpcm_thp', '-interleave',
+                        str(interleave), str(path)], capture_output=True, timeout=15)
+                    if interleave > 65535:
+                        self.assertGreater(encoded.returncode, 0)
+                        continue
+                    self.assertEqual(encoded.returncode, 0, encoded.stderr.decode())
+                    self.assertEqual(struct.unpack_from('>H', path.read_bytes(), 0x4c)[0],
+                                     interleave)
+                    decoded = subprocess.run([FFMPEG, '-v', 'error', '-i', str(path),
+                                              '-f', 's16le', '-'], capture_output=True, timeout=15)
+                    self.assertEqual(decoded.returncode, 0, decoded.stderr.decode())
+                    self.assertEqual(len(decoded.stdout), 640 * 2 * 2)
+                    samples = struct.unpack('<1280h', decoded.stdout)
+                    self.assertTrue(any(samples[1::2]))
+                    self.assertEqual(samples[::2], samples[1::2])
+
     def test_dsp_seek_matches_uninterrupted_decode(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'seek.dsp'
