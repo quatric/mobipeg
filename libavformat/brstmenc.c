@@ -198,7 +198,8 @@ static void brstm_deinit(AVFormatContext *s)
 static int brstm_write_packet(AVFormatContext *s, AVPacket *pkt)
 {
     BRSTMMuxContext *c = s->priv_data;
-    int channels = s->streams[0]->codecpar->ch_layout.nb_channels;
+    AVCodecParameters *par = s->streams[0]->codecpar;
+    int channels = par->ch_layout.nb_channels;
     size_t side_size;
     const uint8_t *side;
     int per_ch;
@@ -224,10 +225,25 @@ static int brstm_write_packet(AVFormatContext *s, AVPacket *pkt)
     }
     per_ch = pkt->size / channels;
 
-    /* Both adpcm_thp and the planar PCM encoders lay a packet out channel by
-     * channel, so the split is a straight slice. */
-    for (int ch = 0; ch < channels; ch++)
-        avio_write(c->ch_buf[ch], pkt->data + (size_t)ch * per_ch, per_ch);
+    if (per_ch % (c->is_adpcm ? FF_DSP_ADPCM_BYTES_PER_FRAME : c->bytes_per_sample)) {
+        av_log(s, AV_LOG_ERROR, "packet contains an incomplete audio frame\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    /* Samples follow the container byte order, independently of the input
+     * codec. ADPCM frame bytes themselves are endian-independent. */
+    for (int ch = 0; ch < channels; ch++) {
+        const uint8_t *src = pkt->data + (size_t)ch * per_ch;
+        if (!c->is_adpcm && c->bytes_per_sample == 2 &&
+            (par->codec_id == AV_CODEC_ID_PCM_S16LE_PLANAR) != c->little_endian) {
+            for (int i = 0; i < per_ch; i += 2) {
+                avio_w8(c->ch_buf[ch], src[i + 1]);
+                avio_w8(c->ch_buf[ch], src[i]);
+            }
+        } else {
+            avio_write(c->ch_buf[ch], src, per_ch);
+        }
+    }
 
     if (pkt->duration > 0)
         c->nb_samples += pkt->duration;
