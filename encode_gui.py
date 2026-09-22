@@ -557,7 +557,7 @@ class EncodeGUI(tk.Tk):
             foreground="grey",
             wraplength=440,
             text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)",
-        ).grid(row=21, column=1, columnspan=2, sticky="w", padx=5)
+        ).grid(row=22, column=1, columnspan=2, sticky="w", padx=5)
 
         # Run Button
         self.enc_run_btn = ttk.Button(
@@ -975,7 +975,15 @@ class EncodeGUI(tk.Tk):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
+                    # The child's stdout is a pipe, so Python would otherwise
+                    # block-buffer it and the console would stay empty until
+                    # the encode finished; also pin its encoding to match.
+                    env=dict(
+                        os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8"
+                    ),
                 )
                 for line in process.stdout:
                     self.after(0, self.append_console, line)
@@ -1061,11 +1069,29 @@ class EncodeGUI(tk.Tk):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
                 cmd.extend(["--quantizer", q])
-        if fmt in ("vx", "thp", "mods", "factor5"):
+        if fmt in (
+            "mo",
+            "moflex",
+            "moflex3d",
+            "mods",
+            "vx",
+            "ty",
+            "gba_ads",
+            "gba_hydrogen",
+            "wii_photo",
+            "nintendo_channel",
+            "thp",
+            "rvid",
+            "dpg",
+            "factor5",
+        ):
             fps = self.enc_fps_var.get().strip()
             if fps:
                 cmd.extend(["--fps", fps])
-        if fmt in ("vx", "mods", "ty", "thp", "rvid", "factor5"):
+        if fmt in (
+            {"vx", "mods", "ty", "thp", "rvid", "dpg", "wii_photo", "factor5"}
+            | AUDIO_ONLY_FORMATS
+        ):
             arate = self.enc_audio_rate_var.get().strip()
             if arate and arate != "0":
                 cmd.extend(["--audio-rate", arate])
