@@ -300,7 +300,6 @@ class RetailDecodeTests(RefMixin, unittest.TestCase):
                 )
                 self.assertEqual(frame[0], pix_fmt)
 
-    @unittest.expectedFailure
     def test_mo_multitrack_last_track_decodes(self):
         # BUG (libavformat/modec.c, multi-track branch of mo_read_packet):
         # the last track's size is computed as audio_size - 4 * num_tracks,
@@ -311,7 +310,6 @@ class RetailDecodeTests(RefMixin, unittest.TestCase):
         _, errors = decode(SAMPLES / "mo_multitrack.mo", ("0:a:2",))
         self.assertEqual(errors, "")
 
-    @unittest.expectedFailure
     def test_mods_key_flags_follow_the_key_frame_table(self):
         # BUG (libavformat/mods.c, end of mods_read_packet): every video
         # packet gets AV_PKT_FLAG_KEY unconditionally, so a P-frame looks like
@@ -329,7 +327,6 @@ class RetailDecodeTests(RefMixin, unittest.TestCase):
                 }
                 self.assertEqual(keys, table)
 
-    @unittest.expectedFailure
     def test_mo_aa_record_audio_is_exposed(self):
         # BUG (libavformat/modec.c): some Nintendo Channel clips describe
         # their Vorbis track with an 'AA' header record (same payload as 'AV':
@@ -339,7 +336,6 @@ class RetailDecodeTests(RefMixin, unittest.TestCase):
         info = stream_info(SAMPLES / "mo_vorbis_aa.mo")
         self.assertEqual(count_streams(info, "audio"), 1)
 
-    @unittest.expectedFailure
     def test_mo_header_without_end_marker_fails_instead_of_hanging(self):
         # BUG (libavformat/modec.c, mo_read_header): a file that ends exactly
         # at the declared header length but before the 'HE' record (what
@@ -435,7 +431,6 @@ class RetailRemuxTests(unittest.TestCase):
                 with self.subTest(name=name):
                     self.assert_pictures_copied(name)
 
-    @unittest.expectedFailure
     def test_mods_video_payloads_survive_remux(self):
         # BUG (libavformat/modsenc.c + mods.c): modsenc appends its 4-byte
         # [pad][0][audio size] split suffix to every chunk, including on
@@ -445,7 +440,6 @@ class RetailRemuxTests(unittest.TestCase):
         # the pictures still match (test above), but the copy is not 1:1.
         self.assert_video_copied("mods_noaudio.mods")
 
-    @unittest.expectedFailure
     def test_mods_frame_rate_survives_remux(self):
         # BUG (libavformat/modsenc.c): on a stream copy the muxer does not
         # take the frame rate from the input; every remuxed file gets
@@ -460,17 +454,23 @@ class RetailRemuxTests(unittest.TestCase):
                     ffprobe("-select_streams", "v", *rate, target).stdout,
                 )
 
-    @unittest.expectedFailure
     def test_mo_video_payloads_survive_remux(self):
-        # BUG (libavformat/moenc.c, mo_write_packet): moenc runs every video
-        # packet through ff_extract_mobiclip_payload(), which only understands
-        # the Annex-B framing our encoder emits.  Raw Mobiclip packets coming
-        # from any demuxer fail with "Failed to extract MobiClip payload from
-        # video packet", so no .mo can be stream-copied.  moflexenc/modsenc
-        # guard the call with ff_has_annexb_startcode(); moenc does not.
-        self.assert_video_copied("mo_adpcm.mo")
+        # Regression (libavformat/moenc.c, mo_write_packet): raw Mobiclip
+        # packets from a demuxer used to go through ff_extract_mobiclip_payload()
+        # and fail.  A copy must keep every video packet 1:1: payload, size,
+        # timestamps and key flags, and a second generation must be
+        # byte-identical to the first.
+        for name in ("mo_adpcm.mo", "mo_multitrack.mo", "mo_vorbis_aa.mo"):
+            with self.subTest(name=name):
+                source, target = self.remux(name)
+                self.assertEqual(packet_info(source, "v"), packet_info(target, "v"))
+                self.assertEqual(
+                    decode(source, ("0:v",))[0], decode(target, ("0:v",))[0]
+                )
+                second = self.root / "second.mo"
+                ffmpeg("-y", "-i", target, "-c", "copy", second)
+                self.assertEqual(target.read_bytes(), second.read_bytes())
 
-    @unittest.expectedFailure
     def test_compressed_audio_copy_is_rejected(self):
         # BUG (moflexenc.c / modsenc.c): the muxers treat whatever arrives on
         # the audio stream as interleaved s16 PCM and re-encode it.  A
@@ -563,7 +563,7 @@ SYNTHETIC = {
 MODS_VIDEO = ["-mobiclip", "2", "-moflex", "0", "-g", "100000"]
 
 # Codecs whose decoded samples must equal the source exactly.  The .mo PCM
-# cases are checked in test_mo_pcm_is_lossless (known bug).
+# cases are checked in test_mo_pcm_is_lossless.
 LOSSLESS = {"mods_pcm", "moflex_pcm"}
 
 
@@ -700,7 +700,6 @@ class SyntheticTests(RefMixin, unittest.TestCase):
         self.assertGreater(ratio, 0.5, f"level ratio {ratio:.2f}")
         self.assertLess(ratio, 2.0, f"level ratio {ratio:.2f}")
 
-    @unittest.expectedFailure
     def test_mo_pcm_is_lossless(self):
         # BUG (libavformat/moenc.c, PCM path): the first chunk carries only
         # the first 1024 input samples and is then filled up to its sample

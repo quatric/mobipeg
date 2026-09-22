@@ -1,5 +1,6 @@
 # streams
 stream,0,mobiclip,video,384,288,yuv420p
+stream,1,vorbis,audio,fltp,48000,2
 # packets
 packet,0,-2,-2,1,496,K__,MD5:ae81283f93491c2213a634715d7e0f66
 packet,0,-1,-1,1,112,___,MD5:94bb98457ea54c8f8d8e0f4a6b0193fe
@@ -22,15 +23,24 @@ packet,0,15,15,1,112,___,MD5:f9c808712286a08860e6bc63963b70ec
 packet,0,16,16,1,112,___,MD5:f9c808712286a08860e6bc63963b70ec
 packet,0,17,17,1,144,___,MD5:b92730f8bd86d3426cc2c1b422170a07
 packet,0,18,18,1,124,___,MD5:7f85c469f87cd7bcd1461e94f6187eb1
+packet,1,40067,40067,N/A,340,K__,MD5:e8b465f08d7e67759f7557c3531db864
 packet,0,19,19,1,112,___,MD5:d75220842585c493f5fd02d6e0bf1009
+packet,1,42115,42115,N/A,356,K__,MD5:4bce4a1fc9e6cbd89742c9e1a5c01903
 packet,0,20,20,1,112,___,MD5:f9c808712286a08860e6bc63963b70ec
+packet,1,44164,44164,N/A,356,K__,MD5:1cdaa74bd5513f812da29faa7c3e0cf9
 packet,0,21,21,1,856,___,MD5:77f6b3eb613af27caab953a1b48e4b49
+packet,1,46212,46212,N/A,1008,K__,MD5:acd7e32a1ce714a38f62c6c57e8584d8
 packet,0,22,22,1,1728,___,MD5:e646a3451d7c552bdbcd7fc71bc41d02
 packet,0,23,23,1,4748,___,MD5:d4faa7d02148b83dba208e58aad67c4c
+packet,1,51973,51973,N/A,368,K__,MD5:2b1d9fc3b88eebe81618537e4339c075
 packet,0,24,24,1,8024,___,MD5:047f41e5684dfbafcf095244893e2e88
+packet,1,52997,52997,N/A,508,K__,MD5:173cc11e9b77e8e1a26b78fec315d159
 packet,0,25,25,1,112,___,MD5:706989b3a75aaed7aec4f140bea81dbe
+packet,1,54405,54405,N/A,400,K__,MD5:7ea120d9db8835be2c03e8eaab44b294
 packet,0,26,26,1,8820,___,MD5:9508b1f53069cabbf93f1ba537d05939
+packet,1,56453,56453,N/A,340,K__,MD5:aff4a766c6708272802693acb8903001
 packet,0,27,27,1,5564,___,MD5:d63a728ffa56e89e7687dcf1c1a23812
+packet,1,58502,58502,N/A,336,K__,MD5:5081532a5e57ee6bc168c0c4b7acdb68
 # decode
 #format: frame checksums
 #version: 2
@@ -40,6 +50,11 @@ packet,0,27,27,1,5564,___,MD5:d63a728ffa56e89e7687dcf1c1a23812
 #codec_id 0: rawvideo
 #dimensions 0: 384x288
 #sar 0: 0/1
+#tb 1: 1/48000
+#media_type 1: audio
+#codec_id 1: pcm_s16le
+#sample_rate 1: 48000
+#channel_layout_name 1: stereo
 #stream#, dts,        pts, duration,     size, hash
 0,          0,          0,        1,   165888, 3ce9bc85613ab106512c14960178e12d
 0,          1,          1,        1,   165888, 3ce9bc85613ab106512c14960178e12d
@@ -65,9 +80,27 @@ packet,0,27,27,1,5564,___,MD5:d63a728ffa56e89e7687dcf1c1a23812
 0,         21,         21,        1,   165888, 7883344336b708da4ae9ec91abd0c06c
 0,         22,         22,        1,   165888, 7883344336b708da4ae9ec91abd0c06c
 0,         23,         23,        1,   165888, b5298f3b1b1a3cb7fcbfbafe985bee12
+1,      46118,      46118,     2048,     8192, 354537adf1bf8ea3639f46cee77d1fcd
 0,         24,         24,        1,   165888, 4f327859e9f86c16297d7a2fc50ae8d7
+1,      48167,      48167,     2048,     8192, 7c95d1f234f54404950178c1cc083fd8
 0,         25,         25,        1,   165888, d48bb5eb2cecc610dd5f8ffcbc1b4cf3
+1,      50215,      50215,     2048,     8192, 3fdc946d1e94c093365b34a409dc7c7b
 0,         26,         26,        1,   165888, bda1d70544c3e8064de19dfbdaa9b2fc
+1,      52263,      52263,     2048,     8192, 011eaa4ee5b5bf4534fec0a0c567c2aa
 0,         27,         27,        1,   165888, d18155641fda191b4eb136ebed7cb44a
+1,      54311,      54311,     1152,     4608, 0d346c31a350ca54a30352b79e5f338e
+1,      55463,      55463,      256,     1024, ee9d35049e227b016273f683649f7dc0
+1,      55719,      55719,      256,     1024, 049949d91f113e2a5650347ce9af0a38
+1,      55976,      55976,      256,     1024, a10dfbfb19339fccec55cbceede5225f
 0,         28,         28,        1,   165888, bbc7727041c8244c8a80f25f02d5f1ac
+1,      56232,      56232,      256,     1024, 2c59801654362f96bd9ad8c5282300b3
+1,      56488,      56488,      256,     1024, b536a4091cf3a89b9b690eaaa1d04918
+1,      56744,      56744,      256,     1024, 539ec994cc71b5816fde3d954ca8a520
+1,      57000,      57000,      256,     1024, 8bef702a453af2d5630110a9ba9afedd
+1,      57256,      57256,     1152,     4608, 650ae1bd122ee837d081fdb0390253e4
 0,         29,         29,        1,   165888, 597865e1dad4e8e383db1b93f3f4e2dd
+1,      58408,      58408,     2048,     8192, 9ee7448b02c4777a5b17e2e7a1727613
+1,      60456,      60456,     2048,     8192, 928229be0b3472fe19caf9fe0c2e89b2
+1,      62505,      62505,     2048,     8192, 843816f5388dba5c5a281b31e1f1e300
+# audio 0 md5
+MD5=f4acdd1e5f010575fe9702816613acb4
