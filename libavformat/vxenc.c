@@ -47,6 +47,7 @@ typedef struct VXMuxContext {
     uint32_t frame_rate_fixed;
     AVRational fps;
     int sample_rate;
+    int nch;                       /* audio channels = audio streams_qty */
 
     AVPacket **vq; int nvq, cvq;   /* video packets */
     AVPacket **aq; int naq, caq;   /* audio packets (one AFrame each) */
@@ -114,9 +115,13 @@ static int vx_write_header(AVFormatContext *s)
     if (c->audio_idx >= 0) {
         AVCodecParameters *ap = s->streams[c->audio_idx]->codecpar;
         c->sample_rate = ap->sample_rate;
-        if (ap->extradata_size != VXDS_AUDIO_EXTRADATA_SIZE) {
-            av_log(s, AV_LOG_ERROR, "audio extradata is %d bytes, expected %d\n",
-                   ap->extradata_size, VXDS_AUDIO_EXTRADATA_SIZE);
+        c->nch = ap->ch_layout.nb_channels;
+        /* one 3124-byte codec-info block per channel (audio_streams_qty) */
+        if (c->nch < 1 || c->nch > 2 ||
+            ap->extradata_size != c->nch * VXDS_AUDIO_EXTRADATA_SIZE) {
+            av_log(s, AV_LOG_ERROR, "audio extradata is %d bytes, expected %d "
+                   "for %d channel(s)\n", ap->extradata_size,
+                   c->nch * VXDS_AUDIO_EXTRADATA_SIZE, c->nch);
             return AVERROR(EINVAL);
         }
     }
@@ -129,7 +134,7 @@ static int vx_write_header(AVFormatContext *s)
     avio_wl32(pb, c->frame_rate_fixed);
     avio_wl32(pb, c->quantizer);
     avio_wl32(pb, c->sample_rate);                 /* audio_sample_rate */
-    avio_wl32(pb, c->audio_idx >= 0 ? 1 : 0);      /* audio_streams_qty */
+    avio_wl32(pb, c->audio_idx >= 0 ? c->nch : 0); /* audio_streams_qty */
     avio_wl32(pb, 0);                              /* frame_data_size_max */
     avio_wl32(pb, 0);                              /* audio_extradata_offset */
     avio_wl32(pb, 0);                              /* seek_table_offset */
@@ -153,7 +158,7 @@ static int vx_write_packet(AVFormatContext *s, AVPacket *pkt)
     }
     if (pkt->stream_index == c->audio_idx) {
         sd = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, &sd_size);
-        if (sd && sd_size >= VXDS_AUDIO_EXTRADATA_SIZE && !c->audio_cbk) {
+        if (sd && sd_size >= c->nch * VXDS_AUDIO_EXTRADATA_SIZE && !c->audio_cbk) {
             c->audio_cbk = av_memdup(sd, sd_size);
             if (!c->audio_cbk)
                 return AVERROR(ENOMEM);
@@ -190,7 +195,11 @@ static int vx_write_trailer(AVFormatContext *s)
                     aq_end = acursor;
             }
         }
-        afr_qty = aq_end - acursor;
+        /* each audio packet is one 128-sample period holding one AFrame
+         * per channel (ch0, ch1); aframes_qty counts AFrames, not periods */
+        afr_qty = (aq_end - acursor) * FFMAX(c->nch, 1);
+        if (afr_qty > 0xFFFF)
+            return AVERROR(EINVAL);
 
         payload = vp->size + 2;                    /* + the aframes_qty word */
         for (int a = acursor; a < aq_end; a++)
@@ -240,10 +249,10 @@ static int vx_write_trailer(AVFormatContext *s)
     } else {
         audio_extradata_offset = avio_tell(pb);
         if (c->audio_cbk)
-            avio_write(pb, c->audio_cbk, VXDS_AUDIO_EXTRADATA_SIZE);
+            avio_write(pb, c->audio_cbk, c->nch * VXDS_AUDIO_EXTRADATA_SIZE);
         else
             avio_write(pb, s->streams[c->audio_idx]->codecpar->extradata,
-                       VXDS_AUDIO_EXTRADATA_SIZE);
+                       c->nch * VXDS_AUDIO_EXTRADATA_SIZE);
     }
 
     seek_table_offset = avio_tell(pb);            /* zero entries follow */
