@@ -53,7 +53,7 @@ static int dsp_probe(const AVProbeData *p)
 
     if (!samples || samples > INT32_MAX / 2)
         return 0;
-    if (rate < 4000 || rate > 192000)
+    if (!rate || rate > INT_MAX)
         return 0;
     if (AV_RB16(p->buf + 12) > 1)           /* loop flag */
         return 0;
@@ -62,7 +62,9 @@ static int dsp_probe(const AVProbeData *p)
     if (nibbles != ff_dsp_adpcm_nibble_count(samples))
         return 0;
 
-    return AVPROBE_SCORE_MAX / 2;
+    /* Unusual rates are valid, but less convincing without a signature. */
+    return rate >= 4000 && rate <= 192000 ? AVPROBE_SCORE_MAX / 2
+                                         : AVPROBE_SCORE_MAX / 4;
 }
 
 /* True if the 0x60 bytes at buf describe the same stream as the first header,
@@ -92,7 +94,7 @@ static int dsp_read_header(AVFormatContext *s)
     declared = AV_RB16(headers[0] + 0x4A);
     frames_per_block = AV_RB16(headers[0] + 0x4C);
 
-    if (!samples || rate < 4000 || rate > 192000 ||
+    if (!samples || !rate || rate > INT_MAX ||
         AV_RB16(headers[0] + 14) != 0 ||
         declared > FF_DSP_ADPCM_MAX_CHANNELS)
         return AVERROR_INVALIDDATA;
