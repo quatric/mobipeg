@@ -202,6 +202,11 @@ static int dpg_write_trailer(AVFormatContext *s)
     audio_off = header + (c->version >= 4 ? DPG_THUMB_SIZE : 0);
     video_off = audio_off + audio_size;
     gop_off   = video_off + video_size;
+    if (gop_off > UINT32_MAX) {
+        av_log(s, AV_LOG_ERROR, "DPG offsets are 32-bit; output too large\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
 
     avio_write(s->pb, "DPG", 3);
     avio_w8(s->pb, '0' + c->version);

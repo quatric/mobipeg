@@ -11,6 +11,7 @@ except ImportError:
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import shlex
 import subprocess
 import threading
 import os
@@ -931,10 +932,25 @@ class EncodeGUI(tk.Tk):
         self.update_decode_eyes_note()
 
     def update_decode_eyes_note(self):
-        """Say whether the selected input actually is stereoscopic."""
+        """Say whether the selected input actually is stereoscopic.
+
+        The check runs ffprobe, so it is debounced and done off the Tk thread
+        to keep typing a path responsive.
+        """
+        pending = getattr(self, "_eyes_note_job", None)
+        if pending is not None:
+            self.after_cancel(pending)
+        self._eyes_note_job = self.after(300, self._start_eyes_probe)
+
+    def _start_eyes_probe(self):
+        self._eyes_note_job = None
         inp = self.dec_input_var.get().strip()
-        note = ""
-        if inp and os.path.isfile(inp):
+        if not (inp and os.path.isfile(inp)):
+            self._set_eyes_note(inp, "")
+            return
+
+        def probe():
+            note = ""
             try:
                 import encode as _enc
 
@@ -947,6 +963,14 @@ class EncodeGUI(tk.Tk):
                     note = "2D input - eye selection ignored"
             except Exception:
                 note = ""
+            self.after(0, self._set_eyes_note, inp, note)
+
+        threading.Thread(target=probe, daemon=True).start()
+
+    def _set_eyes_note(self, inp, note):
+        # Drop results for an input the user has since changed.
+        if inp != self.dec_input_var.get().strip():
+            return
         if hasattr(self, "dec_eyes_note"):
             self.dec_eyes_note.config(text=note)
 
@@ -961,7 +985,7 @@ class EncodeGUI(tk.Tk):
         self.console.config(state="normal")
         self.console.delete(1.0, tk.END)
         self.console.config(state="disabled")
-        self.append_console(f"$ {' '.join(cmd)}\n\n")
+        self.append_console(f"$ {shlex.join(cmd)}\n\n")
 
         def run_thread():
             # --windowed builds have no console, so on Linux/Windows/macOS an
