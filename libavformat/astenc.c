@@ -53,6 +53,11 @@ static int ast_write_header(AVFormatContext *s)
     AVCodecParameters *par = s->streams[0]->codecpar;
     unsigned int codec_tag;
 
+    if (!(pb->seekable & AVIO_SEEKABLE_NORMAL)) {
+        av_log(s, AV_LOG_ERROR, "AST requires seekable output to finalize its header\n");
+        return AVERROR(EINVAL);
+    }
+
     codec_tag = ff_codec_get_tag(ff_codec_ast_tags, par->codec_id);
     /* ADPCM AFC's tag is 0, so a zero tag only means "not in the table" for
      * everything else -- checking the tag alone would reject AFC. */
