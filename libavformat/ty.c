@@ -150,6 +150,8 @@ static int ty_probe(const AVProbeData *p)
             if (strncmp((const char *)p->buf + pos - 512,
                         "showing.xml", 100))
                 break;
+            if (size > p->buf_size - pos)
+                break;
             pos += FFALIGN(size, 512);
         }
 
@@ -868,6 +870,10 @@ static int check_sync_pes(AVFormatContext *s, AVPacket *pkt,
             return -1;
         }
         /* copy the partial pes header we found */
+        if (rec_len - offset > FFMIN(ty->pes_length, sizeof(ty->pes_buffer))) {
+            ty->pes_buf_cnt = 0;
+            return -1;
+        }
         memcpy(ty->pes_buffer, pkt->data + offset, rec_len - offset);
         ty->pes_buf_cnt = rec_len - offset;
 
@@ -883,7 +889,7 @@ static int check_sync_pes(AVFormatContext *s, AVPacket *pkt,
     if (ty->first_audio_pts == AV_NOPTS_VALUE)
         ty->first_audio_pts = ty->last_audio_pts;
     pkt->pts = ty->last_audio_pts;
-    memmove(pkt->data + offset, pkt->data + offset + pes_length, rec_len - pes_length);
+    memmove(pkt->data + offset, pkt->data + offset + pes_length, rec_len - offset - pes_length);
     pkt->size -= pes_length;
     return 0;
 }

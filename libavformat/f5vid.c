@@ -929,15 +929,16 @@ static int f5vid_read_header(AVFormatContext *s)
     {
         uint32_t fps_num = AV_RB32(vidh + 16);
         uint32_t fps_den = AV_RB16(vidh + 20);
-        if (!fps_num || !fps_den) {
+        if (!fps_num || !fps_den || fps_num > INT_MAX) {
             fps_num = 2997; fps_den = 100;
         }
         /* Packet pts/dts are container ticks (60000 Hz); keep the stream
          * timebase in those units and advertise frame rate separately. */
-        avpriv_set_pts_info(vst, 1, 1, F5VID_TIME_RES);
+        avpriv_set_pts_info(vst, 64, 1, F5VID_TIME_RES);
         vst->r_frame_rate = (AVRational){ fps_num, fps_den };
         vst->avg_frame_rate = (AVRational){ fps_num, fps_den };
-        vst->duration = (int64_t)m->frame_count * F5VID_TIME_RES * fps_den / fps_num;
+        vst->duration = av_rescale((uint32_t)m->frame_count,
+                                   (int64_t)F5VID_TIME_RES * fps_den, fps_num);
     }
     /* Coded video is the full VIDH display size (640x480 MPEG-4 ASP). */
     coded_w = vst->codecpar->width;
@@ -967,7 +968,7 @@ static int f5vid_read_header(AVFormatContext *s)
      * (matches what the inline transcoder used to expose directly). */
     if ((ret = avcodec_parameters_copy(vst->codecpar, m->bsf->par_out)) < 0)
         return ret;
-    avpriv_set_pts_info(vst, 1, 1, F5VID_TIME_RES);
+    avpriv_set_pts_info(vst, 64, 1, F5VID_TIME_RES);
 
     /* AUDH */
     if (avio_rb32(pb) != MKBETAG('A','U','D','H'))
@@ -981,7 +982,7 @@ static int f5vid_read_header(AVFormatContext *s)
      * (+1 pad byte, 14 bytes total); what follows depends on the tag (see
      * the top-of-file container doc comment). */
     ast->codecpar->sample_rate = AV_RB32(audh + 8);
-    if (!ast->codecpar->sample_rate)
+    if (ast->codecpar->sample_rate <= 0)
         ast->codecpar->sample_rate = 32000;
     /* channels are LE u16 at audh+12 */
     {
@@ -1150,7 +1151,7 @@ static int f5vid_read_header(AVFormatContext *s)
             avio_skip(pb, head_end - cur);
     }
 
-    avpriv_set_pts_info(ast, 1, 1, ast->codecpar->sample_rate);
+    avpriv_set_pts_info(ast, 64, 1, ast->codecpar->sample_rate);
 
     m->current_frame = 0;
     m->handle_audio_packet = 0;
@@ -1332,7 +1333,9 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
             m->handle_audio_packet = 0;
             return FFERROR_REDO;
         }
-        raw = av_malloc(m->audio_size);
+        if (m->audio_size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)
+            return AVERROR_INVALIDDATA;
+        raw = av_mallocz(m->audio_size + AV_INPUT_BUFFER_PADDING_SIZE);
         if (!raw)
             return AVERROR(ENOMEM);
         ret = avio_read(pb, raw, m->audio_size);
@@ -1381,7 +1384,9 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
         int ch = s->streams[1]->codecpar->ch_layout.nb_channels;
         if (ch != 2)
             ch = 2;
-        raw = av_malloc(m->audio_size);
+        if (m->audio_size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)
+            return AVERROR_INVALIDDATA;
+        raw = av_mallocz(m->audio_size + AV_INPUT_BUFFER_PADDING_SIZE);
         if (!raw)
             return AVERROR(ENOMEM);
         ret = avio_read(pb, raw, m->audio_size);
@@ -1452,7 +1457,8 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
             int vop_type; /* 0=I (0x20), 1=P (0x40/0x50) */
             int quant, fwd, rounding;
             uint32_t frame_ts;
-            if (vidd_len < 8 + 12)
+            if (vidd_len < 8 + 12 || vidd_len > fram_len - 32 ||
+                vidd_len > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)
                 return AVERROR_INVALIDDATA;
             if (avio_read(pb, inner, 12) != 12)
                 return AVERROR_EOF;
@@ -1494,7 +1500,7 @@ static int f5vid_read_packet(AVFormatContext *s, AVPacket *pkt)
              * for the exact layout); this demuxer performs no bitstream
              * conversion itself. */
             mb_size = vidd_len - 8 - 12;
-            raw = av_malloc(8 + mb_size);
+            raw = av_mallocz(8 + mb_size + AV_INPUT_BUFFER_PADDING_SIZE);
             if (!raw)
                 return AVERROR(ENOMEM);
             raw[0] = vop_type;
@@ -1953,7 +1959,8 @@ static int f5vid_write_header(AVFormatContext *s)
     }
     m->width  = vst->codecpar->width;
     m->height = vst->codecpar->height;
-    if (m->width <= 0 || m->height <= 0) {
+    if (m->width <= 0 || m->height <= 0 ||
+        m->width > 0xFFFF || m->height > 0xFFFF) {
         av_log(s, AV_LOG_ERROR, "f5vid: video dimensions missing\n");
         return AVERROR(EINVAL);
     }
@@ -1962,8 +1969,11 @@ static int f5vid_write_header(AVFormatContext *s)
     if (vst->avg_frame_rate.den > 0 && vst->avg_frame_rate.num > 0) {
         m->fps_num = vst->avg_frame_rate.num;
         m->fps_den = vst->avg_frame_rate.den;
+        /* VIDH stores the denominator in 16 bits */
+        if (m->fps_den > 0xFFFF)
+            av_reduce(&m->fps_num, &m->fps_den, m->fps_num, m->fps_den, 0xFFFF);
     }
-    avpriv_set_pts_info(vst, 1, 1, F5VID_TIME_RES);
+    avpriv_set_pts_info(vst, 64, 1, F5VID_TIME_RES);
     if (ast) {
         m->channels = ast->codecpar->ch_layout.nb_channels;
         if (m->channels != 1 && m->channels != 2)
@@ -1971,7 +1981,7 @@ static int f5vid_write_header(AVFormatContext *s)
         m->rate = ast->codecpar->sample_rate;
         if (m->rate <= 0)
             m->rate = 32000;
-        avpriv_set_pts_info(ast, 1, 1, m->rate);
+        avpriv_set_pts_info(ast, 64, 1, m->rate);
         /* Carry the DSP coef table (stream copy from our demuxer); fresh
          * encodes supply it per-packet (see write_audio). */
         if (ast->codecpar->extradata &&
