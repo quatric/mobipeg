@@ -1665,6 +1665,26 @@ static int mo_write_trailer(AVFormatContext *s)
     return 0;
 }
 
+static void mo_deinit(AVFormatContext *s)
+{
+    MoMuxContext *mo = s->priv_data;
+
+    for (int i = 0; i < mo->vq_count; i++)
+        av_freep(&mo->vq_data[i]);
+    av_freep(&mo->vq_data);
+    av_freep(&mo->vq_size);
+    mo->vq_count = mo->vq_cap = 0;
+    av_freep(&mo->video_buf);
+    av_freep(&mo->audio_buf);
+    av_freep(&mo->pcm_buf);
+    av_freep(&mo->ki_kf_offsets);
+    av_freep(&mo->ki_kf_frames);
+    av_frame_free(&mo->fa_frame);
+    avcodec_free_context(&mo->fa_enc);
+    av_frame_free(&mo->vorbis_frame);
+    avcodec_free_context(&mo->vorbis_enc);
+}
+
 #include "libavutil/opt.h"
 #define OFFSET(x) offsetof(MoMuxContext, x)
 #define ENC AV_OPT_FLAG_ENCODING_PARAM
@@ -1698,5 +1718,6 @@ const FFOutputFormat ff_mo_muxer = {
     .write_header   = mo_write_header,
     .write_packet   = mo_write_packet,
     .write_trailer  = mo_write_trailer,
+    .deinit         = mo_deinit,
     .p.priv_class     = &mo_muxer_class,
 };
