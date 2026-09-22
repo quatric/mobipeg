@@ -97,11 +97,12 @@ static int64_t ast_block_samples(const AVCodecParameters *par, uint32_t size)
 
 static int ast_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
+    ASTDemuxContext *c = s->priv_data;
     uint32_t type, size;
     int64_t pos;
     int ret;
 
-    if (avio_feof(s->pb))
+    if (c->samples_left <= 0 || avio_feof(s->pb))
         return AVERROR_EOF;
 
     pos  = avio_tell(s->pb);
@@ -116,11 +117,16 @@ static int ast_read_packet(AVFormatContext *s, AVPacket *pkt)
         return ret;
 
     if (type == MKTAG('B','L','C','K')) {
-        ASTDemuxContext *c = s->priv_data;
         AVCodecParameters *par = s->streams[0]->codecpar;
         int64_t produced = ast_block_samples(par, size / par->ch_layout.nb_channels);
 
         ret = av_get_packet(s->pb, pkt, size);
+        if (ret < 0)
+            return ret;
+        if (ret != size) {
+            av_packet_unref(pkt);
+            return AVERROR_INVALIDDATA;
+        }
         pkt->stream_index = 0;
         pkt->pos = pos;
 
@@ -137,7 +143,7 @@ static int ast_read_packet(AVFormatContext *s, AVPacket *pkt)
             AV_WL32(side + 4, produced - c->samples_left);
             side[8] = side[9] = 0;
         }
-        c->samples_left -= produced;
+        c->samples_left -= FFMIN(produced, c->samples_left);
     } else {
         av_log(s, AV_LOG_ERROR, "unknown chunk %"PRIx32"\n", type);
         avio_skip(s->pb, size);
