@@ -102,7 +102,15 @@ static int ast_write_packet(AVFormatContext *s, AVPacket *pkt)
     AVIOContext *pb = s->pb;
     ASTMuxContext *ast = s->priv_data;
     AVCodecParameters *par = s->streams[0]->codecpar;
-    int size = pkt->size / par->ch_layout.nb_channels;
+    int channels = par->ch_layout.nb_channels;
+    int frame_bytes = par->codec_id == AV_CODEC_ID_ADPCM_AFC ? 9 : 2;
+    int size;
+
+    if (channels <= 0 || pkt->size % ((int64_t)channels * frame_bytes)) {
+        av_log(s, AV_LOG_ERROR, "packet contains an incomplete channel frame\n");
+        return AVERROR_INVALIDDATA;
+    }
+    size = pkt->size / channels;
 
     if (s->streams[0]->nb_frames == 0)
         ast->fbs = size;
