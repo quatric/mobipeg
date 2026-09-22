@@ -1615,12 +1615,16 @@ const FFInputFormat ff_f5vid_demuxer = {
 #if CONFIG_F5VID_MUXER
 
 /* ---- Factor 5 .vid muxer ----
- * Inverse of the demuxer above: takes the MPEG-4 packets the f5vid demuxer
- * emits (synthesized VOL extradata + VOP headers around an otherwise F5
- * MB stream) and re-packs them into a .vid container (VID1/HEAD/FRAM with
- * VIDD+AUDD). Only that packet layout is accepted (strict VOP header
- * checks); there is no MPEG-4 video encoder in this tree, so vid->vid
- * container work is the only producer of such packets.
+ * Inverse of the demuxer above: takes MPEG-4 Part 2 I/P-VOP packets and
+ * re-packs them into a .vid container (VID1/HEAD/FRAM with VIDD+AUDD).
+ * Accepted input is either the f5vid demuxer's own output (remux) or a
+ * fresh mpeg4 encode (VOS/VO/VOL/user data in front of the VOP are skipped;
+ * the VOL, from extradata or in-band, supplies vop_time_increment's width
+ * and is checked for tools F5's grammar lacks). A fresh encode must use one
+ * slice (-threads:v 1: slice threading adds resync markers), no B-frames,
+ * H.263 quant, no qpel/GMC/interlace/data partitioning, and P-VOP
+ * quantizers <= 15 (-qmax 15), which is what encode.py's factor5 preset
+ * passes.
  *
  * Video inversion per field: COD/MCBPC/CBPY/dquant/ac_pred copied verbatim
  * (codewords are identical to the standard ones); intra DC re-gains its
@@ -1630,7 +1634,9 @@ const FFInputFormat ff_f5vid_demuxer = {
  * coefficient blocks (all escapes) are verbatim.
  *
  * Audio is DSP-ADPCM (adpcm_thp) in channel-major 8-byte frames, as emitted
- * by the encoder and by the demuxer, and written channel-planar per FRAM.
+ * by the encoder and by the demuxer, and written channel-planar per FRAM
+ * on the retail schedule (see write_trailer), which also trims audio that
+ * outlasts the video.
  *
  * Everything is buffered and the file is written in write_trailer, so VIDH
  * frame_count/max_FRAM_len are exact and non-seekable output works.
@@ -1657,6 +1663,8 @@ typedef struct F5VIDMuxContext {
     int have_coef;
     int width, height;
     int fps_num, fps_den;
+    int tinc_bits;    /* vop_time_increment bits from the VOL (16 = ours) */
+    int vol_seen;     /* a VOL was found (extradata or in-band) and checked */
 } F5VIDMuxContext;
 
 /* Reverse motion map: F5 codeword for a signed mvd (-32..32, never 0),
@@ -1696,14 +1704,20 @@ static void f5mv_enc_build(void)
 
 /* Parse our synthesized VOP header. Returns 0 with type (0=I,1=P), quant,
  * fwd, rounding and the MB-data bit offset, or -1 for anything else. */
-static int f5mux_parse_vop(const uint8_t *data, int size, int *type,
-                           int *quant, int *fwd, int *rounding, int *mb_pos)
+static int f5mux_parse_vop(const uint8_t *data, int size, int tinc_bits,
+                           int *type, int *quant, int *fwd, int *rounding,
+                           int *mb_pos)
 {
     F5BitR r = { data, size * 8, 0, 0 };
-    int tb = 0;
-    if (size < 8 || AV_RB32(data) != 0x1B6)
+    int tb = 0, off;
+    /* Skip anything in front of the VOP (VOS/VO/VOL/user data that a fresh
+     * MPEG-4 encode carries in-band on key frames). */
+    for (off = 0; off + 4 <= size; off++)
+        if (AV_RB32(data + off) == 0x1B6)
+            break;
+    if (off + 8 > size)
         return -1;
-    r.pos = 32;
+    r.pos = (off + 4) * 8;
     *type = f5br_get(&r, 2);
     if (*type != 0 && *type != 1)
         return -1;
@@ -1713,7 +1727,7 @@ static int f5mux_parse_vop(const uint8_t *data, int size, int *type,
     }
     if (f5br_get(&r, 1) != 1)   /* marker */
         return -1;
-    f5br_get(&r, 16);           /* time increment */
+    f5br_get(&r, tinc_bits);    /* time increment */
     if (f5br_get(&r, 1) != 1)   /* marker */
         return -1;
     if (f5br_get(&r, 1) != 1)   /* vop_coded */
@@ -1736,6 +1750,99 @@ static int f5mux_parse_vop(const uint8_t *data, int size, int *type,
         return -1;
     *mb_pos = r.pos;
     return 0;
+}
+
+/* Find a VOL start code (0x120..0x12F) in buf and check that its coding
+ * tools are ones F5's decoder grammar can carry. Returns 1 with *tinc_bits
+ * set, 0 if there is no VOL, <0 (after logging) if it is unsupported. */
+static int f5mux_parse_vol(void *logctx, const uint8_t *buf, int size,
+                           int *tinc_bits)
+{
+    F5BitR r;
+    int off, verid = 1, res, shape, sprite, bits;
+    for (off = 0; off + 4 <= size; off++)
+        if ((AV_RB32(buf + off) & ~0xF) == 0x120)
+            break;
+    if (off + 4 > size)
+        return 0;
+    r.buf = buf;
+    r.nbits = size * 8;
+    r.pos = (off + 4) * 8;
+    r.err = 0;
+    f5br_get(&r, 1);                    /* random_accessible_vol */
+    f5br_get(&r, 8);                    /* video_object_type */
+    if (f5br_get(&r, 1)) {              /* is_object_layer_identifier */
+        verid = f5br_get(&r, 4);
+        f5br_get(&r, 3);
+    }
+    if (f5br_get(&r, 4) == 15)          /* aspect_ratio_info: extended PAR */
+        f5br_get(&r, 16);
+    if (f5br_get(&r, 1)) {              /* vol_control_parameters */
+        f5br_get(&r, 3);                /* chroma_format, low_delay */
+        if (f5br_get(&r, 1)) {          /* vbv_parameters */
+            f5br_get(&r, 16); f5br_get(&r, 16); f5br_get(&r, 16);
+            f5br_get(&r, 16); f5br_get(&r, 15);
+        }
+    }
+    shape = f5br_get(&r, 2);
+    f5br_get(&r, 1);                    /* marker */
+    res = f5br_get(&r, 16);             /* vop_time_increment_resolution */
+    f5br_get(&r, 1);                    /* marker */
+    if (r.err || res <= 0) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: unreadable MPEG-4 VOL\n");
+        return AVERROR_INVALIDDATA;
+    }
+    bits = av_log2(res - 1) + 1;
+    if (bits < 1)
+        bits = 1;
+    if (f5br_get(&r, 1))                /* fixed_vop_rate */
+        f5br_get(&r, bits);
+    if (shape != 0) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: only rectangular MPEG-4 is supported\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    f5br_get(&r, 1); f5br_get(&r, 13);  /* marker, width */
+    f5br_get(&r, 1); f5br_get(&r, 13);  /* marker, height */
+    f5br_get(&r, 1);                    /* marker */
+    if (f5br_get(&r, 1)) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: interlaced MPEG-4 is not supported\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if (!f5br_get(&r, 1)) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: OBMC is not supported\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    sprite = f5br_get(&r, verid == 1 ? 1 : 2);
+    if (sprite || f5br_get(&r, 1) /* not_8_bit */) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: sprites/non-8-bit MPEG-4 are not supported\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if (f5br_get(&r, 1)) {
+        av_log(logctx, AV_LOG_ERROR,
+               "f5vid: MPEG quantization is not supported (use H.263 quant)\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if (verid != 1 && f5br_get(&r, 1)) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: quarter-pel motion is not supported\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if (!f5br_get(&r, 1)) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: complexity estimation is not supported\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if (!f5br_get(&r, 1) || f5br_get(&r, 1)) {
+        av_log(logctx, AV_LOG_ERROR,
+               "f5vid: resync markers/data partitioning are not supported "
+               "(encode with -threads:v 1 so mpeg4 codes one slice, and do "
+               "not set -ps or -data_partitioning)\n");
+        return AVERROR_PATCHWELCOME;
+    }
+    if (r.err) {
+        av_log(logctx, AV_LOG_ERROR, "f5vid: truncated MPEG-4 VOL\n");
+        return AVERROR_INVALIDDATA;
+    }
+    *tinc_bits = bits;
+    return 1;
 }
 
 /* Parse one standard motion value, emit F5 (leading 0 + signed-VLC codeword
@@ -1950,7 +2057,7 @@ static int f5vid_write_header(AVFormatContext *s)
     }
     if (!vst || vst->codecpar->codec_id != AV_CODEC_ID_MPEG4) {
         av_log(s, AV_LOG_ERROR,
-               "f5vid: video must be MPEG-4 in the f5vid demuxer layout\n");
+               "f5vid: video must be MPEG-4 Part 2 (mpeg4)\n");
         return AVERROR(EINVAL);
     }
     if (ast && ast->codecpar->codec_id != AV_CODEC_ID_ADPCM_THP) {
@@ -1972,6 +2079,11 @@ static int f5vid_write_header(AVFormatContext *s)
         /* VIDH stores the denominator in 16 bits */
         if (m->fps_den > 0xFFFF)
             av_reduce(&m->fps_num, &m->fps_den, m->fps_num, m->fps_den, 0xFFFF);
+        /* Every retail file spells NTSC video as 2997/100. */
+        if ((int64_t)m->fps_num * 1001 == (int64_t)m->fps_den * 30000) {
+            m->fps_num = 2997;
+            m->fps_den = 100;
+        }
     }
     avpriv_set_pts_info(vst, 64, 1, F5VID_TIME_RES);
     if (ast) {
@@ -1989,6 +2101,17 @@ static int f5vid_write_header(AVFormatContext *s)
             memcpy(m->coef, ast->codecpar->extradata, 32 * m->channels);
             m->have_coef = 1;
         }
+    }
+    /* The VOL (and with it vop_time_increment's width) comes from
+     * extradata when present -- the f5vid demuxer's own, or a global-header
+     * encode -- otherwise from the first in-band key frame. */
+    m->tinc_bits = F5VID_TINC_BITS;
+    if (vst->codecpar->extradata_size > 4) {
+        int ret = f5mux_parse_vol(s, vst->codecpar->extradata,
+                                  vst->codecpar->extradata_size, &m->tinc_bits);
+        if (ret < 0)
+            return ret;
+        m->vol_seen = ret;
     }
     f5mv_enc_build();
     return 0;
@@ -2012,12 +2135,34 @@ static int f5vid_write_video(AVFormatContext *s, AVPacket *pkt)
     }
     fr = &m->frames[m->nb_frames];
     memset(fr, 0, sizeof(*fr));
-    if (f5mux_parse_vop(pkt->data, pkt->size, &type, &quant, &fwd,
-                        &rounding, &mb_pos) < 0) {
+    if (!m->vol_seen) {
+        int ret = f5mux_parse_vol(s, pkt->data, pkt->size, &m->tinc_bits);
+        if (ret < 0)
+            return ret;
+        m->vol_seen = ret;
+    }
+    if (pkt->flags & AV_PKT_FLAG_KEY && m->nb_frames) {
+        /* A later in-band VOL must agree with the first one. */
+        int bits = m->tinc_bits;
+        int ret = f5mux_parse_vol(s, pkt->data, pkt->size, &bits);
+        if (ret < 0)
+            return ret;
+        m->tinc_bits = bits;
+    }
+    if (f5mux_parse_vop(pkt->data, pkt->size, m->tinc_bits, &type, &quant,
+                        &fwd, &rounding, &mb_pos) < 0) {
         av_log(s, AV_LOG_ERROR,
-               "f5vid: video packet %d is not in the f5vid demuxer layout\n",
+               "f5vid: video packet %d is not a supported MPEG-4 I/P VOP\n",
                m->nb_frames);
         return AVERROR_INVALIDDATA;
+    }
+    if (type == 1 && quant > 15) {
+        /* The VIDD inner header packs a P-VOP's quantizer into 4 bits
+         * (retail P-VOPs use 2-10). */
+        av_log(s, AV_LOG_ERROR,
+               "f5vid: P-VOP %d has quantizer %d; Factor 5 P-VOPs carry at "
+               "most 15 (encode with -qmax 15)\n", m->nb_frames, quant);
+        return AVERROR_PATCHWELCOME;
     }
     if (m->nb_frames == 0 && type != 0) {
         av_log(s, AV_LOG_ERROR, "f5vid: first frame must be an I-VOP\n");
@@ -2177,6 +2322,14 @@ static int f5vid_write_trailer(AVFormatContext *s)
     int i, maxfram = 0;
     int al_frames = m->al_len / 8; /* per-channel DSP frames */
     int aoff = 0;                  /* running per-channel frame offset */
+    int rate = m->rate ? m->rate : 32000;
+    if (m->channels && !al_frames && m->nb_frames)
+        av_log(s, AV_LOG_WARNING,
+               "f5vid: the audio stream delivered no packets; every AUDD "
+               "chunk will be empty. adpcm_thp emits the whole stream as one "
+               "packet at the end, which -shortest discards when it outlasts "
+               "the video; this muxer already trims audio to the video, so "
+               "drop -shortest.\n");
     /* VID1 */
     avio_wb32(pb, MKBETAG('V', 'I', 'D', '1'));
     avio_wb32(pb, 0x20);
@@ -2213,10 +2366,23 @@ static int f5vid_write_trailer(AVFormatContext *s)
         /* FRAMs */
         for (i = 0; i < m->nb_frames; i++) {
             F5MUXFrame *fr = &m->frames[i];
-            int base = al_frames / m->nb_frames;
-            int rem = al_frames % m->nb_frames;
-            int nf = base + (i < rem ? 1 : 0);
-            int k;
+            int nf, k;
+            /* Retail audio schedule: after FRAM i the stream holds enough
+             * audio for frames 0..i plus a lead that ramps up by half a
+             * frame per FRAM over the first four (two frames' worth from
+             * then on), allocated in whole 4-DSP-frame (56-sample) units.
+             * All retail files follow this (116,116,112,116, then 76/80
+             * frames per channel at 32 kHz); it also trims audio that
+             * outlasts the video, which is what -shortest would do. */
+            {
+                int64_t num = (int64_t)rate * m->fps_den *
+                              (2 * (i + 1) + FFMIN(i + 1, 4));
+                int64_t den = (int64_t)m->fps_num * 2 * 56;
+                int64_t cum = (num + den - 1) / den * 4;
+                if (cum > al_frames)
+                    cum = al_frames;
+                nf = cum > aoff ? (int)(cum - aoff) : 0;
+            }
             uint32_t vidd_len = 8 + 12 + fr->mb_size;
             uint32_t aud_bytes, audd_len, fram_len;
             uint8_t inner[12];
@@ -2249,6 +2415,9 @@ static int f5vid_write_trailer(AVFormatContext *s)
             for (k = 0; k < 16; k++)
                 avio_w8(pb, 0);
         }
+        /* Retail files end with 32 zero bytes after the last FRAM. */
+        for (i = 0; i < 32; i++)
+            avio_w8(pb, 0);
         if (s->pb->seekable) {
             int64_t end = avio_tell(pb);
             avio_seek(pb, fpos, SEEK_SET);
