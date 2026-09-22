@@ -239,7 +239,7 @@ static int moc3_read_header(AVFormatContext *s)
      * are placeholders (they match the a/ sample set). */
     vst->codecpar->width  = 400;
     vst->codecpar->height = 240;
-    avpriv_set_pts_info(vst, 1, 1, 25); /* default 25fps */
+    avpriv_set_pts_info(vst, 64, 1, 25); /* default 25fps */
 
     /* Skip padding to align to header size */
     int64_t cur = avio_tell(pb);
