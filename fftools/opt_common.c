@@ -1535,7 +1535,6 @@ void fftools_sentry_init(void)
     sentry_options_set_dsn(options, dsn);
     sentry_options_set_database_path(options, ".sentry-native");
     sentry_options_set_release(options, "mobipeg@" FFMPEG_VERSION);
-    sentry_options_set_debug(options, 1);
 
     const char *handler_path = getenv("SENTRY_HANDLER_PATH");
     if (handler_path && *handler_path) {
