@@ -102,7 +102,7 @@ static int mo_handle_audio(AVStream *ast, uint16_t marker, AVIOContext* pb) {
     
     uint32_t sample_rate = avio_rl32(pb);
     ast->codecpar->sample_rate = sample_rate;
-    avpriv_set_pts_info(ast, 1, 1, ast->codecpar->sample_rate);
+    avpriv_set_pts_info(ast, 64, 1, ast->codecpar->sample_rate);
 
     // The container also stores a channel count. The FastAudio/ADPCM markers
     // are explicitly mono/stereo, so we trust the marker for those. But PCM has
@@ -204,7 +204,7 @@ static int mo_read_header(AVFormatContext *s)
             fps.num = 256;
             fps.den = avio_rl32(pb);
             mo->fps_fixed = fps.den;
-            avpriv_set_pts_info(vst, 1, fps.num, fps.den);
+            avpriv_set_pts_info(vst, 64, fps.num, fps.den);
 
             // TODO: can we use chunk count?
             mo->frame_count = avio_rl32(pb);
@@ -347,7 +347,7 @@ static int mo_read_header(AVFormatContext *s)
                 ast->codecpar->ch_layout.nb_channels = 2;
                 ast->codecpar->sample_rate = 48000;
             }
-            avpriv_set_pts_info(ast, 1, 1, ast->codecpar->sample_rate);
+            avpriv_set_pts_info(ast, 64, 1, ast->codecpar->sample_rate);
 
             /* We supply exact per-packet timestamps (via the vorbis parser in
              * mo_read_packet); don't let a stream parser re-packetize and
