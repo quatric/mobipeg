@@ -505,16 +505,20 @@ static int mods_flush_pending(AVFormatContext *s, int final)
     /* Total chunk size (vfield is already 16-bit aligned).
      * We add a 4-byte suffix to unambiguously store the audio size and pad length
      * for FFmpeg's demuxer, avoiding the need for the racy sx_video_len hack. */
+    /* Video-only files carry no audio to split off, so they get no suffix
+     * either: the chunk is exactly the (4-aligned) video, as in retail, and a
+     * stream copy returns the same payload it was given. */
+    int suffix = (m->ds_adpcm || m->aenc_inited) ? 4 : 0;
     int pad = 0;
     if (m->ds_adpcm || fa || m->audio_codec == MOBI_AUDIO_PCM)
-        pad = (-(vfield + asize + 4)) & 3;
-    total = vfield + asize + pad + 4;
-    
+        pad = (-(vfield + asize + suffix)) & 3;
+    total = vfield + asize + pad + suffix;
+
     if (total > 0x3FFFF) {
         /* Pathological: drop this frame's audio rather than overflow the field. */
         asize = 0; nblocks = 0; kf_word = 0;
-        pad = (m->ds_adpcm || fa || m->audio_codec == MOBI_AUDIO_PCM) ? (-(vfield + 4)) & 3 : 0;
-        total = vfield + pad + 4;
+        pad = (m->ds_adpcm || fa || m->audio_codec == MOBI_AUDIO_PCM) ? (-(vfield + suffix)) & 3 : 0;
+        total = vfield + pad + suffix;
     }
     if (nblocks > 0x3FFF)
         nblocks = 0x3FFF;
@@ -566,9 +570,11 @@ static int mods_flush_pending(AVFormatContext *s, int final)
     /* Write padding and our 4-byte unambiguous suffix for the demuxer */
     for (int i = 0; i < pad; i++)
         avio_w8(pb, 0);
-    avio_w8(pb, pad);
-    avio_w8(pb, 0);
-    avio_wl16(pb, asize);
+    if (suffix) {
+        avio_w8(pb, pad);
+        avio_w8(pb, 0);
+        avio_wl16(pb, asize);
+    }
 
     if ((uint32_t)total > m->max_chunk)
         m->max_chunk = total;
@@ -659,6 +665,17 @@ static int mods_write_header(AVFormatContext *s)
         }
     } else {
         AVCodecParameters *ap = s->streams[m->audio_index]->codecpar;
+        /* Every non-SX mode runs our own audio encoder over interleaved s16
+         * PCM.  Compressed input (e.g. "-c:a copy" of FastAudio/ADPCM/SX)
+         * would be misread as PCM and re-encoded into noise, so refuse it. */
+        if (ap->codec_id != AV_CODEC_ID_PCM_S16LE) {
+            av_log(s, AV_LOG_ERROR,
+                   "mods: audio input must be pcm_s16le (the muxer encodes it "
+                   "itself); got %s. Stream copy of compressed audio is not "
+                   "supported -- decode it, or use -an / -mo_audio none.\n",
+                   avcodec_get_name(ap->codec_id));
+            return AVERROR(EINVAL);
+        }
         if (m->audio_codec < 0)
             m->audio_codec = MOBI_AUDIO_ADPCM;
         m->channels = ap->ch_layout.nb_channels ? ap->ch_layout.nb_channels : 2;
@@ -696,7 +713,17 @@ static int mods_write_header(AVFormatContext *s)
     avio_wl32(pb, st->codecpar->width);     /* 0x0C */
     avio_wl32(pb, st->codecpar->height);    /* 0x10 */
 
+    /* On a stream copy avg_frame_rate is often unset; fall back to the
+     * frame rate implied by the stream (r_frame_rate, then a one-tick-per-
+     * frame time base such as the one our demuxer exports) before the
+     * 30 fps default. */
     fps = st->avg_frame_rate;
+    if (fps.num <= 0 || fps.den <= 0)
+        fps = st->r_frame_rate;
+    if ((fps.num <= 0 || fps.den <= 0) &&
+        st->time_base.num > 0 && st->time_base.den > 0 &&
+        av_cmp_q(st->time_base, (AVRational){1, 240}) >= 0)
+        fps = av_inv_q(st->time_base);
     if (fps.num > 0 && fps.den > 0)
         avio_wl32(pb, (uint32_t)((uint64_t)fps.num * 0x1000000ULL / fps.den));
     else
