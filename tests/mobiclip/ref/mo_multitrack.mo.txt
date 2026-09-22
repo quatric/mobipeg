@@ -1,0 +1,51 @@
+# streams
+stream,0,mobiclip,video,640,480,yuv420p
+stream,1,adpcm_ima_mobiclip_wii,audio,s16p,32000,2
+stream,2,adpcm_ima_mobiclip_wii,audio,s16p,32000,2
+stream,3,adpcm_ima_mobiclip_wii,audio,s16p,32000,2
+# packets
+packet,0,-2,-2,1,51120,K__,MD5:f0b29debcccdef56beaf5472a0135434
+packet,1,-2,-2,1536,1584,K__,MD5:ee3cbcc58b8b81955f9dbba898198a92
+packet,2,-2,-2,1536,1584,K__,MD5:c513d70cd188ecbb12bf18f31a1948a3
+packet,3,-2,-2,1280,1581,K__,MD5:0911ba8cebcee2faae5fdd0ca953e9c1
+packet,0,-1,-1,1,51028,___,MD5:f11eaad3baa142ef923bd435e42e64b2
+packet,1,1278,1278,1280,1320,K__,MD5:47add40707cc94043bdd2382dba1d111
+packet,2,1278,1278,1280,1320,K__,MD5:40fd0cc195b36e7f850a94cf70875bd2
+packet,3,1278,1278,1024,1316,K__,MD5:8ab4b211dc3d2947d2466033f6d524f7
+packet,0,0,0,1,50304,___,MD5:1e1a20de3945b12bb4612214d94aaa54
+packet,1,2302,2302,1280,1320,K__,MD5:15b6f9a008af8545a0d9fe457a7f6a19
+packet,2,2302,2302,1280,1320,K__,MD5:40fd0cc195b36e7f850a94cf70875bd2
+packet,3,2302,2302,1024,1316,K__,MD5:8ab4b211dc3d2947d2466033f6d524f7
+# decode
+#format: frame checksums
+#version: 2
+#hash: MD5
+#tb 0: 256/6143
+#media_type 0: video
+#codec_id 0: rawvideo
+#dimensions 0: 640x480
+#sar 0: 0/1
+#tb 1: 1/32000
+#media_type 1: audio
+#codec_id 1: pcm_s16le
+#sample_rate 1: 32000
+#channel_layout_name 1: stereo
+#tb 2: 1/32000
+#media_type 2: audio
+#codec_id 2: pcm_s16le
+#sample_rate 2: 32000
+#channel_layout_name 2: stereo
+#stream#, dts,        pts, duration,     size, hash
+0,          0,          0,        1,   460800, c41a0393e9cb074e8ebdb55ff90ac34b
+0,          1,          1,        1,   460800, 0511ddd12030c9c2109c1125efe0a3fd
+1,       2663,       2663,     1536,     6144, bd459450924c41e0c9aca31578705eb7
+2,       2663,       2663,     1536,     6144, ff1ce2018aa17fe600fca636b126dbe4
+0,          2,          2,        1,   460800, 49e67f4e0c968e092addc81957ad08ba
+1,       3943,       3943,     1280,     5120, d5b7d26814e2a63631493d94eabfe508
+2,       3943,       3943,     1280,     5120, 32ca18808933aa12e979375d07048a11
+1,       4967,       4967,     1280,     5120, dd03a5e99944bd20ceb5b897041d87a9
+2,       4967,       4967,     1280,     5120, 32ca18808933aa12e979375d07048a11
+# audio 0 md5
+MD5=383a0ece259c88073bf8d346d83e5914
+# audio 1 md5
+MD5=ce338fe6899778aacfc28414f2d9498b
