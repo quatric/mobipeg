@@ -81,6 +81,7 @@ static int dsp_read_header(AVFormatContext *s)
     uint8_t headers[FF_DSP_ADPCM_MAX_CHANNELS][FF_DSP_ADPCM_HEADER_SIZE];
     AVStream *st;
     uint32_t samples, rate;
+    int64_t block;
     int declared, frames_per_block, ret;
 
     if ((ret = ffio_read_size(pb, headers[0], FF_DSP_ADPCM_HEADER_SIZE)) < 0)
@@ -91,7 +92,9 @@ static int dsp_read_header(AVFormatContext *s)
     declared = AV_RB16(headers[0] + 0x4A);
     frames_per_block = AV_RB16(headers[0] + 0x4C);
 
-    if (!samples || rate < 4000 || rate > 192000)
+    if (!samples || rate < 4000 || rate > 192000 ||
+        AV_RB16(headers[0] + 14) != 0 ||
+        declared > FF_DSP_ADPCM_MAX_CHANNELS)
         return AVERROR_INVALIDDATA;
 
     /* The channel-count field is 0 in most files, including every mono one,
@@ -102,6 +105,8 @@ static int dsp_read_header(AVFormatContext *s)
             if ((ret = ffio_read_size(pb, headers[ch],
                                       FF_DSP_ADPCM_HEADER_SIZE)) < 0)
                 return ret;
+            if (!dsp_is_sibling_header(headers[ch], samples, rate))
+                return AVERROR_INVALIDDATA;
         }
         c->channels = declared;
     } else if (pb->seekable & AVIO_SEEKABLE_NORMAL) {
@@ -143,9 +148,14 @@ static int dsp_read_header(AVFormatContext *s)
     /* A single-channel file has nothing to interleave; a multi-channel one
      * without a stated block size stores each channel end to end. */
     if (c->channels == 1 || frames_per_block <= 0)
-        c->block = ff_dsp_adpcm_byte_count(samples);
+        block = ff_dsp_adpcm_byte_count(samples);
     else
-        c->block = frames_per_block * FF_DSP_ADPCM_BYTES_PER_FRAME;
+        block = frames_per_block * FF_DSP_ADPCM_BYTES_PER_FRAME;
+
+    /* Bound the complete channel-major packet before narrowing its size. */
+    if (block > INT_MAX / c->channels)
+        return AVERROR_INVALIDDATA;
+    c->block = block;
 
     c->data_start   = avio_tell(pb);
     c->samples_left = samples;
