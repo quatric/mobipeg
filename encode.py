@@ -20,41 +20,74 @@ MOBICLIP_KEYINT_MAX = 90
 # Audio-only containers. Every one of these carries GameCube/Wii-family
 # DSP-ADPCM except btsnd, which is raw big-endian PCM, and ast, which can do
 # either. They share a code path that skips everything video-shaped.
-AUDIO_FORMATS = ("dsp", "brstm", "bfstm", "bcstm", "bns", "ast", "btsnd",
-                 "wii_photo_m4a", "3ds_sound")
+AUDIO_FORMATS = (
+    "dsp",
+    "brstm",
+    "bfstm",
+    "bcstm",
+    "bns",
+    "ast",
+    "btsnd",
+    "wii_photo_m4a",
+    "3ds_sound",
+)
 
 # Audio codec each one is written with, keyed by the GUI's "audio" argument.
 # "adpcm" means the format's native ADPCM; "pcm" its uncompressed form.
 AUDIO_FORMAT_CODECS = {
-    "dsp":   {"adpcm": ["-c:a", "adpcm_thp"]},
+    "dsp": {"adpcm": ["-c:a", "adpcm_thp"]},
     "brstm": {"adpcm": ["-c:a", "adpcm_thp"], "pcm": ["-c:a", "pcm_s16be_planar"]},
     "bfstm": {"adpcm": ["-c:a", "adpcm_thp"], "pcm": ["-c:a", "pcm_s16be_planar"]},
     "bcstm": {"adpcm": ["-c:a", "adpcm_thp"], "pcm": ["-c:a", "pcm_s16be_planar"]},
-    "bns":   {"adpcm": ["-c:a", "adpcm_thp"]},
+    "bns": {"adpcm": ["-c:a", "adpcm_thp"]},
     # AST's ADPCM is AFC, a different DSP-ADPCM flavour with a fixed
     # predictor table -- lower quality than adpcm_thp, but what the format
     # takes.
-    "ast":   {"adpcm": ["-c:a", "adpcm_afc"], "pcm": ["-c:a", "pcm_s16be_planar"]},
+    "ast": {"adpcm": ["-c:a", "adpcm_afc"], "pcm": ["-c:a", "pcm_s16be_planar"]},
     # The Wii U boot-sound player has no format negotiation: 48 kHz stereo
     # big-endian PCM or nothing.
     "btsnd": {"pcm": ["-c:a", "pcm_s16be", "-ar", "48000", "-ac", "2"]},
     # Wii Photo Channel 1.1 and Nintendo 3DS Sound both accept ordinary
     # AAC-LC M4A. 44.1 kHz / 128 kb/s stereo is inside the 3DS Sound's
     # documented 32-48 kHz and 16-320 kb/s limits.
-    "wii_photo_m4a": {"aac": ["-c:a", "aac", "-profile:a", "aac_low",
-                               "-b:a", "128k", "-ar", "44100", "-ac", "2"]},
-    "3ds_sound": {"aac": ["-c:a", "aac", "-profile:a", "aac_low",
-                            "-b:a", "128k", "-ar", "44100", "-ac", "2"]},
+    "wii_photo_m4a": {
+        "aac": [
+            "-c:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+        ]
+    },
+    "3ds_sound": {
+        "aac": [
+            "-c:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+        ]
+    },
 }
 
 # .bcstm is read by the bfstm demuxer (same layout, different magic), so it
 # has a muxer of its own but no demuxer to name on the way back in.
-AUDIO_FORMAT_DEMUXERS = {"bcstm": "bfstm", "wii_photo_m4a": "mov",
-                         "3ds_sound": "mov"}
+AUDIO_FORMAT_DEMUXERS = {"bcstm": "bfstm", "wii_photo_m4a": "mov", "3ds_sound": "mov"}
 AUDIO_FORMAT_EXTENSIONS = {"wii_photo_m4a": "m4a", "3ds_sound": "m4a"}
 
 # Config
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
+
     def _find_frozen_binary(name):
         """Locate a bundled binary regardless of how PyInstaller placed it.
 
@@ -83,27 +116,41 @@ if getattr(sys, 'frozen', False):
                 return c
         return candidates[0]
 
-    ffmpeg_name = "ffmpeg.exe" if os.name == 'nt' else "ffmpeg"
+    ffmpeg_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
     FFENC = os.environ.get("FFMPEG", _find_frozen_binary(ffmpeg_name))
-    ffprobe_name = "ffprobe.exe" if os.name == 'nt' else "ffprobe"
+    ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
     FFPROBE = os.environ.get("FFPROBE", _find_frozen_binary(ffprobe_name))
-    ffplay_name = "ffplay.exe" if os.name == 'nt' else "ffplay"
+    ffplay_name = "ffplay.exe" if os.name == "nt" else "ffplay"
     FFPLAY = os.environ.get("FFPLAY", _find_frozen_binary(ffplay_name))
-    vidinjector_name = "VidInjector9002-CLI.exe" if os.name == 'nt' else "VidInjector9002-CLI"
+    vidinjector_name = (
+        "VidInjector9002-CLI.exe" if os.name == "nt" else "VidInjector9002-CLI"
+    )
     VIDINJECTOR = os.environ.get("VIDINJECTOR", _find_frozen_binary(vidinjector_name))
 else:
-    FFENC = os.environ.get("FFMPEG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg"))
-    FFPROBE = os.environ.get("FFPROBE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe"))
-    FFPLAY = os.environ.get("FFPLAY", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffplay"))
+    FFENC = os.environ.get(
+        "FFMPEG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg")
+    )
+    FFPROBE = os.environ.get(
+        "FFPROBE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe")
+    )
+    FFPLAY = os.environ.get(
+        "FFPLAY", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffplay")
+    )
     # Dev tree: the CLI lives in its vendored submodule's own build dir, not
     # alongside encode.py (it's only copied next to ffmpeg for the packaged
     # app, via the CI step that builds third_party/VidInjector9000).
-    VIDINJECTOR = os.environ.get("VIDINJECTOR", os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "third_party", "VidInjector9000", "VidInjector9002-CLI", "build",
-        "VidInjector9002-CLI"))
+    VIDINJECTOR = os.environ.get(
+        "VIDINJECTOR",
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "third_party",
+            "VidInjector9000",
+            "VidInjector9002-CLI",
+            "build",
+            "VidInjector9002-CLI",
+        ),
+    )
 DEFAULT_OUTDIR = os.environ.get("OUTDIR", ".")
-
 
 
 def report_outputs(*paths):
@@ -125,20 +172,34 @@ def stereo_layout(inp, ifmt):
     double-width video. Use --stereo to state the layout when it is missing."""
     try:
         p = subprocess.run(
-            [FFPROBE, "-v", "error"] + ifmt +
-            ["-select_streams", "v:0", "-show_entries",
-             "stream_side_data=side_data_type,type,view,inverted",
-             "-of", "default=nw=1", inp],
-            stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            [FFPROBE, "-v", "error"]
+            + ifmt
+            + [
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream_side_data=side_data_type,type,view,inverted",
+                "-of",
+                "default=nw=1",
+                inp,
+            ],
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
         out = (p.stdout or "").lower()
         if p.returncode != 0:
-            print(f"   (warning: ffprobe failed on {os.path.basename(inp)}, so a 3D "
-                  f"layout can't be detected — pass --stereo to set it)\n"
-                  f"   {(p.stderr or '').strip().splitlines()[-1] if p.stderr else ''}")
+            print(
+                f"   (warning: ffprobe failed on {os.path.basename(inp)}, so a 3D "
+                f"layout can't be detected — pass --stereo to set it)\n"
+                f"   {(p.stderr or '').strip().splitlines()[-1] if p.stderr else ''}"
+            )
             return None, False
     except Exception as e:
-        print(f"   (warning: could not run ffprobe at {FFPROBE} ({e}) — 3D layout "
-              "detection is unavailable; pass --stereo to set it)")
+        print(
+            f"   (warning: could not run ffprobe at {FFPROBE} ({e}) — 3D layout "
+            "detection is unavailable; pass --stereo to set it)"
+        )
         return None, False
     if "stereo 3d" not in out and "stereo3d" not in out:
         return None, False
@@ -159,7 +220,9 @@ def resolve_stereo(inp, ifmt, override):
     if override == "none":
         return None, False
     if override != "auto":
-        return override[:-2] if override.endswith("-r") else override, override.endswith("-r")
+        return (
+            override[:-2] if override.endswith("-r") else override
+        ), override.endswith("-r")
     return stereo_layout(inp, ifmt)
 
 
@@ -169,7 +232,9 @@ def stereo_in_mode(kind, inverted):
     The l/r suffix says which eye is stored first, so feeding the 'r' variant
     for an inverted stream makes every stereo3d output mode mean what it says
     (out=sbsl really is left-on-the-left)."""
-    return {"frameseq": "a", "tb": "ab", "sbs": "sbs"}[kind] + ("r" if inverted else "l")
+    return {"frameseq": "a", "tb": "ab", "sbs": "sbs"}[kind] + (
+        "r" if inverted else "l"
+    )
 
 
 def eye_filters(kind, inverted):
@@ -220,9 +285,13 @@ def _decodes_cleanly(path):
     """
     try:
         p = subprocess.run(
-            [FFENC, "-v", "error", "-nostdin"] + input_fmt(path) +
-            ["-i", path, "-frames:v", "3", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=30)
+            [FFENC, "-v", "error", "-nostdin"]
+            + input_fmt(path)
+            + ["-i", path, "-frames:v", "3", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         return p.returncode == 0 and not p.stderr.strip()
     except Exception:
         return True  # don't block the encode on a probe failure
@@ -249,25 +318,60 @@ def preprocess_input(inp, outdir):
         return inp
     sys_ffmpeg = shutil.which("ffmpeg")
     if not sys_ffmpeg or os.path.realpath(sys_ffmpeg) == os.path.realpath(FFENC):
-        print(f"warning: {inp} may not decode correctly with the bundled ffmpeg, "
-              "and no separate system ffmpeg was found to fall back to")
+        print(
+            f"warning: {inp} may not decode correctly with the bundled ffmpeg, "
+            "and no separate system ffmpeg was found to fall back to"
+        )
         return inp
     os.makedirs(outdir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(inp))[0]
-    fd, intermediate = tempfile.mkstemp(prefix=f".preprocessed_{stem}_",
-                                        suffix=".mkv", dir=outdir)
+    fd, intermediate = tempfile.mkstemp(
+        prefix=f".preprocessed_{stem}_", suffix=".mkv", dir=outdir
+    )
     os.close(fd)
-    print(f">> {os.path.basename(inp)} doesn't decode cleanly with the bundled "
-          f"ffmpeg (unsupported/broken codec) -- decoding video with system "
-          f"ffmpeg and re-encoding with our own libx264 to {intermediate}")
-    decode_cmd = [sys_ffmpeg, "-nostdin", "-v", "error", "-i", inp,
-                  "-map", "0:v:0", "-vf", "scale='min(960,iw)':-2",
-                  "-f", "yuv4mpegpipe", "-pix_fmt", "yuv420p", "-"]
-    encode_cmd = [FFENC, "-nostdin", "-y",
-                  "-f", "yuv4mpegpipe", "-i", "-"] + input_fmt(inp) + ["-i", inp,
-                  "-map", "0:v:0", "-map", "1:a:0?",
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
-                  "-c:a", "pcm_s16le", intermediate]
+    print(
+        f">> {os.path.basename(inp)} doesn't decode cleanly with the bundled "
+        f"ffmpeg (unsupported/broken codec) -- decoding video with system "
+        f"ffmpeg and re-encoding with our own libx264 to {intermediate}"
+    )
+    decode_cmd = [
+        sys_ffmpeg,
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        inp,
+        "-map",
+        "0:v:0",
+        "-vf",
+        "scale='min(960,iw)':-2",
+        "-f",
+        "yuv4mpegpipe",
+        "-pix_fmt",
+        "yuv420p",
+        "-",
+    ]
+    encode_cmd = (
+        [FFENC, "-nostdin", "-y", "-f", "yuv4mpegpipe", "-i", "-"]
+        + input_fmt(inp)
+        + [
+            "-i",
+            inp,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "12",
+            "-c:a",
+            "pcm_s16le",
+            intermediate,
+        ]
+    )
     decoder = None
     succeeded = False
     try:
@@ -299,10 +403,20 @@ def probe_duration(inp):
     """Return the video stream duration in seconds, or None if it can't be read."""
     try:
         p = subprocess.run(
-            [FFPROBE, "-v", "error"] + input_fmt(inp) +
-            ["-select_streams", "v:0",
-             "-show_entries", "format=duration", "-of", "default=nk=1:nw=1", inp],
-            capture_output=True, text=True)
+            [FFPROBE, "-v", "error"]
+            + input_fmt(inp)
+            + [
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nk=1:nw=1",
+                inp,
+            ],
+            capture_output=True,
+            text=True,
+        )
         return float(p.stdout.strip())
     except Exception:
         return None
@@ -332,7 +446,7 @@ def detect_moflex_block_size(inp):
     try:
         with open(inp, "rb") as f:
             head = f.read(14)
-        if len(head) < 14 or head[0:2] != b"\x4C\x32":
+        if len(head) < 14 or head[0:2] != b"\x4c\x32":
             return None
         return int.from_bytes(head[12:14], "big") + 1
     except Exception:
@@ -343,10 +457,20 @@ def probe_fps(inp):
     """Return the source average frame rate as a float, or None."""
     try:
         p = subprocess.run(
-            [FFPROBE, "-v", "error"] + input_fmt(inp) +
-            ["-select_streams", "v:0",
-             "-show_entries", "stream=r_frame_rate", "-of", "default=nk=1:nw=1", inp],
-            capture_output=True, text=True)
+            [FFPROBE, "-v", "error"]
+            + input_fmt(inp)
+            + [
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=r_frame_rate",
+                "-of",
+                "default=nk=1:nw=1",
+                inp,
+            ],
+            capture_output=True,
+            text=True,
+        )
         num, den = p.stdout.strip().split("/")
         den = float(den)
         return float(num) / den if den else None
@@ -358,10 +482,20 @@ def probe_audio_rate(inp):
     """Return the source audio sample rate (Hz) as an int, or None."""
     try:
         p = subprocess.run(
-            [FFPROBE, "-v", "error"] + input_fmt(inp) +
-            ["-select_streams", "a:0",
-             "-show_entries", "stream=sample_rate", "-of", "default=nk=1:nw=1", inp],
-            capture_output=True, text=True)
+            [FFPROBE, "-v", "error"]
+            + input_fmt(inp)
+            + [
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=sample_rate",
+                "-of",
+                "default=nk=1:nw=1",
+                inp,
+            ],
+            capture_output=True,
+            text=True,
+        )
         return int(p.stdout.strip())
     except Exception:
         return None
@@ -374,7 +508,9 @@ def read_mods_keyframes(path):
             b = f.read()
         kf_off = struct.unpack_from("<I", b, 0x28)[0]
         kf_cnt = struct.unpack_from("<I", b, 0x2C)[0]
-        frames = [struct.unpack_from("<II", b, kf_off + 8 * i)[0] for i in range(kf_cnt)]
+        frames = [
+            struct.unpack_from("<II", b, kf_off + 8 * i)[0] for i in range(kf_cnt)
+        ]
         return sorted(set(frames))
     except Exception:
         return []
@@ -422,23 +558,30 @@ def package_cia(parsed):
     # a placeholder there instead.
     cia_input = parsed.audio if parsed.audio != "adpcm" else parsed.input_file
     if not cia_input:
-        print("cia: input .moflex file required, e.g.:\n"
-              "  encode.py cia clip.moflex -o clip.cia", file=sys.stderr)
+        print(
+            "cia: input .moflex file required, e.g.:\n"
+            "  encode.py cia clip.moflex -o clip.cia",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if not os.path.isfile(cia_input):
         print(f"input not found: {cia_input}", file=sys.stderr)
         sys.exit(1)
     if not cia_input.lower().endswith(".moflex"):
-        print(f"warning: {cia_input} doesn't look like a .moflex file — "
-              f"the CIA will still build, but 3DS may refuse to play it")
+        print(
+            f"warning: {cia_input} doesn't look like a .moflex file — "
+            f"the CIA will still build, but 3DS may refuse to play it"
+        )
 
     if not os.path.isfile(VIDINJECTOR):
-        print(f"VidInjector9002-CLI not found at:\n  {VIDINJECTOR}\n"
-              f"Build it once:\n"
-              f"  git submodule update --init --recursive third_party/VidInjector9000\n"
-              f"  cd third_party/VidInjector9000/VidInjector9002-CLI && ./build.sh\n"
-              f"(needs cmake and, on macOS, `brew install mbedtls` visible to CMAKE_PREFIX_PATH)",
-              file=sys.stderr)
+        print(
+            f"VidInjector9002-CLI not found at:\n  {VIDINJECTOR}\n"
+            f"Build it once:\n"
+            f"  git submodule update --init --recursive third_party/VidInjector9000\n"
+            f"  cd third_party/VidInjector9000/VidInjector9002-CLI && ./build.sh\n"
+            f"(needs cmake and, on macOS, `brew install mbedtls` visible to CMAKE_PREFIX_PATH)",
+            file=sys.stderr,
+        )
         sys.exit(1)
     try:
         os.chmod(VIDINJECTOR, os.stat(VIDINJECTOR).st_mode | 0o111)
@@ -468,28 +611,36 @@ def package_cia(parsed):
             print(f"Command failed: {cmd[0]}: {e}", file=sys.stderr)
             sys.exit(1)
         if r.returncode != 0:
-            print(f"VidInjector9002-CLI failed: {' '.join(cmd)}\n{r.stdout}{r.stderr}",
-                  file=sys.stderr)
+            print(
+                f"VidInjector9002-CLI failed: {' '.join(cmd)}\n{r.stdout}{r.stderr}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         return r.stdout
 
     try:
         print(f">> packaging  {cia_input}  ->  {out_cia}")
         vi("-new", vi9p)
-        vi("-sp", vi9p, 13, cia_input, vi9p)                    # STR:MOFLEX(0)
+        vi("-sp", vi9p, 13, cia_input, vi9p)  # STR:MOFLEX(0)
         sname = parsed.cia_title or os.path.splitext(os.path.basename(cia_input))[0]
         lname = parsed.cia_long_title or sname
-        vi("-sp", vi9p, 4, sname, vi9p)                         # STR:SNAME
-        vi("-sp", vi9p, 5, lname, vi9p)                         # STR:LNAME
-        vi("-sp", vi9p, 6, parsed.cia_publisher, vi9p)          # STR:PUBLISHER
+        vi("-sp", vi9p, 4, sname, vi9p)  # STR:SNAME
+        vi("-sp", vi9p, 5, lname, vi9p)  # STR:LNAME
+        vi("-sp", vi9p, 6, parsed.cia_publisher, vi9p)  # STR:PUBLISHER
         if icon_abs:
-            vi("-sp", vi9p, 2, icon_abs, vi9p)                  # STR:ICON
+            vi("-sp", vi9p, 2, icon_abs, vi9p)  # STR:ICON
         if banner_abs:
-            vi("-sp", vi9p, 1, banner_abs, vi9p)                # STR:BANNER
+            vi("-sp", vi9p, 1, banner_abs, vi9p)  # STR:BANNER
 
         if parsed.cia_unique_id:
-            vi("-bc", vi9p, parsed.cia_unique_id, sname,
-               parsed.cia_product_code, out_cia)
+            vi(
+                "-bc",
+                vi9p,
+                parsed.cia_unique_id,
+                sname,
+                parsed.cia_product_code,
+                out_cia,
+            )
         else:
             vi("-bc", vi9p, out_cia)
     finally:
@@ -500,75 +651,336 @@ def package_cia(parsed):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Encode video/audio for Nintendo formats.")
-    parser.add_argument("fmt", nargs="?", default="mo", help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)")
-    parser.add_argument("audio", nargs="?", default="adpcm", help="Audio codec (or input file if fmt=decode)")
-    parser.add_argument("input_file", nargs="?", default="", help="Input video/audio file")
-    parser.add_argument("input2", nargs="?", default="", help="Second input file (right eye for moflex3d / 3ds_camera3d). moflex3d: omit this to auto-split a single packed stereoscopic source (e.g. a BD3D MKV with StereoMode set) using --stereo or its detected layout.")
+    parser = argparse.ArgumentParser(
+        description="Encode video/audio for Nintendo formats."
+    )
+    parser.add_argument(
+        "fmt",
+        nargs="?",
+        default="mo",
+        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
+    )
+    parser.add_argument(
+        "audio",
+        nargs="?",
+        default="adpcm",
+        help="Audio codec (or input file if fmt=decode)",
+    )
+    parser.add_argument(
+        "input_file", nargs="?", default="", help="Input video/audio file"
+    )
+    parser.add_argument(
+        "input2",
+        nargs="?",
+        default="",
+        help="Second input file (right eye for moflex3d / 3ds_camera3d). moflex3d: omit this to auto-split a single packed stereoscopic source (e.g. a BD3D MKV with StereoMode set) using --stereo or its detected layout.",
+    )
 
     parser.add_argument("--scale", default="", help="Override scale (e.g. 320x240)")
     parser.add_argument("--layout", default="4", help="MO3D layout (default 4)")
-    parser.add_argument("--keyframes", type=int, default=0, help="Number of evenly-spaced keyframes across the clip. 0 (default) = auto: as few as practical while keeping every gap within the encoder's ~90-frame limit. Scene-cut keyframes are still allowed in addition.")
-    parser.add_argument("--roundtrip", action="store_true", help="Enable round-trip decoding validation")
-    parser.add_argument("--fast-audio", dest="fast_audio", action="store_true", help="Disable the vx_audio long-term-prediction (LTP) lag search. Much faster (~90x on the audio pass) at ~2 dB lower quality. Only affects vx and mods/codebook (SX) audio; other codecs ignore it. Recommended for long clips, where the LTP drain otherwise runs for minutes after the video finishes.")
+    parser.add_argument(
+        "--keyframes",
+        type=int,
+        default=0,
+        help="Number of evenly-spaced keyframes across the clip. 0 (default) = auto: as few as practical while keeping every gap within the encoder's ~90-frame limit. Scene-cut keyframes are still allowed in addition.",
+    )
+    parser.add_argument(
+        "--roundtrip", action="store_true", help="Enable round-trip decoding validation"
+    )
+    parser.add_argument(
+        "--fast-audio",
+        dest="fast_audio",
+        action="store_true",
+        help="Disable the vx_audio long-term-prediction (LTP) lag search. Much faster (~90x on the audio pass) at ~2 dB lower quality. Only affects vx and mods/codebook (SX) audio; other codecs ignore it. Recommended for long clips, where the LTP drain otherwise runs for minutes after the video finishes.",
+    )
     env_quant = 0
     try:
         env_quant = int(os.environ.get("QUANT", os.environ.get("QP", 0)))
     except ValueError:
         pass
-    parser.add_argument("--quantizer", "--qp", dest="quantizer", type=int, default=env_quant, help="Constant quantizer / QP setting (e.g. 18-28 for MobiClip, 32 for VX, 1-31 for THP/TiVo MPEG-2 qscale). Default 0 = format default (32 for VX, 22 for MobiClip CQP, bitrate mode for TiVo, 2 for THP). Can also be set via QUANT or QP environment variables.")
-    parser.add_argument("--audio-rate", dest="audio_rate", type=int, default=0, help="Resample audio to this rate (Hz). TiVo defaults to 48000; other formats keep the source unless their preset requires a hardware-specific rate. Match the retail clip when replacing one.")
-    parser.add_argument("--fps", dest="fps", default="", help="Force this video frame rate (all formats). Accepts a decimal (e.g. 15) or an exact fraction (e.g. 60000/1001). Empty = keep source (.mo defaults to 30000/1001). The frame rate must usually match the clip you're replacing or the video plays too slow/fast.")
-    parser.add_argument("--rvid-mode", dest="rvid_mode", default="rgb555", choices=["rgb555", "rgb565", "256"], help="rvid only: pixel mode. rgb555 (unlimited color, default), rgb565 (max color), or 256 (8bpp palette).")
-    parser.add_argument("--no-compress", dest="rvid_no_compress", action="store_true", help="rvid only: store raw 16bpp frames instead of Nintendo LZ10 compression.")
-    parser.add_argument("--rvid-interlaced", dest="rvid_interlaced", action="store_true", help="rvid only: store one field per frame (interlaced).")
-    parser.add_argument("--rvid-no-dither", dest="rvid_no_dither", action="store_true", help="rvid only: disable the checkerboard ordered dither used when reducing to 16bpp.")
-    parser.add_argument("--mobi-qyx", type=int, default=int(os.environ.get("MOBI_QYX", 0)), help="MobiClip: coarsen the quantizer by this many whole qy tiers, i.e. QP + 6*N (0-8, default 0). The quantizer used to be the only way to change quality; plain --qp now works over the format's full 12-63 range, so leave this at 0.")
-    parser.add_argument("--mobi-subme", type=int, default=int(os.environ.get("MOBI_SUBME", 0)), help="Subpel/RD refinement level 2-11 (0 = the preset's value, normally 7). 9 is the best quality that this encoder can act on; 10-11 need trellis, which MobiClip has no representation for. Below 6 disables RD mode decision.")
-    parser.add_argument("--mobi-intra-only", dest="mobi_intra_only", action="store_true", help="Force every frame to be encoded as an I-frame (keyframe only).")
-    parser.add_argument("--mobi-skip", type=int, default=int(os.environ.get("MOBI_SKIP", 512)), help="Macroblock skip decision error threshold (default 512). 0 keeps every residual, which is slightly better at low QP; higher values freeze near-static blocks to stop dither flicker.")
-    parser.add_argument("--hq", "--highest-quality", dest="highest_quality", action="store_true", help="Highest quality MobiClip settings: QP 12 (the format's floor), subme 9, and no skip threshold.")
-    parser.add_argument("--mo-block", dest="mo_block", type=int, default=0, help="moflex/moflex3d: fixed block size in bytes that every chunk is zero-padded out to (retail=4096, 3DS SDK encoder=2048). Default 0 = auto: when the input file is itself a .moflex, match its own block size so a decode+encode round trip reproduces the original framing byte-for-byte; otherwise 4096.")
+    parser.add_argument(
+        "--quantizer",
+        "--qp",
+        dest="quantizer",
+        type=int,
+        default=env_quant,
+        help="Constant quantizer / QP setting (e.g. 18-28 for MobiClip, 32 for VX, 1-31 for THP/TiVo MPEG-2 qscale). Default 0 = format default (32 for VX, 22 for MobiClip CQP, bitrate mode for TiVo, 2 for THP). Can also be set via QUANT or QP environment variables.",
+    )
+    parser.add_argument(
+        "--audio-rate",
+        dest="audio_rate",
+        type=int,
+        default=0,
+        help="Resample audio to this rate (Hz). TiVo defaults to 48000; other formats keep the source unless their preset requires a hardware-specific rate. Match the retail clip when replacing one.",
+    )
+    parser.add_argument(
+        "--fps",
+        dest="fps",
+        default="",
+        help="Force this video frame rate (all formats). Accepts a decimal (e.g. 15) or an exact fraction (e.g. 60000/1001). Empty = keep source (.mo defaults to 30000/1001). The frame rate must usually match the clip you're replacing or the video plays too slow/fast.",
+    )
+    parser.add_argument(
+        "--rvid-mode",
+        dest="rvid_mode",
+        default="rgb555",
+        choices=["rgb555", "rgb565", "256"],
+        help="rvid only: pixel mode. rgb555 (unlimited color, default), rgb565 (max color), or 256 (8bpp palette).",
+    )
+    parser.add_argument(
+        "--no-compress",
+        dest="rvid_no_compress",
+        action="store_true",
+        help="rvid only: store raw 16bpp frames instead of Nintendo LZ10 compression.",
+    )
+    parser.add_argument(
+        "--rvid-interlaced",
+        dest="rvid_interlaced",
+        action="store_true",
+        help="rvid only: store one field per frame (interlaced).",
+    )
+    parser.add_argument(
+        "--rvid-no-dither",
+        dest="rvid_no_dither",
+        action="store_true",
+        help="rvid only: disable the checkerboard ordered dither used when reducing to 16bpp.",
+    )
+    parser.add_argument(
+        "--mobi-qyx",
+        type=int,
+        default=int(os.environ.get("MOBI_QYX", 0)),
+        help="MobiClip: coarsen the quantizer by this many whole qy tiers, i.e. QP + 6*N (0-8, default 0). The quantizer used to be the only way to change quality; plain --qp now works over the format's full 12-63 range, so leave this at 0.",
+    )
+    parser.add_argument(
+        "--mobi-subme",
+        type=int,
+        default=int(os.environ.get("MOBI_SUBME", 0)),
+        help="Subpel/RD refinement level 2-11 (0 = the preset's value, normally 7). 9 is the best quality that this encoder can act on; 10-11 need trellis, which MobiClip has no representation for. Below 6 disables RD mode decision.",
+    )
+    parser.add_argument(
+        "--mobi-intra-only",
+        dest="mobi_intra_only",
+        action="store_true",
+        help="Force every frame to be encoded as an I-frame (keyframe only).",
+    )
+    parser.add_argument(
+        "--mobi-skip",
+        type=int,
+        default=int(os.environ.get("MOBI_SKIP", 512)),
+        help="Macroblock skip decision error threshold (default 512). 0 keeps every residual, which is slightly better at low QP; higher values freeze near-static blocks to stop dither flicker.",
+    )
+    parser.add_argument(
+        "--hq",
+        "--highest-quality",
+        dest="highest_quality",
+        action="store_true",
+        help="Highest quality MobiClip settings: QP 12 (the format's floor), subme 9, and no skip threshold.",
+    )
+    parser.add_argument(
+        "--mo-block",
+        dest="mo_block",
+        type=int,
+        default=0,
+        help="moflex/moflex3d: fixed block size in bytes that every chunk is zero-padded out to (retail=4096, 3DS SDK encoder=2048). Default 0 = auto: when the input file is itself a .moflex, match its own block size so a decode+encode round trip reproduces the original framing byte-for-byte; otherwise 4096.",
+    )
 
     # --- MobiClip rate control, named after the retail encoder's settings ---
-    parser.add_argument("--bitrate", dest="bitrate", default="", help="MobiClip: target bitrate for average-bitrate mode, e.g. 700k. Overrides --qp. (Retail 'Bitrate'.)")
-    parser.add_argument("--multipass", dest="multipass", type=int, default=1, choices=[1, 2], help="MobiClip: number of rate-control passes (default 1). 2 runs an analysis pass first and hits the target bitrate more accurately at the same quality. Requires --bitrate. (Retail np1/npn and cbr1/cbrn.)")
-    parser.add_argument("--passlog", dest="passlog", default="", help="MobiClip: statistics file for --multipass 2 (default <output>.pass).")
-    parser.add_argument("--min-qp", dest="min_qp", type=int, default=0, help="MobiClip: lowest quantizer rate control may use, 12-48. (Retail 'MinQuantizer'.)")
-    parser.add_argument("--max-qp", dest="max_qp", type=int, default=0, help="MobiClip: highest quantizer rate control may use, 12-48. (Retail 'MaxQuantizer'.)")
-    parser.add_argument("--i-boost", dest="i_boost", type=int, default=-1, help="MobiClip: percent extra bits for I-frames, 0-100 (retail 'IBoostPercent', default 40). Only meaningful with --bitrate.")
-    parser.add_argument("--i-threshold", dest="i_threshold", type=int, default=-1, help="MobiClip: scene-cut sensitivity for inserting I-frames, 0-100 (retail 'IThreshold', default 90). 0 disables scene-cut keyframes.")
-    parser.add_argument("--buffer-size", dest="buffer_size", default="", help="MobiClip: rate-control buffer size, e.g. 400k (retail 'BufferSize'). Bounds how far the bitrate may drift locally.")
-    parser.add_argument("--me", dest="me_method", default="", choices=["dia", "hex", "umh", "esa"], help="MobiClip: motion search method (retail 'MeMethod'). Default is the preset's (hex).")
-    parser.add_argument("--8x8dct", dest="dct8x8", type=int, default=-1, choices=[0, 1], help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.")
-    parser.add_argument("--ffmpeg-args", dest="ffmpeg_args", default="", help="Extra parameters appended verbatim to the ffmpeg command line, just before the output file. Parsed like a shell word list, so quoting works: --ffmpeg-args '-t 5 -af volume=0.5'. Because ffmpeg lets the last occurrence of an option win, these override the format preset. Applies to encode, decode and play; internal analysis passes (the mods keyframe probe and --roundtrip validation) are left alone.")
+    parser.add_argument(
+        "--bitrate",
+        dest="bitrate",
+        default="",
+        help="MobiClip: target bitrate for average-bitrate mode, e.g. 700k. Overrides --qp. (Retail 'Bitrate'.)",
+    )
+    parser.add_argument(
+        "--multipass",
+        dest="multipass",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="MobiClip: number of rate-control passes (default 1). 2 runs an analysis pass first and hits the target bitrate more accurately at the same quality. Requires --bitrate. (Retail np1/npn and cbr1/cbrn.)",
+    )
+    parser.add_argument(
+        "--passlog",
+        dest="passlog",
+        default="",
+        help="MobiClip: statistics file for --multipass 2 (default <output>.pass).",
+    )
+    parser.add_argument(
+        "--min-qp",
+        dest="min_qp",
+        type=int,
+        default=0,
+        help="MobiClip: lowest quantizer rate control may use, 12-48. (Retail 'MinQuantizer'.)",
+    )
+    parser.add_argument(
+        "--max-qp",
+        dest="max_qp",
+        type=int,
+        default=0,
+        help="MobiClip: highest quantizer rate control may use, 12-48. (Retail 'MaxQuantizer'.)",
+    )
+    parser.add_argument(
+        "--i-boost",
+        dest="i_boost",
+        type=int,
+        default=-1,
+        help="MobiClip: percent extra bits for I-frames, 0-100 (retail 'IBoostPercent', default 40). Only meaningful with --bitrate.",
+    )
+    parser.add_argument(
+        "--i-threshold",
+        dest="i_threshold",
+        type=int,
+        default=-1,
+        help="MobiClip: scene-cut sensitivity for inserting I-frames, 0-100 (retail 'IThreshold', default 90). 0 disables scene-cut keyframes.",
+    )
+    parser.add_argument(
+        "--buffer-size",
+        dest="buffer_size",
+        default="",
+        help="MobiClip: rate-control buffer size, e.g. 400k (retail 'BufferSize'). Bounds how far the bitrate may drift locally.",
+    )
+    parser.add_argument(
+        "--me",
+        dest="me_method",
+        default="",
+        choices=["dia", "hex", "umh", "esa"],
+        help="MobiClip: motion search method (retail 'MeMethod'). Default is the preset's (hex).",
+    )
+    parser.add_argument(
+        "--8x8dct",
+        dest="dct8x8",
+        type=int,
+        default=-1,
+        choices=[0, 1],
+        help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.",
+    )
+    parser.add_argument(
+        "--ffmpeg-args",
+        dest="ffmpeg_args",
+        default="",
+        help="Extra parameters appended verbatim to the ffmpeg command line, just before the output file. Parsed like a shell word list, so quoting works: --ffmpeg-args '-t 5 -af volume=0.5'. Because ffmpeg lets the last occurrence of an option win, these override the format preset. Applies to encode, decode and play; internal analysis passes (the mods keyframe probe and --roundtrip validation) are left alone.",
+    )
 
     # --- fmt=cia: package an already-encoded .moflex into a 3DS video CIA. ---
     # A separate, explicit step from encoding on purpose — you build the
     # .moflex first with fmt=moflex, then package it here. Wraps the vendored
     # VidInjector9002-CLI (third_party/VidInjector9000); see VIDINJECTOR above.
-    parser.add_argument("--cia-title", dest="cia_title", default="", help="cia only: short title shown on the HOME Menu tile (retail SNAME).")
-    parser.add_argument("--cia-long-title", dest="cia_long_title", default="", help="cia only: long title shown in the applet's title bar (retail LNAME). Defaults to --cia-title.")
-    parser.add_argument("--cia-publisher", dest="cia_publisher", default="mobipeg", help="cia only: publisher name shown under the title (retail PUBLISHER).")
-    parser.add_argument("--cia-icon", dest="cia_icon", default="", help="cia only: path to a PNG/JPEG for the HOME Menu icon (retail ICON). Omit to use VidInjector's built-in placeholder.")
-    parser.add_argument("--cia-banner", dest="cia_banner", default="", help="cia only: path to a PNG/JPEG for the applet banner (retail BANNER). Omit to use VidInjector's built-in placeholder.")
-    parser.add_argument("--cia-unique-id", dest="cia_unique_id", default="", help="cia only: hex title-ID unique portion, must be C0000-EFFFF to avoid clashing with other titles. Default: VidInjector picks a random one in range.")
-    parser.add_argument("--cia-product-code", dest="cia_product_code", default="VDIJ", help="cia only: 4-letter product code suffix (retail default 'VDIJ').")
+    parser.add_argument(
+        "--cia-title",
+        dest="cia_title",
+        default="",
+        help="cia only: short title shown on the HOME Menu tile (retail SNAME).",
+    )
+    parser.add_argument(
+        "--cia-long-title",
+        dest="cia_long_title",
+        default="",
+        help="cia only: long title shown in the applet's title bar (retail LNAME). Defaults to --cia-title.",
+    )
+    parser.add_argument(
+        "--cia-publisher",
+        dest="cia_publisher",
+        default="mobipeg",
+        help="cia only: publisher name shown under the title (retail PUBLISHER).",
+    )
+    parser.add_argument(
+        "--cia-icon",
+        dest="cia_icon",
+        default="",
+        help="cia only: path to a PNG/JPEG for the HOME Menu icon (retail ICON). Omit to use VidInjector's built-in placeholder.",
+    )
+    parser.add_argument(
+        "--cia-banner",
+        dest="cia_banner",
+        default="",
+        help="cia only: path to a PNG/JPEG for the applet banner (retail BANNER). Omit to use VidInjector's built-in placeholder.",
+    )
+    parser.add_argument(
+        "--cia-unique-id",
+        dest="cia_unique_id",
+        default="",
+        help="cia only: hex title-ID unique portion, must be C0000-EFFFF to avoid clashing with other titles. Default: VidInjector picks a random one in range.",
+    )
+    parser.add_argument(
+        "--cia-product-code",
+        dest="cia_product_code",
+        default="VDIJ",
+        help="cia only: 4-letter product code suffix (retail default 'VDIJ').",
+    )
 
-    parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files")
-    parser.add_argument("-o", "--output", dest="output", default="", help="Output filename. Decode mode: default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4. Encode mode: the extension is still chosen by the target format (this only picks the directory and base name), overriding the generated roundtrip_<fmt>_<audio> name; --outdir is ignored when this is set.")
-    parser.add_argument("--stereo", dest="stereo", default="auto", choices=["auto", "none", "frameseq", "frameseq-r", "tb", "tb-r", "sbs", "sbs-r"], help="Decode/play mode: force the stereoscopic layout instead of reading it from the file. Use this when a 3D file carries no layout descriptor (nothing to detect) so --eyes still splits it. The '-r' variants mean the right eye is stored first. 'none' treats the input as 2D.")
-    parser.add_argument("--eyes", dest="eyes", default="both", choices=["both", "left", "right", "packed"], help="Stereoscopic 3DS input: which eye to use. Decode mode: 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Play mode: 'both' shows the eyes side by side in one window, 'left'/'right' plays a single eye full-window, 'packed' plays the stream as stored (eyes alternating). Ignored for 2D input.")
+    parser.add_argument(
+        "--outdir", default=DEFAULT_OUTDIR, help="Output directory for generated files"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default="",
+        help="Output filename. Decode mode: default is the input's own name with a .mp4 extension; for a stereoscopic input the eye is appended, e.g. gs_op_eng_left.mp4. Encode mode: the extension is still chosen by the target format (this only picks the directory and base name), overriding the generated roundtrip_<fmt>_<audio> name; --outdir is ignored when this is set.",
+    )
+    parser.add_argument(
+        "--stereo",
+        dest="stereo",
+        default="auto",
+        choices=[
+            "auto",
+            "none",
+            "frameseq",
+            "frameseq-r",
+            "tb",
+            "tb-r",
+            "sbs",
+            "sbs-r",
+        ],
+        help="Decode/play mode: force the stereoscopic layout instead of reading it from the file. Use this when a 3D file carries no layout descriptor (nothing to detect) so --eyes still splits it. The '-r' variants mean the right eye is stored first. 'none' treats the input as 2D.",
+    )
+    parser.add_argument(
+        "--eyes",
+        dest="eyes",
+        default="both",
+        choices=["both", "left", "right", "packed"],
+        help="Stereoscopic 3DS input: which eye to use. Decode mode: 'both' (default) writes a separate file per eye, 'left'/'right' writes just that one, 'packed' keeps the original interleaved stream untouched. Play mode: 'both' shows the eyes side by side in one window, 'left'/'right' plays a single eye full-window, 'packed' plays the stream as stored (eyes alternating). Ignored for 2D input.",
+    )
 
-    parser.add_argument("--super", "--super-moflex", "--smoflex", dest="super_moflex", action="store_true", help="moflex/moflex3d: Enable Super MOFLEX trailer extension (supports secondary audio, multiple subtitles, metadata, poster art)")
-    parser.add_argument("--audio2", dest="audio2", default="", help="Super MOFLEX: second audio track file or stream")
-    parser.add_argument("--lang", dest="lang", default="", help="Primary audio language tag (e.g. eng)")
-    parser.add_argument("--lang2", dest="lang2", default="", help="Second audio language tag (e.g. jpn)")
-    parser.add_argument("--srt", dest="srt", action="append", default=[], help="Super MOFLEX: subtitle track (.srt file, repeatable)")
-    parser.add_argument("--poster", dest="poster", default="", help="Super MOFLEX: poster artwork (image file)")
+    parser.add_argument(
+        "--super",
+        "--super-moflex",
+        "--smoflex",
+        dest="super_moflex",
+        action="store_true",
+        help="moflex/moflex3d: Enable Super MOFLEX trailer extension (supports secondary audio, multiple subtitles, metadata, poster art)",
+    )
+    parser.add_argument(
+        "--audio2",
+        dest="audio2",
+        default="",
+        help="Super MOFLEX: second audio track file or stream",
+    )
+    parser.add_argument(
+        "--lang", dest="lang", default="", help="Primary audio language tag (e.g. eng)"
+    )
+    parser.add_argument(
+        "--lang2", dest="lang2", default="", help="Second audio language tag (e.g. jpn)"
+    )
+    parser.add_argument(
+        "--srt",
+        dest="srt",
+        action="append",
+        default=[],
+        help="Super MOFLEX: subtitle track (.srt file, repeatable)",
+    )
+    parser.add_argument(
+        "--poster",
+        dest="poster",
+        default="",
+        help="Super MOFLEX: poster artwork (image file)",
+    )
 
     parsed = parser.parse_args()
-    OUTDIR = (os.path.dirname(parsed.output) or ".") if parsed.output else (parsed.outdir or ".")
+    OUTDIR = (
+        (os.path.dirname(parsed.output) or ".")
+        if parsed.output
+        else (parsed.outdir or ".")
+    )
 
     # Escape hatch for anything the presets below don't expose.  shlex keeps
     # quoted filter graphs in one piece; ffmpeg resolves duplicates by taking
@@ -603,7 +1015,7 @@ def main():
     mobi_bitrate = parsed.bitrate.strip()
     mobi_passes = parsed.multipass
     mobi_passlog = parsed.passlog.strip()
-    mobi_rc = []          # extra MobiClip rate-control / analysis options
+    mobi_rc = []  # extra MobiClip rate-control / analysis options
     if mobi_bitrate:
         mobi_rc += ["-b:v", mobi_bitrate]
     if parsed.min_qp:
@@ -651,8 +1063,9 @@ def main():
         os.environ["MOBI_SKIP"] = str(parsed.mobi_skip)
 
     if parsed.multipass == 2 and not parsed.bitrate:
-        parser.error("--multipass 2 needs --bitrate; a constant quantizer has nothing to redistribute")
-
+        parser.error(
+            "--multipass 2 needs --bitrate; a constant quantizer has nothing to redistribute"
+        )
 
     # format -> mode | demuxer name | scale (video) | moaud? | cvc
     mode = ""
@@ -660,7 +1073,7 @@ def main():
     scale = ""
     moaud = 0
     cvc = ""
-    
+
     if fmt in ("decode", "play"):
         mode = fmt
         dmx = ""
@@ -741,17 +1154,18 @@ def main():
         # keyframe or frame-rate machinery below applies.
         mode, dmx, scale, moaud, cvc = "aud", fmt, "", 0, ""
     else:
-        print(f"unknown format '{fmt}' "
-              f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|"
-              f"{'|'.join(AUDIO_FORMATS)})")
+        print(
+            f"unknown format '{fmt}' "
+            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|"
+            f"{'|'.join(AUDIO_FORMATS)})"
+        )
         sys.exit(2)
-
 
     if scale_ovr and fmt not in ("3ds_camera", "3ds_camera3d"):
         scale = scale_ovr.replace("x", ":")
     elif audio == "vorbis":
         scale = "384:288"
-    
+
     out_directory = OUTDIR
     # Play mode writes nothing, so don't create (or require) an output directory
     # for it.
@@ -763,11 +1177,13 @@ def main():
         # which doesn't actually exist at run time -- most commonly Windows
         # Defender (or another AV) quarantining the packed exe as a false
         # positive, which is a known issue with PyInstaller+ffmpeg bundles.
-        print(f"error: could not run '{cmd[0]}' ({e}).\n"
-              "This binary is bundled with mobipeg-gui -- if it's missing, your "
-              "antivirus may have quarantined it (a known false positive for "
-              "packaged ffmpeg builds). Check your AV's quarantine/history, "
-              "restore it, and add an exclusion for the mobipeg-gui folder.")
+        print(
+            f"error: could not run '{cmd[0]}' ({e}).\n"
+            "This binary is bundled with mobipeg-gui -- if it's missing, your "
+            "antivirus may have quarantined it (a known false positive for "
+            "packaged ffmpeg builds). Check your AV's quarantine/history, "
+            "restore it, and add an exclusion for the mobipeg-gui folder."
+        )
         sys.exit(2)
 
     def run_cmd(cmd, check=True, hide_err=False):
@@ -798,9 +1214,11 @@ def main():
             print(f"input not found: {inp}")
             sys.exit(2)
         if not os.path.exists(FFPLAY):
-            print(f"ffplay not found at {FFPLAY}\n"
-                  "It is only built when the tree is configured with SDL2; "
-                  "install SDL2 and rebuild, or point FFPLAY at one.")
+            print(
+                f"ffplay not found at {FFPLAY}\n"
+                "It is only built when the tree is configured with SDL2; "
+                "install SDL2 and rebuild, or point FFPLAY at one."
+            )
             sys.exit(2)
         ifmt = input_fmt(inp)
         vf = []
@@ -820,16 +1238,30 @@ def main():
             else:
                 vf.append(f"stereo3d=in={src}:out=m{want[0]}")
                 shown = f"{want} eye only"
-            print(f">> playing  {inp}  (stereoscopic {kind}"
-                  f"{', eyes swapped' if inverted else ''}: {shown})")
+            print(
+                f">> playing  {inp}  (stereoscopic {kind}"
+                f"{', eyes swapped' if inverted else ''}: {shown})"
+            )
         else:
             if kind:
-                print(f"   (stereoscopic {kind} input played as stored; "
-                      "--eyes both shows them side by side)")
+                print(
+                    f"   (stereoscopic {kind} input played as stored; "
+                    "--eyes both shows them side by side)"
+                )
             print(f">> playing  {inp}")
 
-        cmd = [FFPLAY, "-hide_banner", "-loglevel", "error",
-               "-window_title", os.path.basename(inp)] + ifmt + ["-i", inp]
+        cmd = (
+            [
+                FFPLAY,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-window_title",
+                os.path.basename(inp),
+            ]
+            + ifmt
+            + ["-i", inp]
+        )
         if vf:
             cmd += ["-vf", ",".join(vf)]
         cmd += extra_args
@@ -872,29 +1304,58 @@ def main():
                 wanted = [w for w in wanted if w[0] == want]
             pre = ""
             labels, graph, outs = [], [], []
-            graph.append("[0:v]split=%d%s" % (len(wanted), "".join(f"[s{i}]" for i in range(len(wanted)))))
+            graph.append(
+                "[0:v]split=%d%s"
+                % (len(wanted), "".join(f"[s{i}]" for i in range(len(wanted))))
+            )
             for i, (name, mode) in enumerate(wanted):
-                graph.append(f"[s{i}]{pre}stereo3d={mode},sidedata=delete:type=STEREO3D[{name}]")
+                graph.append(
+                    f"[s{i}]{pre}stereo3d={mode},sidedata=delete:type=STEREO3D[{name}]"
+                )
                 labels.append(name)
                 outs.append(os.path.join(outdir_for, f"{base}_{name}{ext}"))
             fc = ";".join(graph)
             print(f">> decoding  {inp}  ({kind}{', eyes swapped' if inverted else ''})")
             for o in outs:
                 print(f"   -> {o}")
-            cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp,
-                   "-filter_complex", fc]
+            cmd = (
+                [FFENC, "-nostdin", "-y", "-loglevel", "error"]
+                + ifmt
+                + ["-i", inp, "-filter_complex", fc]
+            )
             for name, o in zip(labels, outs):
                 # Each eye is a whole movie, so give it the soundtrack too.
                 # '0:a?' keeps the mapping optional for a video-only source.
-                cmd += ["-map", f"[{name}]", "-map", "0:a?",
-                        "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac"] + extra_args + [o]
+                cmd += (
+                    [
+                        "-map",
+                        f"[{name}]",
+                        "-map",
+                        "0:a?",
+                        "-c:v",
+                        "mpeg4",
+                        "-q:v",
+                        "3",
+                        "-c:a",
+                        "aac",
+                    ]
+                    + extra_args
+                    + [o]
+                )
             if not run_cmd(cmd, check=True):
                 # Fall back to video-only: some sources carry audio we can
                 # demux but not decode, and half a movie beats none.
-                cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + \
-                    ["-i", inp, "-filter_complex", fc]
+                cmd = (
+                    [FFENC, "-nostdin", "-y", "-loglevel", "error"]
+                    + ifmt
+                    + ["-i", inp, "-filter_complex", fc]
+                )
                 for name, o in zip(labels, outs):
-                    cmd += ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3"] + extra_args + [o]
+                    cmd += (
+                        ["-map", f"[{name}]", "-c:v", "mpeg4", "-q:v", "3"]
+                        + extra_args
+                        + [o]
+                    )
                 run_cmd(cmd) or sys.exit(1)
             print("\ndecode complete:")
             report_outputs(*outs)
@@ -905,8 +1366,24 @@ def main():
             print(f"   (stereoscopic {kind} input kept packed; --eyes both splits it)")
         print(f">> decoding  {inp}  ->  {watch}")
         dec_vf = []
-        cmd1 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac"] + extra_args + [watch]
-        cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error"] + ifmt + ["-i", inp, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3"] + extra_args + [watch]
+        cmd1 = (
+            [FFENC, "-nostdin", "-y", "-loglevel", "error"]
+            + ifmt
+            + ["-i", inp]
+            + dec_vf
+            + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac"]
+            + extra_args
+            + [watch]
+        )
+        cmd2 = (
+            [FFENC, "-nostdin", "-y", "-loglevel", "error"]
+            + ifmt
+            + ["-i", inp, "-map", "0:v"]
+            + dec_vf
+            + ["-c:v", "mpeg4", "-q:v", "3"]
+            + extra_args
+            + [watch]
+        )
         run_ffenc_fallback(cmd1, cmd2)
         print("\ndecode complete:")
         report_outputs(watch)
@@ -935,12 +1412,14 @@ def main():
             ifmt = input_fmt(inp)
             kind, inverted = resolve_stereo(inp, ifmt, parsed.stereo)
             if not kind:
-                print(f"error: {inp} has no detectable stereoscopic layout (no MKV "
-                      "StereoMode / stereo3d side data found), and only one input "
-                      "was given.\n"
-                      "Either pass --stereo (sbs, sbs-r, tb, tb-r, frameseq, "
-                      "frameseq-r) to state the packing, or pass a second input "
-                      "file as the right eye.")
+                print(
+                    f"error: {inp} has no detectable stereoscopic layout (no MKV "
+                    "StereoMode / stereo3d side data found), and only one input "
+                    "was given.\n"
+                    "Either pass --stereo (sbs, sbs-r, tb, tb-r, frameseq, "
+                    "frameseq-r) to state the packing, or pass a second input "
+                    "file as the right eye."
+                )
                 sys.exit(2)
 
         layout = layout_arg
@@ -951,16 +1430,22 @@ def main():
         eyew, eyeh = scale.split(":")
 
         if dual_file:
-            print(f">> encoding 3D  L={inp}  R={inp2}  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})")
+            print(
+                f">> encoding 3D  L={inp}  R={inp2}  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})"
+            )
             filter_str = f"[0:v:0]scale={eyew}:{eyeh}[l];[1:v:0]scale={eyew}:{eyeh}[r];[l][r]hstack=inputs=2[v]"
             in_args = input_fmt(inp) + ["-i", inp] + input_fmt(inp2) + ["-i", inp2]
         else:
             left_mode, right_mode = eye_filters(kind, inverted)
-            print(f">> encoding 3D  {inp}  ({kind}{', eyes swapped' if inverted else ''})  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})")
-            filter_str = (f"[0:v:0]split=2[sl][sr];"
-                           f"[sl]stereo3d={left_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[l];"
-                           f"[sr]stereo3d={right_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[r];"
-                           f"[l][r]hstack=inputs=2[v]")
+            print(
+                f">> encoding 3D  {inp}  ({kind}{', eyes swapped' if inverted else ''})  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})"
+            )
+            filter_str = (
+                f"[0:v:0]split=2[sl][sr];"
+                f"[sl]stereo3d={left_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[l];"
+                f"[sr]stereo3d={right_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[r];"
+                f"[l][r]hstack=inputs=2[v]"
+            )
             in_args = input_fmt(inp) + ["-i", inp]
 
         kf_opts = []
@@ -975,23 +1460,72 @@ def main():
             aud_opts = ["-an"]
         else:
             aud_opts = ["-map", "0:a:0?", "-mo_audio", audio]
-        cmd = [FFENC, "-nostdin", "-y"] + in_args + ["-filter_complex", filter_str, "-map", "[v]"] + aud_opts + ["-c:v", cvc, "-mo_layout", str(layout)] + kf_opts + extra_args + [container]
+        cmd = (
+            [FFENC, "-nostdin", "-y"]
+            + in_args
+            + ["-filter_complex", filter_str, "-map", "[v]"]
+            + aud_opts
+            + ["-c:v", cvc, "-mo_layout", str(layout)]
+            + kf_opts
+            + extra_args
+            + [container]
+        )
         run_cmd(cmd) or sys.exit(1)
-        
+
         if roundtrip:
             print(f">> decoding  {container}  ->  {watch}  (single SBS video, mpeg4)")
-            cmd1 = [FFENC, "-y", "-loglevel", "error", "-f", dmx, "-i", container, "-map", "0:0", "-c:v", "mpeg4", "-q:v", "3", "-map", "0:a:0?", "-c:a", "aac", watch]
-            cmd2 = [FFENC, "-y", "-loglevel", "error", "-f", dmx, "-i", container, "-map", "0:v", "-c:v", "mpeg4", "-q:v", "3", watch]
+            cmd1 = [
+                FFENC,
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                dmx,
+                "-i",
+                container,
+                "-map",
+                "0:0",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "3",
+                "-map",
+                "0:a:0?",
+                "-c:a",
+                "aac",
+                watch,
+            ]
+            cmd2 = [
+                FFENC,
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                dmx,
+                "-i",
+                container,
+                "-map",
+                "0:v",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "3",
+                watch,
+            ]
             run_ffenc_fallback(cmd1, cmd2)
-            
+
             print("\n3D round-trip complete (frame is left|right side-by-side):")
             report_outputs(container, watch)
         else:
             print("\n3D encode complete:")
             report_outputs(container)
         print()
-        
-        p = subprocess.run([FFENC, "-hide_banner", "-f", dmx, "-i", container], stderr=subprocess.PIPE, text=True)
+
+        p = subprocess.run(
+            [FFENC, "-hide_banner", "-f", dmx, "-i", container],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         for line in p.stderr.splitlines():
             if "Stream" in line or "Duration" in line:
                 print("  " + line)
@@ -1009,31 +1543,77 @@ def main():
             sys.exit(2)
         inp = preprocess_input(inp, OUTDIR)
         inp2 = preprocess_input(inp2, OUTDIR)
-        stem = resolve_output_stem(parsed.output, f"roundtrip_3ds_camera3d_{audio}", OUTDIR)
+        stem = resolve_output_stem(
+            parsed.output, f"roundtrip_3ds_camera3d_{audio}", OUTDIR
+        )
         container = f"{stem}.avi"
         watch = f"{stem}.mp4"
         print(f">> encoding 3DS Camera 3D  L={inp}  R={inp2}  ->  {container}")
 
-        fc = ("[0:v:0]scale=480:240,setsar=1[l];"
-              "[1:v:0]scale=480:240,setsar=1[r]")
-        cmd = ([FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp]
-               + input_fmt(inp2) + ["-i", inp2, "-filter_complex", fc,
-                                     "-map", "[l]", "-map", "[r]"])
+        fc = "[0:v:0]scale=480:240,setsar=1[l];" "[1:v:0]scale=480:240,setsar=1[r]"
+        cmd = (
+            [FFENC, "-nostdin", "-y"]
+            + input_fmt(inp)
+            + ["-i", inp]
+            + input_fmt(inp2)
+            + ["-i", inp2, "-filter_complex", fc, "-map", "[l]", "-map", "[r]"]
+        )
         if audio == "none":
             cmd += ["-an"]
         else:
-            cmd += ["-map", "0:a:0?", "-c:a", "adpcm_ima_wav",
-                    "-ar", "16000", "-ac", "1"]
-        cmd += ["-c:v", "mjpeg", "-qscale:v", str(vx_quant if vx_quant > 0 else 3),
-                "-pix_fmt", "yuvj420p", "-r", "20"] + extra_args + [container]
+            cmd += [
+                "-map",
+                "0:a:0?",
+                "-c:a",
+                "adpcm_ima_wav",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+            ]
+        cmd += (
+            [
+                "-c:v",
+                "mjpeg",
+                "-qscale:v",
+                str(vx_quant if vx_quant > 0 else 3),
+                "-pix_fmt",
+                "yuvj420p",
+                "-r",
+                "20",
+            ]
+            + extra_args
+            + [container]
+        )
         run_cmd(cmd) or sys.exit(1)
 
         if roundtrip:
             print(f">> decoding  {container}  ->  {watch}  (left|right SBS preview)")
             preview_fc = "[0:v:0][0:v:1]hstack=inputs=2[v]"
-            cmd = [FFENC, "-nostdin", "-y", "-loglevel", "error", "-f", "avi",
-                   "-i", container, "-filter_complex", preview_fc, "-map", "[v]",
-                   "-map", "0:a:0?", "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
+            cmd = [
+                FFENC,
+                "-nostdin",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "avi",
+                "-i",
+                container,
+                "-filter_complex",
+                preview_fc,
+                "-map",
+                "[v]",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "3",
+                "-c:a",
+                "aac",
+                watch,
+            ]
             run_cmd(cmd) or sys.exit(1)
         print("\nencode complete:")
         report_outputs(container, *([watch] if roundtrip else []))
@@ -1053,7 +1633,7 @@ def main():
         out_ext = AUDIO_FORMAT_EXTENSIONS.get(fmt, fmt)
         stem = resolve_output_stem(parsed.output, f"roundtrip_{fmt}_{choice}", OUTDIR)
         container = f"{stem}.{out_ext}"
-        watch     = f"{stem}.wav"
+        watch = f"{stem}.wav"
 
         enc_opts = ["-vn"] + list(codecs[choice])
         # -ar after the codec so it overrides a rate the format pins itself.
@@ -1061,15 +1641,34 @@ def main():
             enc_opts.extend(["-ar", str(audio_rate)])
 
         print(f">> encoding  {inp}  ->  {container}")
-        cmd = ([FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp]
-               + enc_opts + extra_args + [container])
+        cmd = (
+            [FFENC, "-nostdin", "-y"]
+            + input_fmt(inp)
+            + ["-i", inp]
+            + enc_opts
+            + extra_args
+            + [container]
+        )
         run_cmd(cmd) or sys.exit(1)
 
         if roundtrip:
             print(f">> decoding  {container}  ->  {watch}")
-            run_cmd([FFENC, "-nostdin", "-y", "-loglevel", "error",
-                     "-f", AUDIO_FORMAT_DEMUXERS.get(fmt, fmt), "-i", container,
-                     "-c:a", "pcm_s16le", watch]) or sys.exit(1)
+            run_cmd(
+                [
+                    FFENC,
+                    "-nostdin",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    AUDIO_FORMAT_DEMUXERS.get(fmt, fmt),
+                    "-i",
+                    container,
+                    "-c:a",
+                    "pcm_s16le",
+                    watch,
+                ]
+            ) or sys.exit(1)
             print("\nround-trip complete:")
             report_outputs(container, watch)
         else:
@@ -1077,9 +1676,18 @@ def main():
             report_outputs(container)
         print()
 
-        p = subprocess.run([FFENC, "-hide_banner", "-f",
-                            AUDIO_FORMAT_DEMUXERS.get(fmt, fmt), "-i", container],
-                           stderr=subprocess.PIPE, text=True)
+        p = subprocess.run(
+            [
+                FFENC,
+                "-hide_banner",
+                "-f",
+                AUDIO_FORMAT_DEMUXERS.get(fmt, fmt),
+                "-i",
+                container,
+            ],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         for line in p.stderr.splitlines():
             if "Stream" in line or "Duration" in line:
                 print("  " + line)
@@ -1097,19 +1705,31 @@ def main():
     # not .hvqm4, and the fastvideo muxer is named "fv" not "fastvideo" --
     # ffmpeg picks the muxer from the output filename, so the container name
     # has to match even though the fmt string doesn't.
-    out_ext = {"hvqm4": "h4m", "fastvideo": "fv",
-               "gba_ads": "mmstr", "gba_hydrogen": "mmstr",
-               "wii_photo": "avi", "nintendo_channel": "3gp",
-               "3ds_camera": "avi", "factor5": "vid",
-               "smoflex": "moflex",
-               "super_moflex": "moflex", "smoflex3d": "moflex",
-               "super_moflex3d": "moflex"}.get(fmt, fmt)
+    out_ext = {
+        "hvqm4": "h4m",
+        "fastvideo": "fv",
+        "gba_ads": "mmstr",
+        "gba_hydrogen": "mmstr",
+        "wii_photo": "avi",
+        "nintendo_channel": "3gp",
+        "3ds_camera": "avi",
+        "factor5": "vid",
+        "smoflex": "moflex",
+        "super_moflex": "moflex",
+        "smoflex3d": "moflex",
+        "super_moflex3d": "moflex",
+    }.get(fmt, fmt)
     container = f"{stem}.{out_ext}"
     watch = f"{stem}.mp4"
-    
+
     enc_opts = []
     extra_inputs = []
-    has_super = getattr(parsed, "super_moflex", False) or fmt in ("smoflex", "super_moflex", "smoflex3d", "super_moflex3d")
+    has_super = getattr(parsed, "super_moflex", False) or fmt in (
+        "smoflex",
+        "super_moflex",
+        "smoflex3d",
+        "super_moflex3d",
+    )
     if moaud == 1:
         if audio == "none":
             # No audio: drop the input's audio stream so only video is muxed.
@@ -1121,7 +1741,15 @@ def main():
                 enc_opts.extend(["-mo_audio", "none"])
         else:
             enc_opts.extend(["-mo_audio", audio])
-            if fmt in ("mo", "moflex", "moflex3d", "smoflex", "super_moflex", "smoflex3d", "super_moflex3d"):
+            if fmt in (
+                "mo",
+                "moflex",
+                "moflex3d",
+                "smoflex",
+                "super_moflex",
+                "smoflex3d",
+                "super_moflex3d",
+            ):
                 if not has_super or not (parsed.audio2 or parsed.srt or parsed.poster):
                     enc_opts.extend(["-map", "0:v", "-map", "0:a?"])
                 else:
@@ -1144,7 +1772,15 @@ def main():
         if audio == "fastaudio":
             enc_opts.extend(["-sc_threshold", "0"])
         enc_opts.extend(mobi_rc)
-    elif fmt in ["mo", "moflex", "moflex3d", "smoflex", "super_moflex", "smoflex3d", "super_moflex3d"]:
+    elif fmt in [
+        "mo",
+        "moflex",
+        "moflex3d",
+        "smoflex",
+        "super_moflex",
+        "smoflex3d",
+        "super_moflex3d",
+    ]:
         enc_opts.extend(["-mobiclip", "1"])
         if vx_quant > 0 and not mobi_bitrate:
             enc_opts.extend(["-qp", str(vx_quant)])
@@ -1161,7 +1797,14 @@ def main():
             enc_opts.extend(["-g", str(gop)])
             print(f"   keyframes: ~{count} evenly spaced (-g {gop}, scene cuts kept)")
 
-        if fmt in ("moflex", "moflex3d", "smoflex", "super_moflex", "smoflex3d", "super_moflex3d"):
+        if fmt in (
+            "moflex",
+            "moflex3d",
+            "smoflex",
+            "super_moflex",
+            "smoflex3d",
+            "super_moflex3d",
+        ):
             # Preserve the source's chunk-padding block size on round trip
             # (2048 = 3DS SDK encoder, 4096 = retail) instead of always
             # falling back to retail's 4096, which would re-pad every chunk
@@ -1175,7 +1818,9 @@ def main():
                 input_cursor = 1
                 if parsed.audio2:
                     extra_inputs.extend(["-i", parsed.audio2])
-                    enc_opts.extend(["-map", f"{input_cursor}:a:0", "-c:a:1", "pcm_s16le"])
+                    enc_opts.extend(
+                        ["-map", f"{input_cursor}:a:0", "-c:a:1", "pcm_s16le"]
+                    )
                     if parsed.lang2:
                         enc_opts.extend(["-metadata:s:a:1", f"language={parsed.lang2}"])
                     input_cursor += 1
@@ -1184,11 +1829,23 @@ def main():
                     enc_opts.extend(["-map", f"{input_cursor}:s:0", "-c:s", "subrip"])
                     parts = os.path.basename(srt_path).split(".")
                     if len(parts) >= 3 and len(parts[-2]) in (2, 3):
-                        enc_opts.extend([f"-metadata:s:s:{input_cursor - 1}", f"language={parts[-2]}"])
+                        enc_opts.extend(
+                            [
+                                f"-metadata:s:s:{input_cursor - 1}",
+                                f"language={parts[-2]}",
+                            ]
+                        )
                     input_cursor += 1
                 if parsed.poster:
                     extra_inputs.extend(["-i", parsed.poster])
-                    enc_opts.extend(["-map", f"{input_cursor}:v:0", "-disposition:v:1", "attached_pic"])
+                    enc_opts.extend(
+                        [
+                            "-map",
+                            f"{input_cursor}:v:0",
+                            "-disposition:v:1",
+                            "attached_pic",
+                        ]
+                    )
                     input_cursor += 1
     elif fmt == "vx":
         # Same audio codec as .mods codebook/SX (VXDS AFrame == SX bitstream);
@@ -1244,24 +1901,41 @@ def main():
         if vx_quant > 0:
             enc_opts.extend(["-qscale:v", str(vx_quant)])
         else:
-            enc_opts.extend(["-b:v", "6000k", "-maxrate", "8000k",
-                             "-bufsize", "1835k"])
+            enc_opts.extend(["-b:v", "6000k", "-maxrate", "8000k", "-bufsize", "1835k"])
         enc_opts.extend(["-g", "15"])
         if audio == "none":
             enc_opts.append("-an")
         else:
-            enc_opts.extend(["-map", "0:a:0?", "-c:a", audio,
-                             "-b:a", "192k", "-ar",
-                             str(audio_rate if audio_rate > 0 else 48000),
-                             "-ac", "2"])
+            enc_opts.extend(
+                [
+                    "-map",
+                    "0:a:0?",
+                    "-c:a",
+                    audio,
+                    "-b:a",
+                    "192k",
+                    "-ar",
+                    str(audio_rate if audio_rate > 0 else 48000),
+                    "-ac",
+                    "2",
+                ]
+            )
     elif fmt == "rvid":
         # RocketVideo: 16bpp (RGB555/565) frames, optional Nintendo LZ10, encoded
         # entirely by ffmpeg's rvid encoder. The encoder consumes rgb24 and packs
         # to 16bpp itself. Audio is raw PCM (the rvid muxer's native stream).
-        enc_opts.extend(["-mode", rvid_mode,
-                         "-compress", "0" if rvid_no_compress else "1",
-                         "-interlaced", "1" if rvid_interlaced else "0",
-                         "-dither", "0" if rvid_no_dither else "1"])
+        enc_opts.extend(
+            [
+                "-mode",
+                rvid_mode,
+                "-compress",
+                "0" if rvid_no_compress else "1",
+                "-interlaced",
+                "1" if rvid_interlaced else "0",
+                "-dither",
+                "0" if rvid_no_dither else "1",
+            ]
+        )
         if audio == "none":
             enc_opts.append("-an")
         else:
@@ -1299,34 +1973,65 @@ def main():
     elif fmt in ("gba_ads", "gba_hydrogen"):
         # GBA audio remains decode-only. The encoder writes a video-only
         # .mmstr and selects the compressor used by the requested lineage.
-        enc_opts.extend(["-an", "-pix_fmt", "rgb24", "-compression",
-                         "1" if fmt == "gba_hydrogen" else "0"])
+        enc_opts.extend(
+            [
+                "-an",
+                "-pix_fmt",
+                "rgb24",
+                "-compression",
+                "1" if fmt == "gba_hydrogen" else "0",
+            ]
+        )
     elif fmt == "wii_photo":
         # The Photo Channel's documented video format is Motion JPEG AVI.
         # PCM is broadly interoperable, but its audio component is not
         # guaranteed by Nintendo's player, so callers can choose --audio none.
-        enc_opts.extend(["-qscale:v", str(vx_quant if vx_quant > 0 else 3),
-                         "-pix_fmt", "yuvj420p"])
+        enc_opts.extend(
+            ["-qscale:v", str(vx_quant if vx_quant > 0 else 3), "-pix_fmt", "yuvj420p"]
+        )
         if audio == "none":
             enc_opts.append("-an")
         else:
-            enc_opts.extend(["-c:a", "pcm_s16le", "-ar",
-                             str(audio_rate if audio_rate > 0 else 32000)])
+            enc_opts.extend(
+                [
+                    "-c:a",
+                    "pcm_s16le",
+                    "-ar",
+                    str(audio_rate if audio_rate > 0 else 32000),
+                ]
+            )
     elif fmt == "nintendo_channel":
         # Match the UK Nintendo Channel 2009 3GP profile: 3gp6 + AVC
         # constrained baseline L2.1 + stereo 32 kHz AAC-LC. libx264 is also
         # required for the project's MobiClip encoder.
-        enc_opts.extend(["-profile:v", "constrained_baseline", "-level:v", "2.1",
-                         "-pix_fmt", "yuv420p", "-b:v", mobi_bitrate or "484k",
-                         "-g", "250", "-brand", "3gp6",
-                         "-video_track_timescale", "1000000", "-movflags", "+faststart"])
+        enc_opts.extend(
+            [
+                "-profile:v",
+                "constrained_baseline",
+                "-level:v",
+                "2.1",
+                "-pix_fmt",
+                "yuv420p",
+                "-b:v",
+                mobi_bitrate or "484k",
+                "-g",
+                "250",
+                "-brand",
+                "3gp6",
+                "-video_track_timescale",
+                "1000000",
+                "-movflags",
+                "+faststart",
+            ]
+        )
         if audio == "none":
             enc_opts.append("-an")
         else:
             enc_opts.extend(["-c:a", "aac", "-b:a", "50k", "-ar", "32000", "-ac", "2"])
     elif fmt == "3ds_camera":
-        enc_opts.extend(["-qscale:v", str(vx_quant if vx_quant > 0 else 3),
-                         "-pix_fmt", "yuvj420p"])
+        enc_opts.extend(
+            ["-qscale:v", str(vx_quant if vx_quant > 0 else 3), "-pix_fmt", "yuvj420p"]
+        )
         if audio == "none":
             enc_opts.append("-an")
         else:
@@ -1352,13 +2057,13 @@ def main():
         fps_filter = "fps=25"
     elif fmt in ("factor5", "f5vid"):
         fps_filter = "fps=30000/1001"
-        
+
     filters = []
     if scale:
         filters.append(f"scale={scale}")
     if fps_filter:
         filters.append(fps_filter)
-        
+
     if fmt == "mods":
         ycgco = "format=gbrp,geq=g='(r(X,Y)+2*g(X,Y)+b(X,Y))/4':b='(2*g(X,Y)-r(X,Y)-b(X,Y))/4+128':r='(r(X,Y)-b(X,Y))/2+128',mergeplanes=0x000102:yuv444p,format=yuv420p"
         filters.append(ycgco)
@@ -1366,11 +2071,11 @@ def main():
         # The camera's 480x240 pixels are square. Do not preserve a source
         # video's display aspect ratio through the scale filter.
         filters.append("setsar=1")
-        
+
     vf = []
     if filters:
         vf = ["-vf", ",".join(filters)]
-        
+
     # mods SX/codebook: the DS re-primes its audio decoder at every video
     # keyframe (retail writes an intra aframe there).  Do a fast video-only pass
     # to learn the keyframe frame indices, map each to the audio period position
@@ -1379,13 +2084,29 @@ def main():
     # matches retail and doesn't stutter on the game's per-keyframe reset.
     if fmt == "mods" and audio == "codebook":
         kf_probe = os.path.join(OUTDIR or ".", ".kf_probe.mods")
-        probe_cmd = ([FFENC, "-nostdin", "-y", "-loglevel", "error"]
-                     + input_fmt(inp) + ["-i", inp] + vf
-                     + ["-an", "-mo_audio", "none", "-c:v", cvc,
-                        "-mobiclip", "2", "-moflex", "0", "-g", "100000", kf_probe])
+        probe_cmd = (
+            [FFENC, "-nostdin", "-y", "-loglevel", "error"]
+            + input_fmt(inp)
+            + ["-i", inp]
+            + vf
+            + [
+                "-an",
+                "-mo_audio",
+                "none",
+                "-c:v",
+                cvc,
+                "-mobiclip",
+                "2",
+                "-moflex",
+                "0",
+                "-g",
+                "100000",
+                kf_probe,
+            ]
+        )
         if subprocess.run(probe_cmd).returncode == 0:
             kfs = read_mods_keyframes(kf_probe)
-            sr  = audio_rate if audio_rate > 0 else probe_audio_rate(inp)
+            sr = audio_rate if audio_rate > 0 else probe_audio_rate(inp)
             src_fps = probe_fps(inp)
             if kfs and sr and src_fps:
                 spf = sr / src_fps
@@ -1400,16 +2121,33 @@ def main():
     fps_disp = f", {fps_filter}" if fps_filter else ""
     scale_disp = scale if scale else "source"
 
-    base = [FFENC, "-nostdin", "-y"] + input_fmt(inp) + ["-i", inp] + extra_inputs + vf + enc_opts
+    base = (
+        [FFENC, "-nostdin", "-y"]
+        + input_fmt(inp)
+        + ["-i", inp]
+        + extra_inputs
+        + vf
+        + enc_opts
+    )
     if mobi_passes == 2:
         # libx264 keeps its own statistics file (x264's psz_stat_out); ffmpeg's
         # -passlogfile drives avctx->stats_out, which this encoder never fills,
         # so the file has to be named through -x264-params.
         statfile = mobi_passlog or (container + ".pass")
         print(f">> pass 1/2  analysis  ->  {statfile}")
-        run_cmd(base + ["-pass", "1", "-x264-params", f"stats={statfile}"] + extra_args + [container]) or sys.exit(1)
+        run_cmd(
+            base
+            + ["-pass", "1", "-x264-params", f"stats={statfile}"]
+            + extra_args
+            + [container]
+        ) or sys.exit(1)
         print(">> pass 2/2  encode")
-        run_cmd(base + ["-pass", "2", "-x264-params", f"stats={statfile}"] + extra_args + [container]) or sys.exit(1)
+        run_cmd(
+            base
+            + ["-pass", "2", "-x264-params", f"stats={statfile}"]
+            + extra_args
+            + [container]
+        ) or sys.exit(1)
         for leftover in (statfile, statfile + ".mbtree", statfile + ".temp"):
             try:
                 os.remove(leftover)
@@ -1417,24 +2155,48 @@ def main():
                 pass
     else:
         run_cmd(base + extra_args + [container]) or sys.exit(1)
-    
+
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
         # The mods decoder converts its YCgCo planes to RGB itself now, so the
         # round-trip needs no colour filter of its own.
         dec_vf = []
-        cmd1 = [FFENC, "-nostdin", "-y", "-loglevel", "error", "-f", dmx, "-i", container] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
-        cmd2 = [FFENC, "-nostdin", "-y", "-loglevel", "error", "-f", dmx, "-i", container, "-map", "0:v"] + dec_vf + ["-c:v", "mpeg4", "-q:v", "3", watch]
+        cmd1 = (
+            [FFENC, "-nostdin", "-y", "-loglevel", "error", "-f", dmx, "-i", container]
+            + dec_vf
+            + ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", watch]
+        )
+        cmd2 = (
+            [
+                FFENC,
+                "-nostdin",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                dmx,
+                "-i",
+                container,
+                "-map",
+                "0:v",
+            ]
+            + dec_vf
+            + ["-c:v", "mpeg4", "-q:v", "3", watch]
+        )
         run_ffenc_fallback(cmd1, cmd2)
-        
+
         print("\nround-trip complete:")
         report_outputs(container, watch)
     else:
         print("\nencode complete:")
         report_outputs(container)
     print()
-    
-    p = subprocess.run([FFENC, "-hide_banner", "-f", dmx, "-i", container], stderr=subprocess.PIPE, text=True)
+
+    p = subprocess.run(
+        [FFENC, "-hide_banner", "-f", dmx, "-i", container],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     for line in p.stderr.splitlines():
         if "Stream" in line or "Duration" in line:
             print("  " + line)
