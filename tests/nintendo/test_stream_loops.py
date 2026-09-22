@@ -214,3 +214,26 @@ class StreamLoopTests(unittest.TestCase):
                                                          '-f', 's16le', '-'], capture_output=True, timeout=15)
                                 self.assertEqual(result.returncode, 0, result.stderr.decode())
                                 self.assertEqual(result.stdout, raw)
+
+    def test_sample_rate_field_limits(self):
+        ffprobe = os.environ.get('FFPROBE', str(Path(__file__).resolve().parents[2] / 'ffprobe'))
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.raw'
+            source.write_bytes(bytes(128))
+            for fmt in ('brstm', 'bfstm', 'bcstm'):
+                for rate in (65535, 65536, 96000):
+                    with self.subTest(fmt=fmt, rate=rate):
+                        path = Path(directory) / ('audio.' + fmt)
+                        result = subprocess.run([FFMPEG, '-v', 'error', '-y', '-f', 's16le',
+                                                 '-ar', str(rate), '-ac', '1', '-i', str(source),
+                                                 '-c:a', 'pcm_s16be_planar', str(path)],
+                                                capture_output=True, timeout=15)
+                        if fmt == 'brstm' and rate > 65535:
+                            self.assertGreater(result.returncode, 0)
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stderr.decode())
+                            probe = subprocess.run([ffprobe, '-v', 'error', '-show_entries',
+                                                    'stream=sample_rate', '-of', 'csv=p=0', str(path)],
+                                                   capture_output=True, timeout=15)
+                            self.assertEqual(probe.returncode, 0, probe.stderr.decode())
+                            self.assertEqual(int(probe.stdout.strip()), rate)
