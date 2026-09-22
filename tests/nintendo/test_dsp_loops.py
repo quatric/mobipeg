@@ -58,3 +58,46 @@ class DSPLoopTests(unittest.TestCase):
                 with self.subTest(start=start, end=end):
                     result, _ = self.encode(directory, 'dsp', start, end)
                     self.assertGreater(result.returncode, 0)
+
+    def test_invalid_dsp_headers_are_rejected_when_format_is_forced(self):
+        ffprobe = os.environ.get('FFPROBE', str(Path(__file__).resolve().parents[2] / 'ffprobe'))
+        with tempfile.TemporaryDirectory() as directory:
+            result, path = self.encode(directory, 'dsp', 0)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            original = path.read_bytes()
+            for offset, fmt, value in ((14, '>H', 1), (0x4a, '>H', 15), (0, '>I', 0xffffffff)):
+                with self.subTest(offset=offset):
+                    data = bytearray(original)
+                    struct.pack_into(fmt, data, offset, value)
+                    path.write_bytes(data)
+                    probe = subprocess.run([ffprobe, '-v', 'error', '-f', 'dsp', '-show_streams', str(path)],
+                                           capture_output=True, timeout=15)
+                    self.assertGreater(probe.returncode, 0, probe.stderr.decode())
+
+    def test_invalid_multichannel_dsp_headers_are_rejected(self):
+        ffprobe = os.environ.get('FFPROBE', str(Path(__file__).resolve().parents[2] / 'ffprobe'))
+        with tempfile.TemporaryDirectory() as directory:
+            result, path = self.encode(directory, 'dsp', 0)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            original = path.read_bytes()
+            for case in ('valid', 'rate', 'format', 'packet_size'):
+                with self.subTest(case=case):
+                    header = bytearray(original[:96])
+                    struct.pack_into('>HH', header, 0x4a, 2, 0)
+                    if case == 'packet_size':
+                        # Each channel fits in an int, but their combined packet does not.
+                        struct.pack_into('>I', header, 0, 2000000000)
+                    sibling = bytearray(header)
+                    if case == 'rate':
+                        struct.pack_into('>I', sibling, 8, 48000)
+                    elif case == 'format':
+                        struct.pack_into('>H', sibling, 14, 1)
+                    path.write_bytes(header + sibling + original[96:] * 2)
+                    probe = subprocess.run([ffprobe, '-v', 'error', '-f', 'dsp',
+                                            '-show_streams', str(path)],
+                                           capture_output=True, timeout=15)
+                    if case == 'valid':
+                        self.assertEqual(probe.returncode, 0, probe.stderr.decode())
+                        self.assertIn(b'channels=2', probe.stdout)
+                    else:
+                        self.assertGreater(probe.returncode, 0, probe.stderr.decode())
