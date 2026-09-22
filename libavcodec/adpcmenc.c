@@ -443,7 +443,11 @@ typedef struct ADPCMEncodeContext {
     int16_t *thp_pcm[6];
     int      thp_pcm_len;   /* samples per channel accumulated */
     int      thp_pcm_cap;   /* capacity per channel */
-    int      thp_flushed;   /* single output packet already emitted */
+    int      thp_flushed;   /* all output packets emitted */
+    uint8_t *thp_enc;       /* whole encoded stream, planar, while draining */
+    int      thp_out_blocks;/* 14-sample blocks per channel already output */
+    int64_t  thp_first_pts; /* pts of the first input frame */
+    int      thp_have_pts;
 } ADPCMEncodeContext;
 
 #define FREEZE_INTERVAL 128
@@ -606,6 +610,7 @@ static av_cold int adpcm_encode_close(AVCodecContext *avctx)
     av_freep(&s->trellis_hash);
     for (int ch = 0; ch < 6; ch++)
         av_freep(&s->thp_pcm[ch]);
+    av_freep(&s->thp_enc);
 
     return 0;
 }
@@ -1129,7 +1134,7 @@ static void adpcm_afc_encode_block(const int16_t *samples, int count,
 
 /* THP is encoded specially: the whole input is buffered so the DSP-ADPCM
  * predictor coefficients can be derived over the entire channel (they must be
- * constant stream-wide), then everything is emitted as one packet at drain. */
+ * constant stream-wide), then everything is emitted at drain. */
 static int adpcm_encode_thp(AVCodecContext *avctx, AVPacket *avpkt,
                             const AVFrame *frame, int *got_packet_ptr)
 {
@@ -1140,6 +1145,11 @@ static int adpcm_encode_thp(AVCodecContext *avctx, AVPacket *avpkt,
     if (frame) {
         const int16_t *const *samples_p = (const int16_t *const *)frame->extended_data;
         int need = c->thp_pcm_len + frame->nb_samples;
+
+        if (!c->thp_have_pts) {
+            c->thp_first_pts = frame->pts != AV_NOPTS_VALUE ? frame->pts : 0;
+            c->thp_have_pts  = 1;
+        }
 
         if (need > c->thp_pcm_cap) {
             int ncap = FFMAX(need, c->thp_pcm_cap ? c->thp_pcm_cap * 2 : 1 << 16);
@@ -1158,42 +1168,69 @@ static int adpcm_encode_thp(AVCodecContext *avctx, AVPacket *avpkt,
         return 0;   /* buffer only; nothing emitted yet */
     }
 
-    /* Draining. */
+    /* Draining. The predictors are derived over the whole channel once, the
+     * whole channel is encoded in one pass (so the ADPCM history runs across
+     * packet boundaries), and the result is then handed out as a series of
+     * frame_size packets with real timestamps. Muxers append each channel's
+     * part of every packet, so the output is the same as one big packet, but
+     * timestamp-based consumers (the -shortest sync queue in ffmpeg) can drop
+     * the tail packet by packet instead of losing the whole stream. */
     if (c->thp_flushed || c->thp_pcm_len == 0)
         return 0;
 
     int nb     = c->thp_pcm_len;
     int blocks = (nb + 13) / 14;
-    int pkt_size = blocks * 8 * channels;
     uint8_t *dst, *side;
 
-    if ((ret = ff_get_encode_buffer(avctx, avpkt, pkt_size, 0)) < 0)
-        return ret;
-    dst = avpkt->data;
-
-    for (int ch = 0; ch < channels; ch++) {
-        int h1 = 0, h2 = 0;
-        ret = thp_correlate_coefs(c->thp_pcm[ch], nb, c->thp_dsp_coeffs[ch]);
-        if (ret < 0)
-            return ret;
-        for (int b = 0; b < blocks; b++) {
-            int count = FFMIN(14, nb - b * 14);
-            adpcm_thp_encode_block(&c->thp_pcm[ch][b * 14], count,
-                                   dst + (ch * blocks + b) * 8,
-                                   c->thp_dsp_coeffs[ch], &h1, &h2);
+    if (!c->thp_enc) {
+        c->thp_enc = av_malloc_array(blocks * 8, channels);
+        if (!c->thp_enc)
+            return AVERROR(ENOMEM);
+        for (int ch = 0; ch < channels; ch++) {
+            int h1 = 0, h2 = 0;
+            ret = thp_correlate_coefs(c->thp_pcm[ch], nb, c->thp_dsp_coeffs[ch]);
+            if (ret < 0)
+                return ret;
+            for (int b = 0; b < blocks; b++) {
+                int count = FFMIN(14, nb - b * 14);
+                adpcm_thp_encode_block(&c->thp_pcm[ch][b * 14], count,
+                                       c->thp_enc + (ch * blocks + b) * 8,
+                                       c->thp_dsp_coeffs[ch], &h1, &h2);
+            }
         }
     }
 
-    side = av_packet_new_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, 32 * channels);
-    if (!side)
-        return AVERROR(ENOMEM);
-    for (int ch = 0; ch < channels; ch++)
-        for (int i = 0; i < 16; i++)
-            AV_WB16(side + ch * 32 + i * 2, c->thp_dsp_coeffs[ch][i]);
+    {
+        int chunk_blocks = FFMAX(1, avctx->frame_size / 14);
+        int b0 = c->thp_out_blocks;
+        int nblk = FFMIN(chunk_blocks, blocks - b0);
+        int per_ch = nblk * 8;
 
-    avpkt->pts      = 0;
-    avpkt->duration = nb;
-    c->thp_flushed  = 1;
+        if ((ret = ff_get_encode_buffer(avctx, avpkt, per_ch * channels, 0)) < 0)
+            return ret;
+        dst = avpkt->data;
+        for (int ch = 0; ch < channels; ch++)
+            memcpy(dst + ch * per_ch, c->thp_enc + (ch * blocks + b0) * 8, per_ch);
+
+        /* Every packet carries the (stream-constant) table, so a muxer that
+         * picks it up from whichever packet it sees first gets it right. */
+        side = av_packet_new_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, 32 * channels);
+        if (!side)
+            return AVERROR(ENOMEM);
+        for (int ch = 0; ch < channels; ch++)
+            for (int i = 0; i < 16; i++)
+                AV_WB16(side + ch * 32 + i * 2, c->thp_dsp_coeffs[ch][i]);
+
+        avpkt->pts      = c->thp_first_pts + (int64_t)b0 * 14;
+        avpkt->dts      = avpkt->pts;
+        avpkt->duration = FFMIN(nblk * 14, nb - b0 * 14);
+
+        c->thp_out_blocks += nblk;
+        if (c->thp_out_blocks >= blocks) {
+            c->thp_flushed = 1;
+            av_freep(&c->thp_enc);
+        }
+    }
     *got_packet_ptr = 1;
     return 0;
 }
