@@ -93,3 +93,11 @@ class ASTPacketTests(unittest.TestCase):
                                    '-f', 's16le', '-'], capture_output=True, timeout=15)
             self.assertEqual(seek.returncode, 0, seek.stderr.decode())
             self.assertEqual(seek.stdout, full.stdout[64:])
+
+    def test_nonseekable_output_is_rejected_before_header(self):
+        result = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i',
+                                 'sine=frequency=440:sample_rate=32000', '-t', '0.01',
+                                 '-c:a', 'pcm_s16be_planar', '-f', 'ast', 'pipe:1'],
+                                capture_output=True, timeout=15)
+        self.assertGreater(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout, b'')
