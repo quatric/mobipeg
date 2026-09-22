@@ -129,6 +129,8 @@ static int ast_read_packet(AVFormatContext *s, AVPacket *pkt)
         }
         pkt->stream_index = 0;
         pkt->pos = pos;
+        pkt->pts = pkt->dts = s->streams[0]->duration - c->samples_left;
+        pkt->duration = FFMIN(produced, c->samples_left);
 
         /* A block holds whole frames, so the last one runs past the end of
          * the stream by up to 15 samples of padding. The header's sample
@@ -153,6 +155,31 @@ static int ast_read_packet(AVFormatContext *s, AVPacket *pkt)
     return ret;
 }
 
+static int ast_read_seek(AVFormatContext *s, int stream_index,
+                         int64_t timestamp, int flags)
+{
+    ASTDemuxContext *c = s->priv_data;
+    AVStream *st = s->streams[0];
+    int64_t pos = 64, sample = 0, ret;
+
+    /* AFC frames depend on earlier predictor history. Restart those from
+     * the beginning; PCM blocks are independently decodable. */
+    if (st->codecpar->codec_id == AV_CODEC_ID_PCM_S16BE_PLANAR) {
+        const AVIndexEntry *entry = avformat_index_get_entry_from_timestamp(st, timestamp,
+                                                                          flags | AVSEEK_FLAG_BACKWARD);
+        if (entry && entry->timestamp >= 0 && entry->timestamp < st->duration) {
+            pos = entry->pos;
+            sample = entry->timestamp;
+        }
+    }
+    ret = avio_seek(s->pb, pos, SEEK_SET);
+    if (ret < 0)
+        return ret;
+    c->samples_left = st->duration - sample;
+    avpriv_update_cur_dts(s, st, sample);
+    return 0;
+}
+
 const FFInputFormat ff_ast_demuxer = {
     .p.name         = "ast",
     .p.long_name    = NULL_IF_CONFIG_SMALL("AST (Audio Stream)"),
@@ -163,4 +190,5 @@ const FFInputFormat ff_ast_demuxer = {
     .read_probe     = ast_probe,
     .read_header    = ast_read_header,
     .read_packet    = ast_read_packet,
+    .read_seek      = ast_read_seek,
 };

@@ -60,3 +60,36 @@ class ASTPacketTests(unittest.TestCase):
             result = subprocess.run([ffprobe, '-v', 'error', '-show_entries', 'packet=size',
                                      '-of', 'csv=p=0', str(source)], capture_output=True, timeout=15)
             self.assertEqual(result.stdout, b'')
+
+    def test_pcm_seek_restores_sample_accounting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'seek.ast'
+            samples = list(range(1000, 1096))
+            header = bytearray(64)
+            struct.pack_into('>4sIHHHHII', header, 0, b'STRM', 288, 1, 16, 1, 0, 32000, 96)
+            blocks = b''.join(b'BLCK' + struct.pack('>I', 64) + bytes(24) +
+                              struct.pack('>32h', *samples[i:i + 32]) for i in range(0, 96, 32))
+            source.write_bytes(header + blocks)
+            for offset in (0, 32, 64):
+                with self.subTest(offset=offset):
+                    result = subprocess.run([FFMPEG, '-v', 'error', '-ss', str(offset / 32000),
+                                             '-i', str(source), '-f', 's16le', '-'],
+                                            capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    self.assertEqual(result.stdout, struct.pack('<%dh' % (96 - offset), *samples[offset:]))
+
+    def test_afc_seek_preserves_predictor_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'audio.ast'
+            encoded = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i',
+                                      'sine=frequency=731:sample_rate=32000', '-t', '0.02',
+                                      '-c:a', 'adpcm_afc', str(source)], capture_output=True, timeout=15)
+            self.assertEqual(encoded.returncode, 0, encoded.stderr.decode())
+            full = subprocess.run([FFMPEG, '-v', 'error', '-i', str(source), '-f', 's16le', '-'],
+                                  capture_output=True, timeout=15)
+            self.assertEqual(full.returncode, 0, full.stderr.decode())
+            self.assertEqual(len(full.stdout), 1280)
+            seek = subprocess.run([FFMPEG, '-v', 'error', '-ss', '0.001', '-i', str(source),
+                                   '-f', 's16le', '-'], capture_output=True, timeout=15)
+            self.assertEqual(seek.returncode, 0, seek.stderr.decode())
+            self.assertEqual(seek.stdout, full.stdout[64:])
