@@ -12,6 +12,17 @@ import tempfile
 import atexit
 from fractions import Fraction
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # The mobiclip libx264 wrapper hard-caps the keyframe interval at 90 frames
 # (~3s @ 30fps), matching retail Wii .mo cadence — see libavcodec/libx264.c.
 # We never space keyframes coarser than this, so the .mo keeps periodic
@@ -1169,7 +1180,11 @@ def main():
     elif audio == "vorbis":
         scale = "384:288"
 
-    out_directory = OUTDIR
+    if parsed.output:
+        out_directory = os.path.dirname(parsed.output) or "."
+    else:
+        out_directory = OUTDIR
+    OUTDIR = out_directory
     # Play mode writes nothing, so don't create (or require) an output directory
     # for it.
     if out_directory and mode != "play":
@@ -1189,6 +1204,15 @@ def main():
         )
         sys.exit(2)
 
+    def _handle_binary_error(cmd, e):
+        if getattr(e, "errno", None) == 86:
+            print(
+                f"error: could not run '{cmd[0]}': Bad CPU type in executable.\n"
+                "The bundled binary architecture does not match your system architecture."
+            )
+            sys.exit(2)
+        _missing_binary_exit(cmd, e)
+
     def run_cmd(cmd, check=True, hide_err=False):
         try:
             subprocess.run(cmd, check=check)
@@ -1196,8 +1220,8 @@ def main():
             if not hide_err:
                 print(f"Command failed: {e}")
             return False
-        except FileNotFoundError as e:
-            _missing_binary_exit(cmd, e)
+        except OSError as e:
+            _handle_binary_error(cmd, e)
         return True
 
     def run_ffenc_fallback(cmd1, cmd2):
@@ -1205,8 +1229,8 @@ def main():
             if subprocess.run(cmd1).returncode != 0:
                 if subprocess.run(cmd2).returncode != 0:
                     sys.exit(1)
-        except FileNotFoundError as e:
-            _missing_binary_exit(cmd1, e)
+        except OSError as e:
+            _handle_binary_error(cmd1, e)
 
     if mode == "play":
         # Play back a source file directly, with no intermediate file: our own
@@ -1268,7 +1292,10 @@ def main():
         if vf:
             cmd += ["-vf", ",".join(vf)]
         cmd += extra_args
-        sys.exit(subprocess.run(cmd).returncode)
+        try:
+            sys.exit(subprocess.run(cmd).returncode)
+        except OSError as e:
+            _handle_binary_error(cmd, e)
 
     if mode == "decode":
         # In decode mode, audio argument is actually the input file
