@@ -10,6 +10,24 @@ FFMPEG = os.environ.get('FFMPEG', str(Path(__file__).resolve().parents[2] / 'ffm
 
 
 class DSPLoopTests(unittest.TestCase):
+    def test_dsp_unusual_sample_rates_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rate.dsp'
+            for rate in (3000, 384000):
+                for forced in (False, True):
+                    with self.subTest(rate=rate, forced=forced):
+                        encoded = subprocess.run([
+                            FFMPEG, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                            'sine=sample_rate=' + str(rate), '-t', '0.02',
+                            '-c:a', 'adpcm_thp', str(path)], capture_output=True, timeout=15)
+                        self.assertEqual(encoded.returncode, 0, encoded.stderr.decode())
+                        decoded = subprocess.run([
+                            FFMPEG, '-v', 'error'] + (['-f', 'dsp'] if forced else []) + [
+                            '-i', str(path), '-f', 's16le', '-'],
+                            capture_output=True, timeout=15)
+                        self.assertEqual(decoded.returncode, 0, decoded.stderr.decode())
+                        self.assertEqual(len(decoded.stdout), rate // 50 * 2)
+
     def test_dsp_interleave_fits_header(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'interleave.dsp'
@@ -112,7 +130,8 @@ class DSPLoopTests(unittest.TestCase):
             result, path = self.encode(directory, 'dsp', 0)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             original = path.read_bytes()
-            for offset, fmt, value in ((14, '>H', 1), (0x4a, '>H', 15), (0, '>I', 0xffffffff)):
+            for offset, fmt, value in ((14, '>H', 1), (0x4a, '>H', 15), (0, '>I', 0xffffffff),
+                                       (8, '>I', 0), (8, '>I', 0x80000000)):
                 with self.subTest(offset=offset):
                     data = bytearray(original)
                     struct.pack_into(fmt, data, offset, value)
