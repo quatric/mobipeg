@@ -9,6 +9,7 @@ import shlex
 import shutil
 import struct
 import tempfile
+import atexit
 from fractions import Fraction
 
 # The mobiclip libx264 wrapper hard-caps the keyframe interval at 90 frames
@@ -396,6 +397,8 @@ def preprocess_input(inp, outdir):
     if not succeeded:
         print("warning: pre-transcode failed, using original input")
         return inp
+    # The intermediate is only needed for this run; don't leave it behind.
+    atexit.register(lambda: os.path.exists(intermediate) and os.unlink(intermediate))
     return intermediate
 
 
@@ -1790,7 +1793,10 @@ def main():
         # resampled to 30000/1001; moflex keeps source fps. Auto mode uses the
         # fewest keyframes that still stay within the encoder's ~90-frame cap,
         # matching retail cadence; scene-cut keyframes stay enabled on top.
-        out_fps = 30000.0 / 1001.0 if fmt == "mo" else probe_fps(inp)
+        if fps_ovr:
+            out_fps = float(Fraction(fps_ovr))
+        else:
+            out_fps = 30000.0 / 1001.0 if fmt == "mo" else probe_fps(inp)
         kf = even_gop(inp, out_fps, n_keyframes, limit=MOBICLIP_KEYINT_MAX)
         if kf:
             gop, count = kf
@@ -1824,16 +1830,13 @@ def main():
                     if parsed.lang2:
                         enc_opts.extend(["-metadata:s:a:1", f"language={parsed.lang2}"])
                     input_cursor += 1
-                for srt_path in parsed.srt:
+                for srt_index, srt_path in enumerate(parsed.srt):
                     extra_inputs.extend(["-i", srt_path])
                     enc_opts.extend(["-map", f"{input_cursor}:s:0", "-c:s", "subrip"])
                     parts = os.path.basename(srt_path).split(".")
                     if len(parts) >= 3 and len(parts[-2]) in (2, 3):
                         enc_opts.extend(
-                            [
-                                f"-metadata:s:s:{input_cursor - 1}",
-                                f"language={parts[-2]}",
-                            ]
+                            [f"-metadata:s:s:{srt_index}", f"language={parts[-2]}"]
                         )
                     input_cursor += 1
                 if parsed.poster:
