@@ -637,6 +637,14 @@ static int mv_in_bounds(VXDecCtx *c, MBlock b, MV v)
              b.y + v.y < 0 || b.y + v.y + b.h > c->height);
 }
 
+/* GBA motion reads may leave the picture, but must stay inside the decoder's
+ * margin-padded arena (see gbavxdec.c). */
+static int gba_mv_in_arena(VXDecCtx *c, MBlock b, MV v)
+{
+    return !(b.x + v.x < -256 || b.x + v.x + b.w > c->width + 256 ||
+             b.y + v.y < -128 || b.y + v.y + b.h > c->height + 128);
+}
+
 static int predict_inter(VXDecCtx *c, MBlock b, MV pred_vec, int has_delta, const VXPic *ref)
 {
     MV vec = pred_vec;
@@ -646,7 +654,7 @@ static int predict_inter(VXDecCtx *c, MBlock b, MV pred_vec, int has_delta, cons
         vec.x += get_se_golomb(c->gb);
         vec.y += get_se_golomb(c->gb);
     }
-    if (!c->gba_arena && !mv_in_bounds(c, b, vec))
+    if (c->gba_arena ? !gba_mv_in_arena(c, b, vec) : !mv_in_bounds(c, b, vec))
         return AVERROR_INVALIDDATA;
 
     c->vectors[(b.y / 16 + 1) * c->vectors_stride + (b.x / 16 + 1)] =
@@ -675,7 +683,7 @@ static int predict_inter_dc(VXDecCtx *c, MBlock b)
     vec.y = get_se_golomb(c->gb);
     if (!ref || !ref->data[0])
         return AVERROR_INVALIDDATA;
-    if (!c->gba_arena && !mv_in_bounds(c, b, vec))
+    if (c->gba_arena ? !gba_mv_in_arena(c, b, vec) : !mv_in_bounds(c, b, vec))
         return AVERROR_INVALIDDATA;
 
     dcy = get_se_golomb(c->gb);
