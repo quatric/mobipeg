@@ -1,0 +1,85 @@
+# streams
+stream,0,mobiclip,video,400,240,yuv420p
+# packets
+packet,0,0,0,1,45676,K__,MD5:242f89c6d4cf32194ffdc1fb9b2c535c
+packet,0,1,1,1,162,___,MD5:5592fb736357ee32a574bc407ae17e54
+packet,0,2,2,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,3,3,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,4,4,1,2424,___,MD5:3529e4c5b2b53db2384370fda58f4006
+packet,0,5,5,1,96,___,MD5:75c0a2c9931adec06075615ad4ffb233
+packet,0,6,6,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,7,7,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,8,8,1,5020,___,MD5:73afd384b5539eb9be6a383daded868f
+packet,0,9,9,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,10,10,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,11,11,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,12,12,1,622,___,MD5:fb5ae2bedcde59fbf891b223d1079ed6
+packet,0,13,13,1,102,___,MD5:529227ac25f7455dffc15180a297d671
+packet,0,14,14,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,15,15,1,5006,___,MD5:01d1bcad6610802f71972ddd9baaf537
+packet,0,16,16,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,17,17,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,18,18,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,19,19,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,20,20,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,21,21,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,22,22,1,5012,___,MD5:6517df15fdb3618343550b3cdfb6766b
+packet,0,23,23,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,24,24,1,2470,___,MD5:0e1f042d719444df507631c509d5a66f
+packet,0,25,25,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,26,26,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,27,27,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,28,28,1,144,___,MD5:c362c2bb58b0eb2cd8ddc8fca08a8334
+packet,0,29,29,1,5008,___,MD5:33b4aaaf480a9d0964a917e29001b365
+packet,0,30,30,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,31,31,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,32,32,1,752,___,MD5:f646ef780b1cbd376dc33e445d51923d
+packet,0,33,33,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,34,34,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+packet,0,35,35,1,94,___,MD5:11ef754f7517b45ecba60c8a33fa4394
+# decode
+#format: frame checksums
+#version: 2
+#hash: MD5
+#tb 0: 1001/30000
+#media_type 0: video
+#codec_id 0: rawvideo
+#dimensions 0: 400x240
+#sar 0: 0/1
+#stream#, dts,        pts, duration,     size, hash
+0,          0,          0,        1,   144000, 09a6dff0af57bd3e2466736593216759
+0,          1,          1,        1,   144000, 05315104900c52269019c1a7c98f4c51
+0,          2,          2,        1,   144000, 05315104900c52269019c1a7c98f4c51
+0,          3,          3,        1,   144000, 05315104900c52269019c1a7c98f4c51
+0,          4,          4,        1,   144000, a6a16a4153013ef6ab720e524ec438a6
+0,          5,          5,        1,   144000, 7c37956461c64f276b62905387bf0c50
+0,          6,          6,        1,   144000, 7c37956461c64f276b62905387bf0c50
+0,          7,          7,        1,   144000, 7c37956461c64f276b62905387bf0c50
+0,          8,          8,        1,   144000, 49b7f82f18428d4bab643e2ca2165702
+0,          9,          9,        1,   144000, 49b7f82f18428d4bab643e2ca2165702
+0,         10,         10,        1,   144000, 49b7f82f18428d4bab643e2ca2165702
+0,         11,         11,        1,   144000, 49b7f82f18428d4bab643e2ca2165702
+0,         12,         12,        1,   144000, 9262417bab7a6b6a1150b2fa2746540b
+0,         13,         13,        1,   144000, cd889e93ef6c551dca2e223092c01b64
+0,         14,         14,        1,   144000, cd889e93ef6c551dca2e223092c01b64
+0,         15,         15,        1,   144000, e59b0ef48038cf99b2f896f97acd5764
+0,         16,         16,        1,   144000, e59b0ef48038cf99b2f896f97acd5764
+0,         17,         17,        1,   144000, e59b0ef48038cf99b2f896f97acd5764
+0,         18,         18,        1,   144000, e59b0ef48038cf99b2f896f97acd5764
+0,         19,         19,        1,   144000, e59b0ef48038cf99b2f896f97acd5764
+0,         20,         20,        1,   144000, e59b0ef48038cf99b2f896f97acd5764
+0,         21,         21,        1,   144000, e59b0ef48038cf99b2f896f97acd5764
+0,         22,         22,        1,   144000, f042ff442ca890976d7ec87cac5ea0dd
+0,         23,         23,        1,   144000, f042ff442ca890976d7ec87cac5ea0dd
+0,         24,         24,        1,   144000, 24db60fa830a111266703a9fcf56fecf
+0,         25,         25,        1,   144000, 24db60fa830a111266703a9fcf56fecf
+0,         26,         26,        1,   144000, 24db60fa830a111266703a9fcf56fecf
+0,         27,         27,        1,   144000, 24db60fa830a111266703a9fcf56fecf
+0,         28,         28,        1,   144000, 47abf71240b1a4bdfb0ba135c7a86ba5
+0,         29,         29,        1,   144000, d9013c6a2e836fd5738ebcab4bcbf6b0
+0,         30,         30,        1,   144000, d9013c6a2e836fd5738ebcab4bcbf6b0
+0,         31,         31,        1,   144000, d9013c6a2e836fd5738ebcab4bcbf6b0
+0,         32,         32,        1,   144000, 0d88ddc4a90a454e56f64fd6d09181db
+0,         33,         33,        1,   144000, 0d88ddc4a90a454e56f64fd6d09181db
+0,         34,         34,        1,   144000, 0d88ddc4a90a454e56f64fd6d09181db
+0,         35,         35,        1,   144000, 0d88ddc4a90a454e56f64fd6d09181db
