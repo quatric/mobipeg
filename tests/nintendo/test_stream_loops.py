@@ -201,15 +201,16 @@ class StreamLoopTests(unittest.TestCase):
                 source.write_bytes(raw)
                 for fmt in ('brstm', 'bfstm', 'bcstm'):
                     for endian in ('be', 'le'):
-                        with self.subTest(fmt=fmt, endian=endian, channels=channels):
-                            path = Path(directory) / ('audio.' + fmt)
-                            result = subprocess.run([FFMPEG, '-v', 'error', '-y', '-f', 's16le',
-                                                     '-ar', '32000', '-ac', str(channels), '-i', str(source),
-                                                     '-c:a', 'pcm_s16' + endian + '_planar',
-                                                     '-endian', endian, '-block_size', '32', str(path)],
-                                                    capture_output=True, timeout=15)
-                            self.assertEqual(result.returncode, 0, result.stderr.decode())
-                            result = subprocess.run([FFMPEG, '-v', 'error', '-xerror', '-i', str(path),
-                                                     '-f', 's16le', '-'], capture_output=True, timeout=15)
-                            self.assertEqual(result.returncode, 0, result.stderr.decode())
-                            self.assertEqual(result.stdout, raw)
+                        for input_endian in ('be', 'le'):
+                            with self.subTest(fmt=fmt, endian=endian, input_endian=input_endian, channels=channels):
+                                path = Path(directory) / ('audio.' + fmt)
+                                result = subprocess.run([FFMPEG, '-v', 'error', '-y', '-f', 's16le',
+                                                         '-ar', '32000', '-ac', str(channels), '-i', str(source),
+                                                         '-c:a', 'pcm_s16' + input_endian + '_planar',
+                                                         '-endian', endian, '-block_size', '32', str(path)],
+                                                        capture_output=True, timeout=15)
+                                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                                result = subprocess.run([FFMPEG, '-v', 'error', '-xerror', '-i', str(path),
+                                                         '-f', 's16le', '-'], capture_output=True, timeout=15)
+                                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                                self.assertEqual(result.stdout, raw)
