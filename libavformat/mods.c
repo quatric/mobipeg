@@ -131,6 +131,10 @@ static int mods_read_header(AVFormatContext *s)
 
         if (acodec > 1 && acodec != 0xFF)
             m->embedded_audio = 1;
+        if (m->embedded_audio && ach > 2) {
+            av_log(s, AV_LOG_ERROR, "MODS: unsupported channel count %d\n", ach);
+            return AVERROR_INVALIDDATA;
+        }
 
         /* Only use acodec_info_off as an end-of-frames guard when it's
          * plausibly AFTER the keyframe table (i.e. after the header area).
@@ -426,6 +430,7 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
     ret = av_get_packet(pb, pkt, size);
     if (ret < 0)
         return ret;
+    size = ret;     /* short read at EOF: only ret bytes are valid */
     pkt->pos = pos;
 
     if (m->has_audio && (flags & MODS_AUDIO_FLAG)) {
@@ -593,7 +598,7 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
             int spad   = (size >= 4) ? pkt->data[size - 4] : -1;
             int zpad   = (size >= 4) ? pkt->data[size - 3] : -1;
             av_log(s, AV_LOG_INFO,
-                   "MODS_DBG f=%d size=%u blocks=%d key=%d vf=%d start=%d asz=%d pad=%d "
+                   "MODS_DBG f=%"PRId64" size=%u blocks=%d key=%d vf=%d start=%d asz=%d pad=%d "
                    "suffix[pad=%d z=%d asz=%d]\n",
                    m->frame_index, size, (int)(flags & 0x3FFF),
                    (size >= 2 && (pkt->data[1] & 0x80)) ? 1 : 0, m->last_vfield,
@@ -687,6 +692,9 @@ static int mods_read_close(AVFormatContext *s)
 {
     MODSDemuxContext *m = s->priv_data;
     av_freep(&m->aud_buf);
+    avcodec_free_context(&m->vdec);
+    av_frame_free(&m->vframe);
+    av_packet_free(&m->vpkt);
     return 0;
 }
 
