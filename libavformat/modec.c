@@ -30,6 +30,10 @@
 #include "internal.h"
 #include "mo.h"
 
+/* Some Nintendo Channel clips describe their Vorbis track with an 'AA'
+ * record; its payload is laid out exactly like 'AV' (the three headers). */
+#define FORMAT_VORBIS_AA          FORMAT_MARKER('A', 'A')
+
 typedef struct MoDemuxContext {
     int handle_audio_packet;
     uint32_t audio_size;
@@ -174,8 +178,8 @@ static int mo_read_header(AVFormatContext *s)
 
     int has_read_header = 0;
     while (has_read_header == 0) {
-        if (avio_tell(pb) > header_length) {
-            // Exhausted header
+        if (avio_tell(pb) >= header_length || avio_feof(pb)) {
+            // Exhausted header (every record, 'HE' included, needs 4 bytes)
             break;
         }
 
@@ -261,6 +265,7 @@ static int mo_read_header(AVFormatContext *s)
             break;
         }
         case FORMAT_VORBIS:
+        case FORMAT_VORBIS_AA:
         {
             if (!ast) {
                 ast = avformat_new_stream(s, NULL);
@@ -444,10 +449,25 @@ static int mo_read_packet(AVFormatContext *s, AVPacket *pkt)
                 mo->track_data_base_pos = avio_tell(pb);
             }
             uint32_t start_off = mo->track_offsets[t];
+            /* The last track runs to the start of the next chunk: like the
+             * single-track path, its tail includes the 1-4 chunk pad bytes. */
+            uint32_t data_size = mo->audio_size + mo->audio_padding >= mo->num_tracks * 4
+                ? mo->audio_size + mo->audio_padding - mo->num_tracks * 4 : 0;
             uint32_t end_off = (t + 1 < mo->num_tracks)
                 ? mo->track_offsets[t + 1]
-                : (mo->audio_size - mo->num_tracks * 4);
+                : data_size;
             uint32_t track_size = (end_off > start_off) ? (end_off - start_off) : 0;
+            if (t + 1 == mo->num_tracks) {
+                /* Keep only whole blocks: the pad bytes are audio only when
+                 * the muxer folded them into the tail. */
+                AVCodecParameters *par = s->streams[1 + t]->codecpar;
+                int ch = FFMAX(par->ch_layout.nb_channels, 1);
+                int bs = par->codec_id == AV_CODEC_ID_ADPCM_IMA_MOBICLIP_WII ? ch * 132 :
+                         par->codec_id == AV_CODEC_ID_PCM_S16LE              ? ch * 2   :
+                         par->codec_id == AV_CODEC_ID_FASTAUDIO              ? ch * 40  : 0;
+                if (bs && track_size % bs)
+                    track_size -= track_size % bs;
+            }
 
             avio_seek(pb, mo->track_data_base_pos + start_off, SEEK_SET);
             ret = av_get_packet(pb, pkt, track_size);
