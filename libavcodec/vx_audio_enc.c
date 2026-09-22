@@ -59,6 +59,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavutil/qsort.h"
 
 #include "avcodec.h"
 #include "codec_internal.h"
@@ -501,6 +502,11 @@ static void encode_block_ch(VXAudioEncContext *s, int c, int64_t bi, uint8_t *ou
 
 /* ---------- lifecycle ---------- */
 
+static int cmp_int64(const int64_t *a, const int64_t *b)
+{
+    return FFDIFFSIGN(*a, *b);
+}
+
 static av_cold int vxa_init(AVCodecContext *avctx)
 {
     VXAudioEncContext *s = avctx->priv_data;
@@ -537,6 +543,8 @@ static av_cold int vxa_init(AVCodecContext *avctx)
             p = end;
             while (*p == ',' || *p == ' ') p++;
         }
+        /* vxa_is_kf_period() binary-searches this list */
+        AV_QSORT(s->kf_periods, s->kf_n, int64_t, cmp_int64);
     }
 
     return 0;
