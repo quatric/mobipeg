@@ -372,8 +372,8 @@ static int read_header(AVFormatContext *s)
                 return AVERROR_INVALIDDATA;
             avio_skip(s->pb, start - avio_tell(s->pb));
 
-            if (bfstm && (codec == AV_CODEC_ID_ADPCM_THP ||
-                          codec == AV_CODEC_ID_ADPCM_THP_LE))
+            /* NintendoWare DATA headers pad to 0x20 for PCM as well as ADPCM. */
+            if (bfstm)
                 avio_skip(s->pb, 24);
 
             b->data_start = avio_tell(s->pb);
