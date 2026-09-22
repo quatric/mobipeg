@@ -430,7 +430,12 @@ static int thp_strip_jpeg(uint8_t *out, const uint8_t *in, int size)
         if (in[i] != 0xFF) { out[o++] = in[i++]; continue; }
         m = in[i + 1];
         if (m == 0xDA) {                                 /* SOS: copy header, then scan */
-            int len = (in[i + 2] << 8) | in[i + 3];
+            int len;
+            if (i + 3 >= size)
+                break;
+            len = (in[i + 2] << 8) | in[i + 3];
+            if (len < 2 || len > size - i - 2)
+                break;
             memcpy(out + o, in + i, 2 + len);            /* SOS marker + scan params */
             o += 2 + len; i += 2 + len;
             /* Un-stuff the entropy-coded scan: 0xFF 0x00 -> 0xFF, but keep a
@@ -451,6 +456,8 @@ static int thp_strip_jpeg(uint8_t *out, const uint8_t *in, int size)
         }
         if (i + 3 >= size) break;
         int len = (in[i + 2] << 8) | in[i + 3];          /* incl. the 2 length bytes */
+        if (len < 2 || len > size - i - 2)
+            break;
         if (m == 0xE0 || m == 0xFE) {                    /* APP0/JFIF or COM: drop */
             i += 2 + len;
         } else {
