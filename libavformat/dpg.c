@@ -75,6 +75,8 @@ static int dpg_read_header(AVFormatContext *s)
 
     if (!video_size || video_off < DPG_HEADER_SIZE_V0)
         return AVERROR_INVALIDDATA;
+    if (fps_raw > INT_MAX || rate > INT_MAX || channels > 255)
+        return AVERROR_INVALIDDATA;
 
     /* DPG2 onwards store 8.8 fixed point here so fractional rates fit; the
      * two older versions store whole frames per second. */
