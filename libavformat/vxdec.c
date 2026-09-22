@@ -58,11 +58,13 @@ static int read_header_vxds(AVFormatContext *s)
     ctx->frame_rate_fixed = avio_rl32(pb);
     ctx->quantizer        = avio_rl32(pb);
     ctx->sample_rate      = avio_rl32(pb);
-    ctx->channels          = avio_rl32(pb) > 0 ? 1 : 0; /* mono only, see vx_audio.c */
+    ctx->channels         = avio_rl32(pb);  /* audio_streams_qty: 0, 1 or 2 */
     avio_skip(pb, 4); /* frame_data_size_max */
     audio_extradata_offset = avio_rl32(pb);
     avio_skip(pb, 8); /* seek_table_offset, seek_table_entries_qty (unused: sequential demux only) */
 
+    if (ctx->channels > 2)
+        return AVERROR_INVALIDDATA;
     if (ctx->video_width <= 0 || ctx->video_height <= 0 ||
         (ctx->video_width % 16) || (ctx->video_height % 16))
         return AVERROR_INVALIDDATA;
@@ -103,17 +105,24 @@ static int read_header_vxds(AVFormatContext *s)
         av_channel_layout_default(&ast->codecpar->ch_layout, ctx->channels);
         avpriv_set_pts_info(ast, 64, 1, ctx->sample_rate);
 
-        ret = ff_alloc_extradata(ast->codecpar, 12 + VXDS_AUDIO_EXTRADATA_SIZE);
-        if (ret < 0) return ret;
-        AV_WL32(ast->codecpar->extradata,     ctx->quantizer);
-        AV_WL32(ast->codecpar->extradata + 4, ctx->video_width);
-        AV_WL32(ast->codecpar->extradata + 8, ctx->video_height);
-
+        /* [quantizer][width][height](+[channels] when stereo) followed by
+         * one codec-info block per channel, stored back to back in the file */
         {
+            int prefix = ctx->channels > 1 ? 16 : 12;
+            int blocks = ctx->channels * VXDS_AUDIO_EXTRADATA_SIZE;
             int64_t here = avio_tell(pb);
+
+            ret = ff_alloc_extradata(ast->codecpar, prefix + blocks);
+            if (ret < 0) return ret;
+            AV_WL32(ast->codecpar->extradata,     ctx->quantizer);
+            AV_WL32(ast->codecpar->extradata + 4, ctx->video_width);
+            AV_WL32(ast->codecpar->extradata + 8, ctx->video_height);
+            if (prefix == 16)
+                AV_WL32(ast->codecpar->extradata + 12, ctx->channels);
+
             avio_seek(pb, audio_extradata_offset, SEEK_SET);
-            ret = avio_read(pb, ast->codecpar->extradata + 12, VXDS_AUDIO_EXTRADATA_SIZE);
-            if (ret != VXDS_AUDIO_EXTRADATA_SIZE)
+            ret = avio_read(pb, ast->codecpar->extradata + prefix, blocks);
+            if (ret != blocks)
                 return AVERROR_INVALIDDATA;
             avio_seek(pb, here, SEEK_SET);
         }
@@ -173,7 +182,7 @@ static int vx_read_packet(AVFormatContext *s, AVPacket *pkt)
             return AVERROR(ENOMEM);
         AV_WL32(ctx->pending_audio_data, aframes_qty);
         memcpy(ctx->pending_audio_data + 4, pkt->data, ret);
-        ctx->audio_sample_pos += aframes_qty * 128;
+        ctx->audio_sample_pos += aframes_qty / ctx->channels * 128;
     }
 
     ctx->current_frame++;
