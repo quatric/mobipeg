@@ -335,14 +335,20 @@ static int record_sync(MOFLEXMuxContext *m, int64_t frame, int64_t ts, int64_t o
 {
     if (m->n_sp >= m->sp_cap) {
         int ncap = m->sp_cap ? m->sp_cap * 2 : 256;
-        int64_t *nf = av_realloc_array(m->sp_frame, ncap, sizeof(int64_t));
-        int64_t *nt = av_realloc_array(m->sp_ts,    ncap, sizeof(int64_t));
-        int64_t *no = av_realloc_array(m->sp_off,   ncap, sizeof(int64_t));
-        if (!nf || !nt || !no) {
-            av_free(nf); av_free(nt); av_free(no);
+        /* Store each grown array as soon as it succeeds: av_realloc_array
+         * has already released the old block, so freeing the new one on a
+         * later failure would leave the context pointing at freed memory. */
+        int64_t *nf, *nt, *no;
+        if (!(nf = av_realloc_array(m->sp_frame, ncap, sizeof(int64_t))))
             return AVERROR(ENOMEM);
-        }
-        m->sp_frame = nf; m->sp_ts = nt; m->sp_off = no; m->sp_cap = ncap;
+        m->sp_frame = nf;
+        if (!(nt = av_realloc_array(m->sp_ts, ncap, sizeof(int64_t))))
+            return AVERROR(ENOMEM);
+        m->sp_ts = nt;
+        if (!(no = av_realloc_array(m->sp_off, ncap, sizeof(int64_t))))
+            return AVERROR(ENOMEM);
+        m->sp_off = no;
+        m->sp_cap = ncap;
     }
     m->sp_frame[m->n_sp] = frame;
     m->sp_ts   [m->n_sp] = ts;
@@ -529,6 +535,11 @@ static int moflex_write_header(AVFormatContext *s)
                 m->nb_tr_subs++;
             }
         }
+    }
+
+    if (m->video_stream_index < 0) {
+        av_log(s, AV_LOG_ERROR, "MOFLEX needs a video stream that is not an attached picture.\n");
+        return AVERROR(EINVAL);
     }
 
     if (m->tr_audio_stream_index >= 0) {

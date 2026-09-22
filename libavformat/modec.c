@@ -274,31 +274,49 @@ static int mo_read_header(AVFormatContext *s)
             ast->codecpar->codec_tag = MKTAG('M', 'o', 'V', 'o');
 
             uint32_t p1_size = avio_rl32(pb);
-            if (p1_size > 4096) return AVERROR_INVALIDDATA;
+            /* The identification header is 30 bytes; at least 16 are read
+             * below for the channel count and sample rate. */
+            if (p1_size < 16 || p1_size > 4096) return AVERROR_INVALIDDATA;
             uint8_t *p1 = av_malloc(p1_size);
-            avio_read(pb, p1, p1_size);
-            
+            if (!p1) return AVERROR(ENOMEM);
+            if (avio_read(pb, p1, p1_size) != p1_size) {
+                av_free(p1);
+                return AVERROR_INVALIDDATA;
+            }
+
             uint32_t p2_size = avio_rl32(pb);
-            if (p2_size > 4096) return AVERROR_INVALIDDATA;
+            if (p2_size > 4096) { av_free(p1); return AVERROR_INVALIDDATA; }
             uint8_t *p2 = av_malloc(p2_size);
-            avio_read(pb, p2, p2_size);
-            
+            if (!p2) { av_free(p1); return AVERROR(ENOMEM); }
+            if (avio_read(pb, p2, p2_size) != p2_size) {
+                av_free(p1); av_free(p2);
+                return AVERROR_INVALIDDATA;
+            }
+
             uint32_t p3_size = avio_rl32(pb);
-            if (p3_size > 65536) return AVERROR_INVALIDDATA;
+            if (p3_size > 65536) { av_free(p1); av_free(p2); return AVERROR_INVALIDDATA; }
             uint8_t *p3 = av_malloc(p3_size);
-            avio_read(pb, p3, p3_size);
-            
-            int extradata_size = 1 + 1 + 1 + p1_size + p2_size + p3_size;
+            if (!p3) { av_free(p1); av_free(p2); return AVERROR(ENOMEM); }
+            if (avio_read(pb, p3, p3_size) != p3_size) {
+                av_free(p1); av_free(p2); av_free(p3);
+                return AVERROR_INVALIDDATA;
+            }
+
+            /* Xiph lacing needs up to size/255 + 1 bytes per laced header. */
+            int extradata_size = 1 + p1_size / 255 + 1 + p2_size / 255 + 1 +
+                                 p1_size + p2_size + p3_size;
+            av_freep(&ast->codecpar->extradata);
             ast->codecpar->extradata = av_mallocz(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+            if (!ast->codecpar->extradata) {
+                av_free(p1); av_free(p2); av_free(p3);
+                return AVERROR(ENOMEM);
+            }
             ast->codecpar->extradata_size = extradata_size;
             
             uint8_t *ed = ast->codecpar->extradata;
             ed[0] = 2; // 3 headers
             
             // Xiph lacing encoding for lengths (max 255 per byte).
-            // But Vorbis headers are small enough except maybe p3, which is implicit.
-            // p1 and p2 must be xiph laced. Since they are small, we just use 1 byte if they are < 255.
-            // But if they are >= 255, we need proper lacing. Let's do it properly just in case.
             int offset = 1;
             int len = p1_size;
             while (len >= 255) { ed[offset++] = 255; len -= 255; }
@@ -349,6 +367,7 @@ static int mo_read_header(AVFormatContext *s)
                 break;
             }
 
+            av_freep(&mo->keyframes);
             mo->keyframes = av_calloc(mo->frame_count + 1, sizeof(*mo->keyframes));
             if (!mo->keyframes)
                 return AVERROR(ENOMEM);
@@ -809,7 +828,9 @@ read_video:
 
         mo->last_video_frame = mo->current_frame;
 
-        if (mo->audio_size > 0) {
+        /* Audio payload with no audio stream declared (e.g. an A0 header):
+         * there is nothing to route it to, so skip it. */
+        if (mo->audio_size > 0 && s->nb_streams > 1) {
             mo->handle_audio_packet = 1;
         } else {
             // Seek to the next chunk's aligned position
