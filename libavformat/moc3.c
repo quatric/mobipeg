@@ -110,10 +110,17 @@ static int moc3_parse_fla2_frames(AVFormatContext *s)
     MOC3DemuxContext *m = s->priv_data;
     AVIOContext *pb = s->pb;
     int64_t payload_start = m->data_start;
-    int64_t payload_size = avio_size(pb) - payload_start;
+    int64_t stream_size = avio_size(pb);
+    int64_t payload_size;
     int64_t pos;
     int capacity = 32;
     int ret;
+
+    if (stream_size < 0 || stream_size < payload_start)
+        return AVERROR_INVALIDDATA;
+    payload_size = stream_size - payload_start;
+    if (payload_size <= 0 || payload_size > INT32_MAX)
+        return AVERROR_INVALIDDATA;
 
     m->frame_offsets = av_malloc_array(capacity, sizeof(int64_t));
     if (!m->frame_offsets)
