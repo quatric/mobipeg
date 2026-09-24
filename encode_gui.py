@@ -157,6 +157,7 @@ class EncodeGUI(tk.Tk):
                 icon_path = os.path.join(base_path, "logo.png")
                 if os.path.exists(icon_path):
                     img = tk.PhotoImage(file=icon_path)
+                    self._icon_img = img
                     self.tk.call("wm", "iconphoto", self._w, img)
         except Exception:
             pass
@@ -621,45 +622,19 @@ class EncodeGUI(tk.Tk):
                 | AUDIO_ONLY_FORMATS,
                 (self.enc_arate_label, self.enc_arate_entry),
             ),
-            # Scale and FPS describe a video stream, so they go away entirely
-            # for the audio-only containers.
+            # Scale, FPS and highest-quality describe a video stream, so they
+            # go away entirely for the audio-only containers.
             (
-                {
-                    "mo",
-                    "moflex",
-                    "moflex3d",
-                    "mods",
-                    "vx",
-                    "ty",
-                    "gba_ads",
-                    "gba_hydrogen",
-                    "wii_photo",
-                    "nintendo_channel",
-                    "thp",
-                    "rvid",
-                    "dpg",
-                    "factor5",
-                },
+                set(self.formats_map.values()) - AUDIO_ONLY_FORMATS,
                 (self.enc_scale_label, self.enc_scale_entry),
             ),
             (
-                {
-                    "mo",
-                    "moflex",
-                    "moflex3d",
-                    "mods",
-                    "vx",
-                    "ty",
-                    "gba_ads",
-                    "gba_hydrogen",
-                    "wii_photo",
-                    "nintendo_channel",
-                    "thp",
-                    "rvid",
-                    "dpg",
-                    "factor5",
-                },
+                set(self.formats_map.values()) - AUDIO_ONLY_FORMATS,
                 (self.enc_fps_label, self.enc_fps_entry),
+            ),
+            (
+                set(self.formats_map.values()) - AUDIO_ONLY_FORMATS,
+                (self.enc_hq_chk,),
             ),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),

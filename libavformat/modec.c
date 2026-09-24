@@ -78,6 +78,8 @@ typedef struct MoDemuxContext {
 static int mo_probe(const AVProbeData *p)
 {
     /* Check for MOC5 magic bytes */
+    if (p->buf_size < 10)
+        return 0;
     if (AV_RL32(p->buf) == MO_TAG) {
         if (AV_RL32(p->buf + 4) < 0x28) // Rough minimum size
             return 0;
@@ -188,7 +190,7 @@ static int mo_read_header(AVFormatContext *s)
             (uint8_t)format_marker, (uint8_t)(format_marker >> 8));
 
         // Length in file is amount of u32s available within format segment.
-        uint16_t format_length = avio_rl16(pb) * 4;
+        uint32_t format_length = (uint32_t)avio_rl16(pb) * 4;
         if ((avio_tell(pb) + format_length) > header_length) {
             // Will exhaust header length
             break;
