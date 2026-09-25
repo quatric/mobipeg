@@ -28,6 +28,16 @@ class FrontendTests(unittest.TestCase):
                 encode.report_outputs(output.name)
             self.assertIn('(3 bytes)', log.getvalue())
 
+    def test_completion_handles_cjk_unicode_filenames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cjk_file = Path(directory, '【Ado】ルル (RuLe).cia')
+            cjk_file.write_bytes(b'123')
+            with patch.object(subprocess, 'run', side_effect=AssertionError), \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                encode.report_outputs(str(cjk_file))
+            self.assertIn('(3 bytes)', log.getvalue())
+            self.assertIn('【Ado】ルル (RuLe).cia', log.getvalue())
+
     def test_failed_preprocess_removes_partial_file(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory, 'source.mp4')
