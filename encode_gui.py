@@ -2,9 +2,19 @@
 try:
     import sentry_sdk
 
+    def _sentry_before_send(event, hint):
+        if "exc_info" in hint:
+            exc_type, exc_value, _ = hint["exc_info"]
+            if issubclass(exc_type, UnicodeEncodeError):
+                return None
+            if issubclass(exc_type, FileNotFoundError) and "ls" in str(exc_value):
+                return None
+        return event
+
     sentry_sdk.init(
         dsn="https://9cff5a454488188a77ee0c3a043d7c94@o107347.ingest.us.sentry.io/4512040240480256",
         send_default_pii=True,
+        before_send=_sentry_before_send,
     )
 except ImportError:
     pass
