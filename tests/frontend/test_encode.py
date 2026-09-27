@@ -38,6 +38,15 @@ class FrontendTests(unittest.TestCase):
             self.assertIn('(3 bytes)', log.getvalue())
             self.assertIn('【Ado】ルル (RuLe).cia', log.getvalue())
 
+    def test_unwriteable_outdir_exits_cleanly(self):
+        with patch.object(encode.os, 'makedirs', side_effect=PermissionError(13, 'Permission denied: /Volumes')):
+            with patch.object(encode.sys, 'argv', ['encode.py', 'mo', 'test.mp4', '--outdir', '/Volumes/invalid']):
+                with self.assertRaises(SystemExit) as ctx:
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        encode.main()
+                self.assertEqual(ctx.exception.code, 1)
+                self.assertIn("error: cannot create output directory", err.getvalue())
+
     def test_failed_preprocess_removes_partial_file(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory, 'source.mp4')
