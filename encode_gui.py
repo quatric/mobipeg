@@ -9,6 +9,8 @@ try:
                 return None
             if issubclass(exc_type, FileNotFoundError) and "ls" in str(exc_value):
                 return None
+            if issubclass(exc_type, (PermissionError, OSError)) and "/Volumes" in str(exc_value):
+                return None
         return event
 
     sentry_sdk.init(

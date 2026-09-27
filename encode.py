@@ -604,7 +604,14 @@ def package_cia(parsed):
 
     out_stem = resolve_output_stem(parsed.output, "package_cia", parsed.outdir)
     out_cia = os.path.abspath(out_stem + ".cia")
-    os.makedirs(os.path.dirname(out_cia) or ".", exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(out_cia) or ".", exist_ok=True)
+    except OSError as e:
+        print(
+            f"error: cannot create output directory for CIA '{out_cia}': {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # VidInjector9002-CLI dumps its own working files (romfs/exefs staging,
     # a "VidInjector9000Resources" dir) relative to the process cwd instead
@@ -1188,7 +1195,14 @@ def main():
     # Play mode writes nothing, so don't create (or require) an output directory
     # for it.
     if out_directory and mode != "play":
-        os.makedirs(out_directory, exist_ok=True)
+        try:
+            os.makedirs(out_directory, exist_ok=True)
+        except OSError as e:
+            print(
+                f"error: cannot create output directory '{out_directory}': {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     def _missing_binary_exit(cmd, e):
         # A bundled ffmpeg/ffprobe that _find_frozen_binary resolved to a path
