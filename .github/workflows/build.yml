@@ -900,7 +900,7 @@ jobs:
             cd ..
 
             # dav1d (software AV1 decoder)
-            [ ! -d dav1d-$ARCH ] && curl -fsSL https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz | tar -xz && mv dav1d-1.5.1 dav1d-$ARCH
+            [ ! -d dav1d-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz | tar -xz && mv dav1d-1.5.1 dav1d-$ARCH
             cd dav1d-$ARCH
             MESON_CROSS_ARGS=()
             if [ "$ARCH" = "x86_64" ]; then
