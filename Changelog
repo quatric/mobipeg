@@ -1,6 +1,19 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 2.3:
+- VX audio (GBA) demuxer and muxer with stereo support
+- Mobiclip MO/MODS/MOFLEX: full regression test suite against retail fixtures, stable remux, real frame rate, keyframe tables, and stream-copy support
+- Mobiclip MO/MODS/MOFLEX: fixed overflow/OOB reads, short reads, leaks, and invalid stream handling; switched to 64-bit timestamps
+- Fixed validation, overflow, and loop/seek-state bugs across the DSP, BRSTM, BFSTM, BCSTM, BNS, and AST decoders
+- RocketVideo: bounded table parsing, validated streams, and fixed decoder validation/reset
+- F5VID: matched retail audio schedule and padding, and accepted fresh MPEG-4 encoder output
+- THP/adpcm_thp: fixed JPEG stripping and chunked packet emission so -shortest trims instead of dropping
+- GUI: handle unwriteable output directories cleanly, fix Encode HQ visibility, probe stereo layout off the Tk thread
+- Filtered legacy/charmap noise out of Sentry crash reporting; disabled sentry-native debug logging in fftools
+- CI: retry dav1d downloads and fail fast on cross-toolchain apt install failures
+
+
 version 2.2:
 - GameCube Factor 5 DivX (.vid) demuxer, muxer, and f5vid_mpeg4 bitstream filter
 - Super MOFLEX demuxing, muxing, and tooling support
