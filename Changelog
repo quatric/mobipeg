@@ -11,6 +11,7 @@ version 2.3:
 - THP/adpcm_thp: fixed JPEG stripping and chunked packet emission so -shortest trims instead of dropping
 - GUI: handle unwriteable output directories cleanly, fix Encode HQ visibility, probe stereo layout off the Tk thread
 - Filtered legacy/charmap noise out of Sentry crash reporting; disabled sentry-native debug logging in fftools
+- Windows x86/x86_64 builds ship ffplay.exe and SDL2.dll again (missing since 2.0); the build now fails if ffplay is absent
 - CI: retry dav1d downloads and fail fast on cross-toolchain apt install failures
 
 
