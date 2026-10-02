@@ -734,8 +734,6 @@ jobs:
             --disable-shared \
             --disable-doc \
             --disable-debug \
-            --disable-outdev=sdl2 \
-            --disable-ffplay \
             --disable-dxva2 \
             --disable-d3d12va \
             --disable-vdpau \
@@ -761,6 +759,12 @@ jobs:
           done
           # Include SDL2.dll for ffplay if it exists
           [ -f "$DEPS/bin/SDL2.dll" ] && cp "$DEPS/bin/SDL2.dll" . && FILES="$FILES SDL2.dll"
+          # SDL2 has no aarch64 mingw dev package, so ffplay is only expected
+          # on x86/x86_64.  Fail loudly there rather than ship without it.
+          if [ "${{ matrix.target }}" != "windows-arm64" ] && [ ! -f ffplay.exe ]; then
+            echo "::error::ffplay.exe missing from ${{ matrix.target }} build (SDL2 not detected)"
+            exit 1
+          fi
           zip "../../mobipeg-${{ matrix.target }}.zip" $FILES
 
       - uses: actions/upload-artifact@v6
@@ -782,7 +786,13 @@ jobs:
         run: |
           brew untap aws/tap || true
           brew update
-          brew install yasm pkg-config nasm sdl2 meson ninja
+          # A stale openssl@1.1 owns the openssl symlinks and makes the
+          # openssl@3 upgrade (pulled in by meson) fail at `brew link`.
+          brew unlink openssl@1.1 2>/dev/null || true
+          brew install yasm pkg-config nasm sdl2 meson ninja || {
+            brew link --overwrite openssl@3
+            brew install yasm pkg-config nasm sdl2 meson ninja
+          }
 
       # This cache holds x264 too, so it has to track the upstream x264 commit
       # (see the linux job) — otherwise ffmpeg builds against a stale x264.h.
