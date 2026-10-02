@@ -19,6 +19,7 @@ fate-api-skip-samples: CMD = run $(APITESTSDIR)/api-skip-samples-test$(EXESUF)
 FATE_API_LIBAVCODEC-$(CONFIG_MOVTEXT_ENCODER) += fate-api-movtext
 fate-api-movtext: $(APITESTSDIR)/api-movtext-test$(EXESUF)
 fate-api-movtext: CMD = run $(APITESTSDIR)/api-movtext-test$(EXESUF)
+
 FATE_API_LIBAVCODEC-$(CONFIG_RVID_DECODER) += fate-api-rvid
 fate-api-rvid: $(APITESTSDIR)/api-rvid-test$(EXESUF)
 fate-api-rvid: CMD = run $(APITESTSDIR)/api-rvid-test$(EXESUF)
