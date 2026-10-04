@@ -192,6 +192,7 @@ extern const FFInputFormat  ff_flac_demuxer;
 extern const FFOutputFormat ff_flac_muxer;
 extern const FFInputFormat  ff_flic_demuxer;
 extern const FFInputFormat  ff_flipnote_ppm_demuxer;
+extern const FFOutputFormat ff_flipnote_ppm_muxer;
 extern const FFInputFormat  ff_flv_demuxer;
 extern const FFOutputFormat ff_flv_muxer;
 extern const FFInputFormat  ff_live_flv_demuxer;
