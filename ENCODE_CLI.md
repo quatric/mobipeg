@@ -36,6 +36,7 @@ to `encode`.
 | `mods` | 256x192 | DS Mobiclip |
 | `vx` | 256x192 | ActImagine VX (DS) |
 | `fastvideo` | 256x192 | FastVideoDS (`.fv`) |
+| `flipnote` | 256x192 | DSi Flipnote Studio (`.ppm`), 1-bit dithered, RSA-signed |
 | `rvid` | 256x192 | RocketVideo (DS), native encoder |
 | `dpg` | 256x192 | MoonShell DPG (DS), MPEG-1 + MP2 |
 | `thp` | source | GameCube/Wii THP, Motion JPEG + `adpcm_thp` |
@@ -82,6 +83,7 @@ special to pass, just point it at the file.
 | `thp` | `adpcm`, `none` |
 | `rvid` | `pcm`, `none` |
 | `fastvideo` | `adpcm`, `none` |
+| `flipnote` | `pcm` (8192 Hz mono), `none` |
 | `hvqm4`, `gba_ads`, `gba_hydrogen` | `none` (no audio support yet) |
 | `dsp`, `bns` | `adpcm` (the container's only option — no `none`) |
 | `brstm`, `bfstm`, `bcstm`, `ast` | `adpcm`, `pcm` |
