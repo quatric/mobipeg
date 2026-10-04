@@ -679,7 +679,7 @@ def main():
         "fmt",
         nargs="?",
         default="mo",
-        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
+        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
     )
     parser.add_argument(
         "audio",
@@ -1166,6 +1166,11 @@ def main():
         # any) is adpcm_ima_moflex, muxed directly rather than through the
         # mobiclip -mo_audio path, so moaud stays 0.
         mode, dmx, scale, moaud, cvc = "vid", "fv", "256:192", 0, "fastvideo"
+    elif fmt == "flipnote":
+        # Nintendo DSi Flipnote Studio (.ppm): 1-bit 256x192 frames, optional
+        # 8192 Hz mono BGM. The muxer signs the file with RSA so the DSi
+        # accepts it; ".ppm" also names the PNM image muxer, so -f is forced.
+        mode, dmx, scale, moaud, cvc = "vid", "flipnote_ppm", "256:192", 0, "rawvideo"
     elif fmt in ("factor5", "f5vid"):
         # GameCube Factor 5 DivX (.vid / f5vid container): DivX-compatible
         # MPEG-4 Part 2 ASP video with optional DSP-ADPCM (adpcm_thp) audio.
@@ -1177,12 +1182,12 @@ def main():
     else:
         print(
             f"unknown format '{fmt}' "
-            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|"
+            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|"
             f"{'|'.join(AUDIO_FORMATS)})"
         )
         sys.exit(2)
 
-    if scale_ovr and fmt not in ("3ds_camera", "3ds_camera3d"):
+    if scale_ovr and fmt not in ("3ds_camera", "3ds_camera3d", "flipnote"):
         scale = scale_ovr.replace("x", ":")
     elif audio == "vorbis":
         scale = "384:288"
@@ -1758,6 +1763,7 @@ def main():
         "nintendo_channel": "3gp",
         "3ds_camera": "avi",
         "factor5": "vid",
+        "flipnote": "ppm",
         "smoflex": "moflex",
         "super_moflex": "moflex",
         "smoflex3d": "moflex",
@@ -2076,6 +2082,14 @@ def main():
                     str(audio_rate if audio_rate > 0 else 32000),
                 ]
             )
+    elif fmt == "flipnote":
+        # The muxer wants gray 256x192 and inks pixels below 128; dithering
+        # through 1-bit first keeps tone instead of hard-thresholding it.
+        enc_opts.extend(["-pix_fmt", "gray", "-f", "flipnote_ppm"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "pcm_s16le", "-ar", "8192", "-ac", "1"])
     elif fmt == "nintendo_channel":
         # Match the UK Nintendo Channel 2009 3GP profile: 3gp6 + AVC
         # constrained baseline L2.1 + stereo 32 kHz AAC-LC. libx264 is also
@@ -2131,6 +2145,8 @@ def main():
         fps_filter = "fps=15"
     elif fmt == "nintendo_channel":
         fps_filter = "fps=25"
+    elif fmt == "flipnote":
+        fps_filter = "fps=12"
     elif fmt in ("factor5", "f5vid"):
         fps_filter = "fps=30000/1001"
 
@@ -2139,6 +2155,8 @@ def main():
         filters.append(f"scale={scale}")
     if fps_filter:
         filters.append(fps_filter)
+    if fmt == "flipnote":
+        filters.append("format=monob,format=gray")
 
     if fmt == "mods":
         ycgco = "format=gbrp,geq=g='(r(X,Y)+2*g(X,Y)+b(X,Y))/4':b='(2*g(X,Y)-r(X,Y)-b(X,Y))/4+128':r='(r(X,Y)-b(X,Y))/2+128',mergeplanes=0x000102:yuv444p,format=yuv420p"

@@ -9,7 +9,9 @@ try:
                 return None
             if issubclass(exc_type, FileNotFoundError) and "ls" in str(exc_value):
                 return None
-            if issubclass(exc_type, (PermissionError, OSError)) and "/Volumes" in str(exc_value):
+            if issubclass(exc_type, (PermissionError, OSError)) and "/Volumes" in str(
+                exc_value
+            ):
                 return None
         return event
 
@@ -100,6 +102,7 @@ ENCODE_EXTENSIONS = {
     "wii_photo_m4a": "m4a",
     "3ds_sound": "m4a",
     "factor5": "vid",
+    "flipnote": "ppm",
 }
 
 # How many family cells sit side by side in the expandable grid.
@@ -255,6 +258,7 @@ class EncodeGUI(tk.Tk):
             "GameCube Factor 5 DivX .vid": "factor5",
             "DS ActImagine FastVideoDS .fv": "fastvideo",
             "DS MoonShell .dpg": "dpg",
+            "DSi Flipnote Studio .ppm": "flipnote",
             "Nintendo DSP-ADPCM .dsp": "dsp",
             "Wii stream .brstm": "brstm",
             "Wii U stream .bfstm": "bfstm",
@@ -290,6 +294,7 @@ class EncodeGUI(tk.Tk):
             "factor5": ["adpcm", "none"],
             "fastvideo": ["adpcm", "none"],
             "dpg": ["mp2", "none"],
+            "flipnote": ["pcm", "none"],
             # Audio-only formats: the choice is which of the container's own
             # codecs to write, so "none" is not on offer.
             "dsp": ["adpcm"],
@@ -1106,6 +1111,7 @@ class EncodeGUI(tk.Tk):
             "rvid",
             "dpg",
             "factor5",
+            "flipnote",
         ):
             fps = self.enc_fps_var.get().strip()
             if fps:
