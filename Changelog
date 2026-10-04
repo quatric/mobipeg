@@ -13,6 +13,7 @@ version 2.3:
 - Filtered legacy/charmap noise out of Sentry crash reporting; disabled sentry-native debug logging in fftools
 - Windows x86/x86_64 builds ship ffplay.exe and SDL2.dll again (missing since 2.0); the build now fails if ffplay is absent
 - Flipnote Studio (PPM) muxer: 256x192 1-bit video, optional 8192 Hz BGM as ADPCM, signed with RSA-1024/SHA-1 so the DSi accepts the note
+- encode.py and the GUI gained a `flipnote` format (DSi Flipnote Studio .ppm, dithered to 1-bit)
 - CI: retry dav1d downloads and fail fast on cross-toolchain apt install failures
 
 
