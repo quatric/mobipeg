@@ -632,6 +632,16 @@ static void nmr_solve_group(AVCodecContext *avctx, AACEncContext *s,
         destbits = av_clip(destbits + FFMIN(extra, avail), 64, 6800 * chans);
     }
 
+    {   /* Legality: a frame holds at most 6144 bits per channel including side
+         * info, which the burst budget above can exceed. The cap follows lambda
+         * so aac_encode_frame's overflow retry (which only lowers lambda)
+         * always converges instead of re-coding the same oversized frame. */
+        int side  = s->nmr->side_inited ? (int)(s->nmr->side_ema * chans / s->channels) : 0;
+        int legal = (6144 * chans - 3 - FFMAX(side, 256 * chans)) *
+                    FFMIN(1.0f, lambda / 120.0f);
+        destbits  = FFMIN(destbits, FFMAX(legal, 64));
+    }
+
     if (rc_global) {
         /* corridor bisect around the servoed centre; pressure = stateless
          * rc_off multiplier (folding it into lam_rc winds up) */
