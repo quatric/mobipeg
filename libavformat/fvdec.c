@@ -31,9 +31,19 @@ static int fv_probe(const AVProbeData *p)
 {
     if (p->buf_size < 4)
         return 0;
-    if (AV_RL32(p->buf) == FV_MAGIC)
-        return AVPROBE_SCORE_MAX;
-    return 0;
+    if (AV_RL32(p->buf) != FV_MAGIC)
+        return 0;
+    /* The First Hunt movies (fvfhdec.c) use the same magic with a 36 byte
+     * header: 32 bit width and height at 0x08 and 0x0c, a sample rate at 0x14. */
+    if (p->buf_size >= 0x18) {
+        uint32_t w = AV_RL32(p->buf + 0x08), h = AV_RL32(p->buf + 0x0c);
+        uint32_t sr = AV_RL32(p->buf + 0x14);
+
+        if (w && h && !(w & 7) && !(h & 7) && w <= 4096 && h <= 4096 &&
+            sr >= 4000 && sr <= 96000)
+            return 0;
+    }
+    return AVPROBE_SCORE_MAX;
 }
 
 static int fv_read_header(AVFormatContext *s)
