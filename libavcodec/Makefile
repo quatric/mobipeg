@@ -555,6 +555,7 @@ OBJS-$(CONFIG_MMVIDEO_DECODER)         += mmvideo.o
 OBJS-$(CONFIG_MOBICLIP_DECODER)        += mobiclip.o
 OBJS-$(CONFIG_FASTVIDEO_DECODER)       += fastvideo.o
 OBJS-$(CONFIG_FASTVIDEO_ENCODER)       += fastvideo.o
+OBJS-$(CONFIG_FVFH_DECODER)            += fvfh.o
 OBJS-$(CONFIG_ADS_GBA_DECODER)         += adsgbavideo.o adslzma.o
 OBJS-$(CONFIG_ADS_GBA_ENCODER)         += adsgbavideoenc.o adslzma.o adslzmaenc.o
 OBJS-$(CONFIG_GBA_VX_DECODER)          += gbavxdec.o
