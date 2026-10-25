@@ -84,6 +84,7 @@ typedef struct QEntry {
     int      size;
     int64_t  pts;       /* µs */
     int      si;        /* stream index (0 video, 1 audio) */
+    int64_t  vframe;    /* video frame number, -1 for audio */
 } QEntry;
 
 typedef struct MOFLEXMuxContext {
@@ -633,6 +634,7 @@ static int q_push(MOFLEXMuxContext *m, int si, const uint8_t *data, int size,
     m->q[m->nq].size = size;
     m->q[m->nq].pts  = pts;
     m->q[m->nq].si   = si;
+    m->q[m->nq].vframe = -1;
     m->nq++;
     return 0;
 }
@@ -738,6 +740,8 @@ static int moflex_write_packet(AVFormatContext *s, AVPacket *pkt)
     int v = (m->nb_video > 1 && pkt->stream_index == m->video_in[1]) ? 1 : 0;
     int64_t pts = 1 + m->vframes[v] * 1000000LL * m->vfr.den / m->vfr.num;
     int ret = q_push(m, v, vdata, vsize, pts);
+    if (ret >= 0)
+        m->q[m->nq - 1].vframe = m->vframes[v];
     m->vframes[v]++;
     if (v == 0)
         m->total_frames++;   /* duration / seek table track the primary video */
@@ -891,6 +895,27 @@ static int moflex_write_trailer(AVFormatContext *s)
      *    one audio chunk per video frame carries ~6 ADPCM subframes at 48kHz/30fps. */
     if (m->nq > 0)
         qsort(m->q, m->nq, sizeof(QEntry), q_cmp);
+    /* Frame-interleaved 3D (one video stream, ImageLayout 0/1) stores the two
+     * eyes of a picture as consecutive frames, so cutting audio per frame gives
+     * ~16 ms chunks at 60 fps and the 3DS player stutters on the audio.  Move
+     * each second-eye frame back over the audio run in front of it so the audio
+     * of the whole pair is one run, i.e. one ~33 ms chunk like a 30 fps 2D file.
+     * Video order and all timestamps are unchanged.  Done in place: the run is
+     * shifted up one slot and the frame dropped in ahead of it. */
+    if (m->nb_video == 1 && (m->mo_layout == 0 || m->mo_layout == 1)) {
+        for (int i = 1; i < m->nq; i++) {
+            if (m->q[i].si != 0 || m->q[i].vframe < 0 || !(m->q[i].vframe & 1))
+                continue;
+            int j = i;
+            while (j > 0 && m->q[j - 1].si == m->audio_ep)
+                j--;
+            if (j < i) {
+                QEntry e = m->q[i];
+                memmove(&m->q[j + 1], &m->q[j], (i - j) * sizeof(QEntry));
+                m->q[j] = e;
+            }
+        }
+    }
     for (int i = 0; i < m->nq; ) {
         if (m->q[i].si == m->audio_ep) {
             /* Collect consecutive audio blocks for this video-frame window. */
