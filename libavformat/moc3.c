@@ -62,7 +62,7 @@ typedef struct MOC3DemuxContext {
  *   0   magic      "MOC2" or "MOC3"
  *   4   hdr_size   LE32  (varies: 64 on MOC2, 240/284/288/292 on MOC3 — do not
  *                        assume a fixed value, the old code hardcoded 240/256)
- *   8   tag        "fla2" | "gvi3" | "vid2"
+ *   8   tag        "fla2" | "fla3" | "gvi3" | "vid2" | "vid3"
  *   12  LE32       small count (8/10/14)
  *   16  header region, hdr_size bytes; its last 8 bytes are
  *          payload_size LE32 @ hdr_size+8, then a licence-date-looking LE32
@@ -81,7 +81,10 @@ static int moc3_probe(const AVProbeData *p)
         return 0;
 
     tag = AV_RL32(p->buf + 8);
-    if (tag != MKTAG('f', 'l', 'a', '2') && tag != MKTAG('v', 'i', 'd', '2') &&
+    /* The Pixter Multimedia firmware dispatches fla2/fla3 and vid2/vid3 to the
+     * same parser, so the version digit does not change the layout. */
+    if (tag != MKTAG('f', 'l', 'a', '2') && tag != MKTAG('f', 'l', 'a', '3') &&
+        tag != MKTAG('v', 'i', 'd', '2') && tag != MKTAG('v', 'i', 'd', '3') &&
         tag != MKTAG('g', 'v', 'i', '3'))
         return 0;
 
@@ -225,7 +228,7 @@ static int moc3_read_header(AVFormatContext *s)
     if (hdr_size < 16 || hdr_size > (1 << 20))
         return AVERROR_INVALIDDATA;
 
-    m->is_vid2 = (tag == MKTAG('v', 'i', 'd', '2'));
+    m->is_vid2 = (tag == MKTAG('v', 'i', 'd', '2') || tag == MKTAG('v', 'i', 'd', '3'));
     m->current_frame = 0;
     m->frame_count = 0;
     m->has_audio = 0;
