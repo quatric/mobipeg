@@ -55,6 +55,10 @@ typedef struct MOC3DemuxContext {
      * parses as an I-frame with quantizer 48-51. */
     int        fla2_whole;
     int        width, height;
+    int        fla2_as_video;
+    int        is_fla;          /* fla2/fla3: Em-Flash movie, not a video bitstream */
+    uint32_t   fla_seed;
+    int64_t    fla_size;
 } MOC3DemuxContext;
 
 /* Container layout, validated against a 70-file corpus — every MOC2/fla2,
@@ -230,6 +234,8 @@ static int moc3_read_header(AVFormatContext *s)
         return AVERROR_INVALIDDATA;
 
     m->is_vid2 = (tag == MKTAG('v', 'i', 'd', '2') || tag == MKTAG('v', 'i', 'd', '3'));
+    m->is_fla  = (tag == MKTAG('f', 'l', 'a', '2') || tag == MKTAG('f', 'l', 'a', '3')) &&
+                 !m->fla2_as_video;
     m->current_frame = 0;
     m->frame_count = 0;
     m->has_audio = 0;
@@ -270,6 +276,8 @@ static int moc3_read_header(AVFormatContext *s)
         int64_t save  = avio_tell(pb);
         if (fsize > 0 && avio_seek(pb, 8 + (int64_t)hdr_size, SEEK_SET) >= 0) {
             uint32_t payload_size = avio_rl32(pb);
+            m->fla_size = payload_size;
+            m->fla_seed = avio_rl32(pb);
             if ((int64_t)video_data_start + payload_size != fsize)
                 av_log(s, AV_LOG_WARNING,
                        "moc3: size mismatch — 16+%u+%u = %"PRId64" but file is %"PRId64"\n",
@@ -277,6 +285,15 @@ static int moc3_read_header(AVFormatContext *s)
                        (int64_t)video_data_start + payload_size, fsize);
             avio_seek(pb, save, SEEK_SET);
         }
+    }
+
+    if (m->is_fla) {
+        vst->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+        vst->codecpar->codec_id   = AV_CODEC_ID_BIN_DATA;
+        vst->codecpar->width      = 0;
+        vst->codecpar->height     = 0;
+        m->nb_frames = 2;
+        return 0;
     }
 
     if (m->is_vid2) {
@@ -353,6 +370,34 @@ static int moc3_read_packet(AVFormatContext *s, AVPacket *pkt)
         }
 
         return ret;
+    } else if (m->is_fla) {
+        /* Em-Flash movie.  The Pixter Multimedia firmware XORs the payload with
+         * a 32-bit Galois LFSR (polynomial 0xA3000000) seeded from the LE32
+         * after the payload size, one word at a time, little-endian. */
+        uint32_t r = m->fla_seed;
+        int size, ret2;
+
+        if (m->current_frame)
+            return AVERROR_EOF;
+        size = FFMIN(m->fla_size, avio_size(pb) - m->data_start);
+        if (size <= 0)
+            return AVERROR_EOF;
+        ret2 = avio_seek(pb, m->data_start, SEEK_SET);
+        if (ret2 < 0)
+            return ret2;
+        ret2 = av_get_packet(pb, pkt, size);
+        if (ret2 < 0)
+            return ret2;
+        for (int i = 0; i + 4 <= pkt->size; i += 4) {
+            AV_WL32(pkt->data + i, AV_RL32(pkt->data + i) ^ r);
+            r = (r & 1) ? 0xA3000000u ^ (r >> 1) : r >> 1;
+        }
+        pkt->stream_index = 0;
+        pkt->pts = pkt->dts = 0;
+        pkt->duration = 1;
+        pkt->flags |= AV_PKT_FLAG_KEY;
+        m->current_frame++;
+        return ret2;
     } else {
         /* fla2: raw bitstream with frame boundaries */
         if (m->fla2_whole) {
@@ -443,6 +488,8 @@ static int moc3_read_close(AVFormatContext *s)
 static const AVOption moc3_options[] = {
     { "fla2_whole", "emit whole fla2 payload from offset 2 as one pre-swapped packet (experimental)",
       OFFSET(fla2_whole), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+    { "fla2_as_video", "treat fla2/fla3 as a MobiClip video bitstream (legacy; they are Em-Flash movies)",
+      OFFSET(fla2_as_video), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { "video_width",  "override the picture width (not yet found in the header)",
       OFFSET(width),  AV_OPT_TYPE_INT, {.i64 = 0}, 0, 4096, AV_OPT_FLAG_DECODING_PARAM },
     { "video_height", "override the picture height (not yet found in the header)",
