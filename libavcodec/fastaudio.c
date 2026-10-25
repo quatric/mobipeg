@@ -37,6 +37,7 @@ typedef struct ChannelItems {
 typedef struct FastAudioContext {
     const AVClass *class;
     float table[8][64];
+    int ds;             /* Nintendo DS variant (FVDS movies) */
 
     ChannelItems *ch;
 } FastAudioContext;
@@ -46,6 +47,7 @@ static av_cold int fastaudio_init(AVCodecContext *avctx)
     FastAudioContext *s = avctx->priv_data;
 
     avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+    s->ds = avctx->codec_tag == MKTAG('F', 'V', 'D', 'S');
 
     for (int i = 0; i < 8; i++)
         s->table[0][i] = (i - 159.5f) / 160.f;
@@ -149,7 +151,7 @@ static int fastaudio_decode(AVCodecContext *avctx, AVFrame *frame,
                         /* tmp is a 4-bit value (0-15) from two pairs of 2-bit reads.
                          * PlayMobic: results[..] = scale * (sample60 - 7)
                          * i.e. map 0-15 linearly to -7..+8, not 2*(tmp/2)-7. */
-                        v_out = (float)tmp - 7.0f;
+                        v_out = s->ds ? 2.0f * (tmp >> 1) - 7.0f : (float)tmp - 7.0f;
                     } else {
                         v_out = 2.0f * read_bits(3, &pos, src) - 7.0f;
                     }

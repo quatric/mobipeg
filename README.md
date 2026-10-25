@@ -19,6 +19,7 @@ such as audio, video, subtitles and related metadata.
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
 | Factor 5 DivX | `.vid` | GameCube (Factor 5) | ✅ | ✅ |
 | FastVideo DS | `.fv` | Nintendo DS | ✅ | ✅ |
+| FVDS (First Hunt) | `.fv` | Nintendo DS (Metroid Prime Hunters: First Hunt demo) | — | ✅ |
 | Flipnote Studio | `.ppm` | Nintendo DS / DSi | — | ✅ |
 | Flipnote Studio 3D | `.kwz` | Nintendo 3DS | — | ✅ |
 | GBA FVMV | `.gba` | Game Boy Advance (Pokémon) | — | ✅ |

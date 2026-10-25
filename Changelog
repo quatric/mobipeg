@@ -2,6 +2,8 @@ Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
 version 2.3:
+- FVDS (First Hunt) demuxer and video decoder, bit-exact against the game's own decoder; FastAudio DS variant
+- MobiClip mus1 audio demuxer; fla2/fla3 Em-Flash payload descrambling; fla3/vid3 tags
 - VX audio (GBA) demuxer and muxer with stereo support
 - Mobiclip MO/MODS/MOFLEX: full regression test suite against retail fixtures, stable remux, real frame rate, keyframe tables, and stream-copy support
 - Mobiclip MO/MODS/MOFLEX: fixed overflow/OOB reads, short reads, leaks, and invalid stream handling; switched to 64-bit timestamps

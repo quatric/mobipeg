@@ -339,6 +339,7 @@ enum AVCodecID {
     AV_CODEC_ID_SWAPDOODLE,
     AV_CODEC_ID_CAIMANS22,
     AV_CODEC_ID_CAIMANSPRO,
+    AV_CODEC_ID_FVFH,
 
     /* various PCM "codecs" */
     AV_CODEC_ID_FIRST_AUDIO = 0x10000,     ///< A dummy id pointing at the start of audio codecs

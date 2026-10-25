@@ -329,6 +329,7 @@ extern const FFInputFormat  ff_caimans22_demuxer;
 extern const FFInputFormat  ff_caimanspro_demuxer;
 extern const FFInputFormat  ff_rvid_demuxer;
 extern const FFInputFormat  ff_fv_demuxer;
+extern const FFInputFormat  ff_fvfh_demuxer;
 extern const FFOutputFormat ff_fv_muxer;
 extern const FFInputFormat  ff_hvqm4_demuxer;
 extern const FFOutputFormat ff_hvqm4_muxer;
