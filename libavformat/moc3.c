@@ -54,6 +54,7 @@ typedef struct MOC3DemuxContext {
      * input, so we pre-swap here to cancel that out.  With this, every sample
      * parses as an I-frame with quantizer 48-51. */
     int        fla2_whole;
+    int        width, height;
 } MOC3DemuxContext;
 
 /* Container layout, validated against a 70-file corpus — every MOC2/fla2,
@@ -247,8 +248,8 @@ static int moc3_read_header(AVFormatContext *s)
 
     /* Resolution/fps have not been located in the header yet; the values below
      * are placeholders (they match the a/ sample set). */
-    vst->codecpar->width  = 400;
-    vst->codecpar->height = 240;
+    vst->codecpar->width  = m->width  > 0 ? m->width  : 400;
+    vst->codecpar->height = m->height > 0 ? m->height : 240;
     avpriv_set_pts_info(vst, 64, 1, 25); /* default 25fps */
 
     /* Skip padding to align to header size */
@@ -442,6 +443,10 @@ static int moc3_read_close(AVFormatContext *s)
 static const AVOption moc3_options[] = {
     { "fla2_whole", "emit whole fla2 payload from offset 2 as one pre-swapped packet (experimental)",
       OFFSET(fla2_whole), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+    { "video_width",  "override the picture width (not yet found in the header)",
+      OFFSET(width),  AV_OPT_TYPE_INT, {.i64 = 0}, 0, 4096, AV_OPT_FLAG_DECODING_PARAM },
+    { "video_height", "override the picture height (not yet found in the header)",
+      OFFSET(height), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 4096, AV_OPT_FLAG_DECODING_PARAM },
     { NULL },
 };
 
