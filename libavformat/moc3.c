@@ -60,6 +60,9 @@ typedef struct MOC3DemuxContext {
     uint32_t   fla_seed;
     int64_t    fla_size;
     int        fla_raw;
+    int        fla_data;        /* emit the SWF file as data instead of video */
+    int        fla_frames;      /* frames to render, 0 = auto */
+    AVBufferRef *fla_swf;       /* the movie: SWF file, or the bare payload with fla_raw */
 } MOC3DemuxContext;
 
 /* Container layout, validated against a 70-file corpus — every MOC2/fla2,
@@ -210,6 +213,115 @@ static int moc3_parse_fla2_frames(AVFormatContext *s)
     return 0;
 }
 
+/* Em-Flash movie.  The Pixter Multimedia firmware XORs the payload with a
+ * 32-bit Galois LFSR (polynomial 0xA3000000) seeded from the LE32 after the
+ * payload size, one word at a time, little-endian.  The descrambled payload is
+ * an SWF body: u16 frame count, then ordinary SWF tags.  The 16 bytes before
+ * it carry the stage size in twips and the frame rate (8.8 fixed point), so a
+ * plain SWF file can be rebuilt around it.
+ * Returns the stage size, rate and frame count, and whether the movie has
+ * scripts or buttons. */
+static int moc3_load_fla(AVFormatContext *s, int *w, int *h, int *rate, int *nframes,
+                         int *interactive)
+{
+    MOC3DemuxContext *m = s->priv_data;
+    AVIOContext *pb = s->pb;
+    uint32_t r = m->fla_seed;
+    uint8_t hdr[32], *payload, *swf;
+    int size, nbits = 1, len, total, ret, pos;
+
+    {
+        int64_t avail = avio_size(pb) - m->data_start;
+        if (avail < 2 || m->fla_size < 2 || m->fla_size > (1 << 28))
+            return AVERROR_INVALIDDATA;
+        size = FFMIN(m->fla_size, avail);
+    }
+    if ((ret = avio_seek(pb, m->data_start - 16, SEEK_SET)) < 0)
+        return ret;
+    *w    = (int16_t)avio_rl16(pb);
+    *h    = (int16_t)avio_rl16(pb);
+    *rate = avio_rl16(pb);
+    if ((ret = avio_seek(pb, m->data_start, SEEK_SET)) < 0)
+        return ret;
+    payload = av_malloc(size + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!payload)
+        return AVERROR(ENOMEM);
+    ret = avio_read(pb, payload, size);
+    if (ret < size) {
+        av_free(payload);
+        return ret < 0 ? ret : AVERROR_INVALIDDATA;
+    }
+    memset(payload + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    for (int i = 0; i + 4 <= size; i += 4) {
+        AV_WL32(payload + i, AV_RL32(payload + i) ^ r);
+        r = (r & 1) ? 0xA3000000u ^ (r >> 1) : r >> 1;
+    }
+
+    *nframes = AV_RL16(payload);
+    /* scripts or buttons make a movie interactive: its length is open ended */
+    *interactive = 0;
+    for (pos = 2; pos + 2 <= size;) {
+        int code = AV_RL16(payload + pos) >> 6, l = AV_RL16(payload + pos) & 63;
+        pos += 2;
+        if (l == 63) {
+            if (pos + 4 > size)
+                break;
+            l = AV_RL32(payload + pos);
+            pos += 4;
+        }
+        if (!code || l < 0 || l > size - pos)
+            break;
+        if (code == 12 || code == 7 || code == 34)
+            *interactive = 1;
+        pos += l;
+    }
+
+    if (m->fla_raw) {
+        m->fla_swf = av_buffer_create(payload, size + AV_INPUT_BUFFER_PADDING_SIZE,
+                                      av_buffer_default_free, NULL, 0);
+        if (!m->fla_swf) {
+            av_free(payload);
+            return AVERROR(ENOMEM);
+        }
+        m->fla_swf->size = size;
+        return 0;
+    }
+
+    while (nbits < 16 && ((FFMAX(*w, *h) >> (nbits - 1)) != 0))
+        nbits++;
+    {   /* RECT: 5 bit nbits, then xmin xmax ymin ymax; xmin = ymin = 0 */
+        int vals[5] = { nbits, 0, *w, 0, *h };
+
+        memset(hdr, 0, sizeof(hdr));
+        pos = 0;
+        for (int i = 0; i < 5; i++) {
+            int n = i ? nbits : 5;
+            for (int b = n - 1; b >= 0; b--, pos++)
+                hdr[pos >> 3] |= ((vals[i] >> b) & 1) << (7 - (pos & 7));
+        }
+        len = (pos + 7) / 8;
+    }
+    AV_WL16(hdr + len, *rate);
+    AV_WL16(hdr + len + 2, AV_RL16(payload));
+    len += 4;
+
+    total = 8 + len + size - 2;
+    m->fla_swf = av_buffer_alloc(total + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!m->fla_swf) {
+        av_free(payload);
+        return AVERROR(ENOMEM);
+    }
+    swf = m->fla_swf->data;
+    memcpy(swf, "FWS\x05", 4);
+    AV_WL32(swf + 4, total);
+    memcpy(swf + 8, hdr, len);
+    memcpy(swf + 8 + len, payload + 2, size - 2);
+    memset(swf + total, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    m->fla_swf->size = total;
+    av_free(payload);
+    return 0;
+}
+
 static int moc3_read_header(AVFormatContext *s)
 {
     MOC3DemuxContext *m = s->priv_data;
@@ -289,11 +401,40 @@ static int moc3_read_header(AVFormatContext *s)
     }
 
     if (m->is_fla) {
-        vst->codecpar->codec_type = AVMEDIA_TYPE_DATA;
-        vst->codecpar->codec_id   = AV_CODEC_ID_BIN_DATA;
-        vst->codecpar->width      = 0;
-        vst->codecpar->height     = 0;
-        m->nb_frames = 2;
+        int w, h, rate, interactive, nframes;
+
+        ret = moc3_load_fla(s, &w, &h, &rate, &nframes, &interactive);
+        if (ret < 0)
+            return ret;
+        if (m->fla_raw || m->fla_data) {
+            vst->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+            vst->codecpar->codec_id   = AV_CODEC_ID_BIN_DATA;
+            vst->codecpar->width      = 0;
+            vst->codecpar->height     = 0;
+            m->nb_frames = 1;
+            return 0;
+        }
+        if (w <= 0 || h <= 0)
+            return AVERROR_INVALIDDATA;
+        if (rate <= 0)
+            rate = 12 << 8;
+        /* a movie that waits for input gets 30 seconds unless told otherwise */
+        nframes = m->fla_frames ? m->fla_frames :
+                  interactive ? (int)(30LL * rate / 256) : FFMAX(nframes, 1);
+        /* the movie travels as extradata, packets only say which frame to show */
+        ret = ff_alloc_extradata(vst->codecpar, m->fla_swf->size);
+        if (ret < 0)
+            return ret;
+        memcpy(vst->codecpar->extradata, m->fla_swf->data, m->fla_swf->size);
+        av_buffer_unref(&m->fla_swf);
+        vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+        vst->codecpar->codec_id   = AV_CODEC_ID_EMFLASH;
+        vst->codecpar->width      = m->width  > 0 ? m->width  : (w + 10) / 20;
+        vst->codecpar->height     = m->height > 0 ? m->height : (h + 10) / 20;
+        avpriv_set_pts_info(vst, 64, 256, rate);
+        vst->nb_frames = nframes;
+        vst->duration  = nframes;
+        m->nb_frames   = nframes;
         return 0;
     }
 
@@ -372,83 +513,26 @@ static int moc3_read_packet(AVFormatContext *s, AVPacket *pkt)
 
         return ret;
     } else if (m->is_fla) {
-        /* Em-Flash movie.  The Pixter Multimedia firmware XORs the payload with
-         * a 32-bit Galois LFSR (polynomial 0xA3000000) seeded from the LE32
-         * after the payload size, one word at a time, little-endian. */
-        uint32_t r = m->fla_seed;
-        int size, ret2;
-
-        if (m->current_frame)
+        if (m->current_frame >= m->nb_frames)
             return AVERROR_EOF;
-        size = FFMIN(m->fla_size, avio_size(pb) - m->data_start);
-        if (size <= 0)
-            return AVERROR_EOF;
-        ret2 = avio_seek(pb, m->data_start, SEEK_SET);
-        if (ret2 < 0)
-            return ret2;
-        ret2 = av_get_packet(pb, pkt, size);
-        if (ret2 < 0)
-            return ret2;
-        for (int i = 0; i + 4 <= pkt->size; i += 4) {
-            AV_WL32(pkt->data + i, AV_RL32(pkt->data + i) ^ r);
-            r = (r & 1) ? 0xA3000000u ^ (r >> 1) : r >> 1;
-        }
-        if (!m->fla_raw && pkt->size >= 2) {
-            /* The descrambled payload is an SWF body: u16 frame count, then
-             * ordinary SWF tags.  The 16 bytes before it carry the stage size
-             * in twips and the frame rate (8.8 fixed point), so a plain SWF
-             * file can be rebuilt around it. */
-            uint8_t hdr[32], *swf;
-            int64_t save = avio_tell(pb);
-            int w, h, rate, nbits = 1, len, total;
-            AVPacket *wrapped = pkt;
-        
-            avio_seek(pb, m->data_start - 16, SEEK_SET);
-            w    = (int16_t)avio_rl16(pb);
-            h    = (int16_t)avio_rl16(pb);
-            rate = avio_rl16(pb);
-            avio_seek(pb, save, SEEK_SET);
-
-            while (nbits < 16 && ((FFMAX(w, h) >> (nbits - 1)) != 0))
-                nbits++;
-            /* RECT: 5 bit nbits, then xmin xmax ymin ymax; xmin = ymin = 0 */
-            {
-                int vals[5] = { nbits, 0, w, 0, h }, pos = 0;
-
-                memset(hdr, 0, sizeof(hdr));
-                for (int i = 0; i < 5; i++) {
-                    int n = i ? nbits : 5;
-                    for (int b = n - 1; b >= 0; b--, pos++)
-                        hdr[pos >> 3] |= ((vals[i] >> b) & 1) << (7 - (pos & 7));
-                }
-                len = (pos + 7) / 8;
-            }
-            AV_WL16(hdr + len, rate);
-            AV_WL16(hdr + len + 2, AV_RL16(pkt->data));
-            len += 4;
-
-            total = 8 + len + pkt->size - 2;
-            swf = av_malloc(total + AV_INPUT_BUFFER_PADDING_SIZE);
-            if (!swf)
+        if (m->fla_swf) {               /* fla_data / fla_raw: the file itself */
+            pkt->buf = av_buffer_ref(m->fla_swf);
+            if (!pkt->buf)
                 return AVERROR(ENOMEM);
-            memcpy(swf, "FWS\x05", 4);
-            AV_WL32(swf + 4, total);
-            memcpy(swf + 8, hdr, len);
-            memcpy(swf + 8 + len, pkt->data + 2, pkt->size - 2);
-            memset(swf + total, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-            av_packet_unref(wrapped);
-            ret2 = av_packet_from_data(pkt, swf, total);
-            if (ret2 < 0) {
-                av_free(swf);
-                return ret2;
-            }
+            pkt->data = m->fla_swf->data;
+            pkt->size = m->fla_swf->size;
+        } else {                        /* rendering: the frame number */
+            ret = av_new_packet(pkt, 4);
+            if (ret < 0)
+                return ret;
+            AV_WL32(pkt->data, m->current_frame);
         }
         pkt->stream_index = 0;
-        pkt->pts = pkt->dts = 0;
+        pkt->pts = pkt->dts = m->current_frame;
         pkt->duration = 1;
         pkt->flags |= AV_PKT_FLAG_KEY;
         m->current_frame++;
-        return pkt->size;
+        return 0;
     } else {
         /* fla2: raw bitstream with frame boundaries */
         if (m->fla2_whole) {
@@ -512,6 +596,10 @@ static int moc3_read_seek(AVFormatContext *s, int stream_index, int64_t timestam
     if (m->is_vid2) {
         /* vid2 seek not yet implemented */
         return AVERROR(ENOSYS);
+    } else if (m->is_fla) {
+        /* the decoder replays the movie up to the frame a packet names */
+        m->current_frame = av_clip64(timestamp, 0, FFMAX(m->nb_frames - 1, 0));
+        return 0;
     } else {
         /* fla2: seek to frame */
         int frame = (int)timestamp;
@@ -532,6 +620,7 @@ static int moc3_read_close(AVFormatContext *s)
 {
     MOC3DemuxContext *m = s->priv_data;
     av_free(m->frame_offsets);
+    av_buffer_unref(&m->fla_swf);
     return 0;
 }
 
@@ -541,11 +630,15 @@ static const AVOption moc3_options[] = {
       OFFSET(fla2_whole), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { "fla2_as_video", "treat fla2/fla3 as a MobiClip video bitstream (legacy; they are Em-Flash movies)",
       OFFSET(fla2_as_video), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
-    { "fla_raw", "emit the descrambled fla2/fla3 payload as is instead of a complete SWF file",
+    { "fla_data", "emit fla2/fla3 movies as a complete SWF file on a data stream instead of rendering them",
+      OFFSET(fla_data), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+    { "fla_raw", "emit the descrambled fla2/fla3 payload as is on a data stream",
       OFFSET(fla_raw), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
-    { "video_width",  "override the picture width (not yet found in the header)",
+    { "fla_frames", "number of fla2/fla3 frames to render (0 = the movie length, 30 s if it is interactive)",
+      OFFSET(fla_frames), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
+    { "video_width",  "override the picture width (fla2/fla3: render size)",
       OFFSET(width),  AV_OPT_TYPE_INT, {.i64 = 0}, 0, 4096, AV_OPT_FLAG_DECODING_PARAM },
-    { "video_height", "override the picture height (not yet found in the header)",
+    { "video_height", "override the picture height (fla2/fla3: render size)",
       OFFSET(height), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 4096, AV_OPT_FLAG_DECODING_PARAM },
     { NULL },
 };
