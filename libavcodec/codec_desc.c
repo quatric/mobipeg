@@ -2096,6 +2096,12 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .props     = AV_CODEC_PROP_LOSSY,
     },
     {
+        .id        = AV_CODEC_ID_EMFLASH,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "emflash",
+        .long_name = NULL_IF_CONFIG_SMALL("Em-Flash (Pixter Multimedia Flash movie)"),
+    },
+    {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "pcm_s16le",
