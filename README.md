@@ -31,7 +31,7 @@ such as audio, video, subtitles and related metadata.
 | Nintendo Channel | `.3gp` | Wii | ✅ | ✅ |
 | Nintendo 3DS Camera (2D) | `.avi` | Nintendo 3DS | ✅ | ✅ |
 | MO | `.mo` | Nintendo Wii | ✅ | ✅ |
-| MOC2 / MOC3 | `.mo` | Nintendo Wii (early MobiClip) | — | ✅ (`fla2`/`fla3` are Em-Flash movies: payload is descrambled and exposed as data only) |
+| MOC2 / MOC3 | `.mo` | Nintendo Wii (early MobiClip) | — | ✅ (`fla2`/`fla3` are Em-Flash movies: the payload is descrambled and emitted as a complete SWF file on a data stream, e.g. `-c copy -f data out.swf`; `-fla_raw 1` keeps the bare payload) |
 | MODS | `.mods` | Nintendo DS | ✅ | ✅ |
 | MOFLEX 2D | `.moflex` | Nintendo 3DS | ✅ | ✅ |
 | MOFLEX 3D | `.moflex` | Nintendo 3DS | ✅ | ✅ |

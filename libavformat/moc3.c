@@ -59,6 +59,7 @@ typedef struct MOC3DemuxContext {
     int        is_fla;          /* fla2/fla3: Em-Flash movie, not a video bitstream */
     uint32_t   fla_seed;
     int64_t    fla_size;
+    int        fla_raw;
 } MOC3DemuxContext;
 
 /* Container layout, validated against a 70-file corpus — every MOC2/fla2,
@@ -392,12 +393,62 @@ static int moc3_read_packet(AVFormatContext *s, AVPacket *pkt)
             AV_WL32(pkt->data + i, AV_RL32(pkt->data + i) ^ r);
             r = (r & 1) ? 0xA3000000u ^ (r >> 1) : r >> 1;
         }
+        if (!m->fla_raw && pkt->size >= 2) {
+            /* The descrambled payload is an SWF body: u16 frame count, then
+             * ordinary SWF tags.  The 16 bytes before it carry the stage size
+             * in twips and the frame rate (8.8 fixed point), so a plain SWF
+             * file can be rebuilt around it. */
+            uint8_t hdr[32], *swf;
+            int64_t save = avio_tell(pb);
+            int w, h, rate, nbits = 1, len, total;
+            AVPacket *wrapped = pkt;
+        
+            avio_seek(pb, m->data_start - 16, SEEK_SET);
+            w    = (int16_t)avio_rl16(pb);
+            h    = (int16_t)avio_rl16(pb);
+            rate = avio_rl16(pb);
+            avio_seek(pb, save, SEEK_SET);
+
+            while (nbits < 16 && ((FFMAX(w, h) >> (nbits - 1)) != 0))
+                nbits++;
+            /* RECT: 5 bit nbits, then xmin xmax ymin ymax; xmin = ymin = 0 */
+            {
+                int vals[5] = { nbits, 0, w, 0, h }, pos = 0;
+
+                memset(hdr, 0, sizeof(hdr));
+                for (int i = 0; i < 5; i++) {
+                    int n = i ? nbits : 5;
+                    for (int b = n - 1; b >= 0; b--, pos++)
+                        hdr[pos >> 3] |= ((vals[i] >> b) & 1) << (7 - (pos & 7));
+                }
+                len = (pos + 7) / 8;
+            }
+            AV_WL16(hdr + len, rate);
+            AV_WL16(hdr + len + 2, AV_RL16(pkt->data));
+            len += 4;
+
+            total = 8 + len + pkt->size - 2;
+            swf = av_malloc(total + AV_INPUT_BUFFER_PADDING_SIZE);
+            if (!swf)
+                return AVERROR(ENOMEM);
+            memcpy(swf, "FWS\x05", 4);
+            AV_WL32(swf + 4, total);
+            memcpy(swf + 8, hdr, len);
+            memcpy(swf + 8 + len, pkt->data + 2, pkt->size - 2);
+            memset(swf + total, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+            av_packet_unref(wrapped);
+            ret2 = av_packet_from_data(pkt, swf, total);
+            if (ret2 < 0) {
+                av_free(swf);
+                return ret2;
+            }
+        }
         pkt->stream_index = 0;
         pkt->pts = pkt->dts = 0;
         pkt->duration = 1;
         pkt->flags |= AV_PKT_FLAG_KEY;
         m->current_frame++;
-        return ret2;
+        return pkt->size;
     } else {
         /* fla2: raw bitstream with frame boundaries */
         if (m->fla2_whole) {
@@ -490,6 +541,8 @@ static const AVOption moc3_options[] = {
       OFFSET(fla2_whole), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { "fla2_as_video", "treat fla2/fla3 as a MobiClip video bitstream (legacy; they are Em-Flash movies)",
       OFFSET(fla2_as_video), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+    { "fla_raw", "emit the descrambled fla2/fla3 payload as is instead of a complete SWF file",
+      OFFSET(fla_raw), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { "video_width",  "override the picture width (not yet found in the header)",
       OFFSET(width),  AV_OPT_TYPE_INT, {.i64 = 0}, 0, 4096, AV_OPT_FLAG_DECODING_PARAM },
     { "video_height", "override the picture height (not yet found in the header)",
