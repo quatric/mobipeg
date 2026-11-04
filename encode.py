@@ -197,7 +197,7 @@ def stereo_layout(inp, ifmt):
             ],
             stderr=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         out = (p.stdout or "").lower()
         if p.returncode != 0:
@@ -301,7 +301,7 @@ def _decodes_cleanly(path):
             + input_fmt(path)
             + ["-i", path, "-frames:v", "3", "-f", "null", "-"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=30,
         )
         return p.returncode == 0 and not p.stderr.strip()
@@ -429,7 +429,7 @@ def probe_duration(inp):
                 inp,
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         return float(p.stdout.strip())
     except Exception:
@@ -483,7 +483,7 @@ def probe_fps(inp):
                 inp,
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         num, den = p.stdout.strip().split("/")
         den = float(den)
@@ -508,7 +508,7 @@ def probe_audio_rate(inp):
                 inp,
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         return int(p.stdout.strip())
     except Exception:
@@ -627,7 +627,7 @@ def package_cia(parsed):
     def vi(*args):
         cmd = [VIDINJECTOR] + [str(a) for a in args]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=workdir)
         except FileNotFoundError as e:
             print(f"Command failed: {cmd[0]}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -1573,7 +1573,7 @@ def main():
         p = subprocess.run(
             [FFENC, "-hide_banner", "-f", dmx, "-i", container],
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         for line in p.stderr.splitlines():
             if "Stream" in line or "Duration" in line:
@@ -1735,7 +1735,7 @@ def main():
                 container,
             ],
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         for line in p.stderr.splitlines():
             if "Stream" in line or "Duration" in line:
@@ -2289,7 +2289,7 @@ def main():
     p = subprocess.run(
         [FFENC, "-hide_banner", "-f", dmx, "-i", container],
         stderr=subprocess.PIPE,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     for line in p.stderr.splitlines():
         if "Stream" in line or "Duration" in line:

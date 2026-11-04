@@ -5,7 +5,14 @@ try:
     def _sentry_before_send(event, hint):
         if "exc_info" in hint:
             exc_type, exc_value, _ = hint["exc_info"]
-            if issubclass(exc_type, UnicodeEncodeError):
+            if issubclass(exc_type, (UnicodeEncodeError, KeyboardInterrupt)):
+                return None
+            # Broken/missing Tcl install on the user's machine; not an app bug.
+            if "Can't find a usable" in str(exc_value) and "tcl" in str(exc_value):
+                return None
+            # Wrong-architecture helper binary (Errno 86 Bad CPU type): user-environment
+            # error, now reported to the user by _handle_binary_error.
+            if issubclass(exc_type, OSError) and getattr(exc_value, "errno", None) == 86:
                 return None
             if issubclass(exc_type, FileNotFoundError) and "ls" in str(exc_value):
                 return None
