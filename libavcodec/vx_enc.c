@@ -123,6 +123,7 @@ typedef struct VXEncContext {
     int me_range;                /* option: motion search range (luma px) */
 
     uint16_t qtab[3];
+    double   qscale[3];          /* 64.0 / qtab[i] */
     double   lambda;             /* RD Lagrange multiplier (from qtab) */
 
     int width, height;
@@ -141,9 +142,6 @@ typedef struct VXEncContext {
 
     uint8_t *coeff_y;  int coeff_y_stride;  int coeff_y_size;
     uint8_t *coeff_uv; int coeff_uv_stride; int coeff_uv_size;
-
-    /* scratch for RD save/restore */
-    uint8_t *save_coeff_y, *save_coeff_uv;
 
     /* rate control */
     int64_t  target_bits;        /* per-frame bit budget, 0 = CQP */
@@ -164,20 +162,19 @@ typedef struct VXEncContext {
 
 /* ---- plane access (plane 0 = Y full res, 1/2 = U/V half res) ---- */
 
-static inline int rec_get(VXEncContext *s, int plane, int x, int y)
-{
-    int step = plane ? 2 : 1;
-    return s->rec[plane][(y / step) * s->stride[plane] + (x / step)];
-}
 static inline void rec_set(VXEncContext *s, int plane, int x, int y, int v)
 {
     int step = plane ? 2 : 1;
     s->rec[plane][(y / step) * s->stride[plane] + (x / step)] = v;
 }
-static inline int goal_get(VXEncContext *s, int plane, int x, int y)
+
+/* Where the pixel at luma position (x, y) lives in a plane laid out like
+ * rec[plane]; x and y must not be negative. */
+static av_always_inline uint8_t *plane_ptr(const VXEncContext *s, uint8_t *const *planes,
+                                           int plane, int x, int y)
 {
-    int step = plane ? 2 : 1;
-    return s->goal[plane][(y / step) * s->stride[plane] + (x / step)];
+    const int shift = !!plane;
+    return planes[plane] + (y >> shift) * s->stride[plane] + (x >> shift);
 }
 
 /* reference pixel fetch, byte-for-byte identical to the decoder's px_get so
@@ -216,49 +213,71 @@ static inline void coeff_uv_set(VXEncContext *s, int x, int y, int v)
 
 static void predict_dc(VXEncContext *s, MBlock b, int plane)
 {
-    int dc = 128, step = plane ? 2 : 1;
-    if (b.x != 0 && b.y != 0) {
-        int sx = b.w / 2, sy = b.h / 2;
-        for (int i = 0; i < b.w; i++) sx += rec_get(s, plane, b.x + i, b.y - 1);
-        for (int i = 0; i < b.h; i++) sy += rec_get(s, plane, b.x - 1, b.y + i);
-        dc = ((sx / b.w) + (sy / b.h) + 1) / 2;
-    } else if (b.x == 0 && b.y != 0) {
-        int sx = b.w / 2;
-        for (int i = 0; i < b.w; i++) sx += rec_get(s, plane, b.x + i, b.y - 1);
-        dc = sx / b.w;
-    } else if (b.x != 0 && b.y == 0) {
-        int sy = b.h / 2;
-        for (int i = 0; i < b.h; i++) sy += rec_get(s, plane, b.x - 1, b.y + i);
-        dc = sy / b.h;
+    const int step = plane ? 2 : 1, stride = s->stride[plane];
+    uint8_t *dst = plane_ptr(s, s->rec, plane, b.x, b.y);
+    int dc = 128;
+    int sx = b.w / 2, sy = b.h / 2;
+
+    /* the row above and the column to the left, each luma position counted
+     * (so a chroma sample counts twice) */
+    if (b.y != 0) {
+        const uint8_t *above = plane_ptr(s, s->rec, plane, b.x, b.y - 1);
+        for (int i = 0; i < b.w; i++) sx += above[i / step];
     }
-    for (int j = 0; j < b.h; j += step)
-        for (int i = 0; i < b.w; i += step)
-            rec_set(s, plane, b.x + i, b.y + j, dc);
+    if (b.x != 0) {
+        const uint8_t *left = plane_ptr(s, s->rec, plane, b.x - 1, b.y);
+        for (int i = 0; i < b.h; i++) sy += left[(i / step) * stride];
+    }
+    if (b.x != 0 && b.y != 0)
+        dc = ((sx / b.w) + (sy / b.h) + 1) / 2;
+    else if (b.x == 0 && b.y != 0)
+        dc = sx / b.w;
+    else if (b.x != 0 && b.y == 0)
+        dc = sy / b.h;
+    for (int j = 0; j < b.h / step; j++)
+        memset(dst + j * stride, dc, b.w / step);
 }
 
 /* ---- forward transform: residual (goal - rec) -> quantized levels ---- */
 
+/* The transform is the 4x4 product of dct_gradient[] with itself, divided by
+ * 16 and scaled by 64 / qtab.  Its entries are 1 and 1/2, so twice the matrix
+ * is all integers and the unscaled coefficient is an integer over 4 -- small
+ * enough that summing it in doubles, as this used to, never rounded.  Work it
+ * out in integers, a row pass and a column pass, and leave to floating point
+ * only the final scaling, which is done exactly as before. */
+static av_always_inline void dct_gradient_x2(int r0, int r1, int r2, int r3, int out[4])
+{
+    const int a = r0 + r3, b = r1 + r2, c = r0 - r3, d = r1 - r2;
+
+    out[0] = 2 * (a + b);
+    out[1] = 2 * c + d;
+    out[2] = 2 * (a - b);
+    out[3] = c - 2 * d;
+}
+
 static int encode_dct(VXEncContext *s, int x, int y, int plane, int level[16])
 {
-    int step = plane ? 2 : 1;
-    int residu[4][4];
+    const int stride = s->stride[plane];
+    const uint8_t *goal = plane_ptr(s, s->goal, plane, x, y);
+    const uint8_t *rec  = plane_ptr(s, s->rec,  plane, x, y);
+    int rows[4][4];
     double avg[16];
     int any = 0;
 
-    for (int j = 0; j < 4; j++)
-        for (int i = 0; i < 4; i++)
-            residu[j][i] = goal_get(s, plane, x + i * step, y + j * step) -
-                           rec_get (s, plane, x + i * step, y + j * step);
+    for (int j = 0; j < 4; j++, goal += stride, rec += stride)
+        dct_gradient_x2(goal[0] - rec[0], goal[1] - rec[1],
+                        goal[2] - rec[2], goal[3] - rec[3], rows[j]);
 
-    for (int f = 0; f < 16; f++) {
-        int yres = f % 4, xres = f / 4;
-        double acc = 0;
-        for (int j = 0; j < 4; j++)
-            for (int i = 0; i < 4; i++)
-                acc += residu[j][i] * dct_gradient[yres][j] * dct_gradient[xres][i];
-        acc /= 16.0;
-        acc *= 64.0 / s->qtab[(yres & 1) + (xres & 1)];
-        avg[f] = acc;
+    for (int xres = 0; xres < 4; xres++) {
+        int col[4];
+
+        dct_gradient_x2(rows[0][xres], rows[1][xres], rows[2][xres], rows[3][xres], col);
+        for (int yres = 0; yres < 4; yres++) {
+            double acc = col[yres] / 64.0;
+            acc *= s->qscale[(yres & 1) + (xres & 1)];
+            avg[xres * 4 + yres] = acc;
+        }
     }
 
     for (int i = 0; i < 16; i++) {
@@ -272,7 +291,9 @@ static int encode_dct(VXEncContext *s, int x, int y, int plane, int level[16])
 
 static void idct_add(VXEncContext *s, int x, int y, int plane, const int *lvl)
 {
-    int dct[16], step = plane ? 2 : 1;
+    const int stride = s->stride[plane];
+    uint8_t *rec = plane_ptr(s, s->rec, plane, x, y);
+    int dct[16];
 
     for (int i = 0; i < 16; i++)
         dct[zigzag_scan[i]] = lvl[i] * s->qtab[(zigzag_scan[i] & 1) + ((zigzag_scan[i] >> 2) & 1)];
@@ -292,10 +313,10 @@ static void idct_add(VXEncContext *s, int x, int y, int plane, const int *lvl)
         int z1 = dct[0+4*i] - dct[2+4*i];
         int z2 = (dct[1+4*i] >> 1) - dct[3+4*i];
         int z3 = dct[1+4*i] + (dct[3+4*i] >> 1);
-        rec_set(s, plane, x+step*i, y+step*0, av_clip_uint8(rec_get(s, plane, x+step*i, y+step*0) + ((z0+z3) >> 6)));
-        rec_set(s, plane, x+step*i, y+step*1, av_clip_uint8(rec_get(s, plane, x+step*i, y+step*1) + ((z1+z2) >> 6)));
-        rec_set(s, plane, x+step*i, y+step*2, av_clip_uint8(rec_get(s, plane, x+step*i, y+step*2) + ((z1-z2) >> 6)));
-        rec_set(s, plane, x+step*i, y+step*3, av_clip_uint8(rec_get(s, plane, x+step*i, y+step*3) + ((z0-z3) >> 6)));
+        rec[i + 0*stride] = av_clip_uint8(rec[i + 0*stride] + ((z0+z3) >> 6));
+        rec[i + 1*stride] = av_clip_uint8(rec[i + 1*stride] + ((z1+z2) >> 6));
+        rec[i + 2*stride] = av_clip_uint8(rec[i + 2*stride] + ((z1-z2) >> 6));
+        rec[i + 3*stride] = av_clip_uint8(rec[i + 3*stride] + ((z0-z3) >> 6));
     }
 }
 
@@ -378,8 +399,7 @@ static int encode_residu_cavlc(VXEncContext *s, const int level_in[16], int nc, 
             int real_suffix_length = (level_prefix == 15) ? 11 : suffix_length;
             int level_suffix = mag - (level_prefix << suffix_length);
 
-            for (int k = 0; k < level_prefix; k++) put_bits(pb, 1, 0);
-            put_bits(pb, 1, 1);
+            put_bits(pb, level_prefix + 1, 1);   /* the zeros, then the one */
             if (real_suffix_length)
                 put_bits(pb, real_suffix_length, level_suffix);
             put_bits(pb, 1, signbit);
@@ -406,31 +426,44 @@ static int encode_residu_cavlc(VXEncContext *s, const int level_in[16], int nc, 
 
 /* ---- 8x8 residual block (4 luma 4x4 + interleaved U/V) ---- */
 
+/* where each mask sits in residu_mask_new_tab[] */
+static const uint8_t residu_mask_index_tab[32] = {
+     0,  4,  3, 10,  2,  8, 17, 15,  1, 16,  7, 14,  9, 13, 12,  6,
+    11, 26, 25, 29, 28, 23, 30, 22, 24, 31, 20, 19, 27, 21, 18,  5,
+};
+
 static int residu_mask_index(int mask)
 {
-    for (int i = 0; i < 32; i++)
-        if (residu_mask_new_tab[i] == mask)
-            return i;
-    return 0;
+    return residu_mask_index_tab[mask];
 }
 
-/* Returns 1 if the block has any residual worth coding. */
-static int encode_residu_block(VXEncContext *s, int x, int y, int write)
-{
+typedef struct ResiduLevels {
     int ly[4][16], lu[16], lv[16];
-    int m0, m1, m2, m3, mu, mv, mask;
+    int mask;
+} ResiduLevels;
 
-    m0 = encode_dct(s, x  , y  , 0, ly[0]);
-    m1 = encode_dct(s, x+4, y  , 0, ly[1]);
-    m2 = encode_dct(s, x  , y+4, 0, ly[2]);
-    m3 = encode_dct(s, x+4, y+4, 0, ly[3]);
-    mu = encode_dct(s, x, y, 1, lu);
-    mv = encode_dct(s, x, y, 2, lv);
+/* Transform the block's residual; returns 1 if any of it is worth coding. */
+static int residu_block_levels(VXEncContext *s, int x, int y, ResiduLevels *l)
+{
+    int m0, m1, m2, m3, mu, mv;
 
-    mask = m0 * 1 + m1 * 2 + m2 * 4 + m3 * 8 + ((mu || mv) ? 16 : 0);
+    m0 = encode_dct(s, x  , y  , 0, l->ly[0]);
+    m1 = encode_dct(s, x+4, y  , 0, l->ly[1]);
+    m2 = encode_dct(s, x  , y+4, 0, l->ly[2]);
+    m3 = encode_dct(s, x+4, y+4, 0, l->ly[3]);
+    mu = encode_dct(s, x, y, 1, l->lu);
+    mv = encode_dct(s, x, y, 2, l->lv);
 
-    if (!write)
-        return mask != 0;
+    l->mask = m0 * 1 + m1 * 2 + m2 * 4 + m3 * 8 + ((mu || mv) ? 16 : 0);
+    return l->mask != 0;
+}
+
+/* Reconstruct and write a block from its levels. */
+static void encode_residu_levels(VXEncContext *s, int x, int y, const ResiduLevels *l)
+{
+    const int (*ly)[16] = l->ly;
+    const int *lu = l->lu, *lv = l->lv;
+    const int mask = l->mask;
 
     idct_add(s, x  , y  , 0, ly[0]);
     idct_add(s, x+4, y  , 0, ly[1]);
@@ -467,8 +500,14 @@ static int encode_residu_block(VXEncContext *s, int x, int y, int write)
         int cv = encode_residu_cavlc(s, lv, nc, 2);
         coeff_uv_set(s, x, y, (cu + cv + 1) / 2);
     } else coeff_uv_set(s, x, y, 0);
+}
 
-    return 1;
+static void encode_residu_block(VXEncContext *s, int x, int y)
+{
+    ResiduLevels l;
+
+    residu_block_levels(s, x, y, &l);
+    encode_residu_levels(s, x, y, &l);
 }
 
 static void clear_total_coeff(VXEncContext *s, MBlock b)
@@ -492,6 +531,8 @@ static MBlock half_down(MBlock b)  { return (MBlock){ b.x, b.y + b.h/2, b.w, b.h
 
 static void encode_mb_intra(VXEncContext *s, MBlock b)
 {
+    ResiduLevels levels;
+
     if (b.w > b.h) {                     /* v-split */
         set_ue_golomb(&s->pb, MODE_VSPLIT_NORES);
         encode_mb_intra(s, half_left(b));
@@ -514,11 +555,11 @@ static void encode_mb_intra(VXEncContext *s, MBlock b)
     predict_dc(s, b, 1);
     predict_dc(s, b, 2);
 
-    if (encode_residu_block(s, b.x, b.y, 0)) {
+    if (residu_block_levels(s, b.x, b.y, &levels)) {
         set_ue_golomb(&s->pb, MODE_NOTILE_RES);
         set_ue_golomb(&s->pb, 2);        /* Y: DC */
         set_ue_golomb(&s->pb, 0);        /* UV: DC */
-        encode_residu_block(s, b.x, b.y, 1);
+        encode_residu_levels(s, b.x, b.y, &levels);
     } else {
         set_ue_golomb(&s->pb, MODE_NOTILE_NORES);
         set_ue_golomb(&s->pb, 2);
@@ -536,11 +577,15 @@ static inline int mv_in_bounds(VXEncContext *s, MBlock b, MV v)
 
 static int mc_sad_luma(VXEncContext *s, MBlock b, MV v, int r)
 {
+    /* the caller has checked mv_in_bounds(), so there is no wrap-around */
+    const uint8_t *goal = plane_ptr(s, s->goal, 0, b.x, b.y);
+    const uint8_t *ref  = plane_ptr(s, s->refplane[r], 0, b.x + v.x, b.y + v.y);
+    const int stride = s->stride[0];
     int sad = 0;
-    for (int j = 0; j < b.h; j++)
+
+    for (int j = 0; j < b.h; j++, goal += stride, ref += stride)
         for (int i = 0; i < b.w; i++)
-            sad += abs(goal_get(s, 0, b.x + i, b.y + j) -
-                       ref_px(s, r, 0, b.x + i + v.x, b.y + j + v.y));
+            sad += abs(goal[i] - ref[i]);
     return sad;
 }
 
@@ -584,6 +629,17 @@ static void mc_predict(VXEncContext *s, MBlock b, MV v, int r)
 {
     for (int plane = 0; plane < 3; plane++) {
         int step = plane ? 2 : 1;
+
+        if (mv_in_bounds(s, b, v)) {
+            /* no wrap-around: every row is one run of reference pixels (the
+             * rows of a chroma plane are fetched per row, as the vertical
+             * position rounds per row) */
+            for (int j = 0; j < b.h; j += step)
+                memcpy(plane_ptr(s, s->rec, plane, b.x, b.y + j),
+                       plane_ptr(s, s->refplane[r], plane, b.x + v.x, b.y + j + v.y),
+                       b.w / step);
+            continue;
+        }
         for (int j = 0; j < b.h; j += step)
             for (int i = 0; i < b.w; i += step)
                 rec_set(s, plane, b.x + i, b.y + j,
@@ -618,15 +674,15 @@ static void encode_inter_mb(VXEncContext *s, MBlock b, int r, MV mv, MV pred,
     if (residual) {
         for (int dy = 0; dy < b.h; dy += 8)
             for (int dx = 0; dx < b.w; dx += 8)
-                encode_residu_block(s, b.x + dx, b.y + dy, 1);
+                encode_residu_block(s, b.x + dx, b.y + dy);
     } else {
         clear_total_coeff(s, b);
     }
 }
 
 /* ---- per-macroblock RD save / restore (a 16x16 MB touches only its own
- * reconstruction region, coeff cells, one predictor-grid entry and the bit
- * writer). ---- */
+ * reconstruction region, its 4x4 + 2x2 coeff cells, one predictor-grid entry
+ * and the bit writer). ---- */
 
 typedef struct MBSave {
     PutBitContext pb;
@@ -634,6 +690,8 @@ typedef struct MBSave {
     uint8_t rec_y[16*16];
     uint8_t rec_u[8*8];
     uint8_t rec_v[8*8];
+    uint8_t coeff_y[4*4];
+    uint8_t coeff_uv[2*2];
 } MBSave;
 
 static void mb_save(VXEncContext *s, MBlock b, MBSave *sv)
@@ -646,8 +704,10 @@ static void mb_save(VXEncContext *s, MBlock b, MBSave *sv)
         memcpy(sv->rec_u + j*8, s->rec[1] + (b.y/2+j)*s->stride[1] + b.x/2, 8);
         memcpy(sv->rec_v + j*8, s->rec[2] + (b.y/2+j)*s->stride[2] + b.x/2, 8);
     }
-    memcpy(s->save_coeff_y,  s->coeff_y,  s->coeff_y_size);
-    memcpy(s->save_coeff_uv, s->coeff_uv, s->coeff_uv_size);
+    for (int j = 0; j < 4; j++)
+        memcpy(sv->coeff_y + j*4, s->coeff_y + (b.y/4+1+j)*s->coeff_y_stride + b.x/4+1, 4);
+    for (int j = 0; j < 2; j++)
+        memcpy(sv->coeff_uv + j*2, s->coeff_uv + (b.y/8+1+j)*s->coeff_uv_stride + b.x/8+1, 2);
 }
 
 static void mb_restore(VXEncContext *s, MBlock b, const MBSave *sv)
@@ -660,20 +720,28 @@ static void mb_restore(VXEncContext *s, MBlock b, const MBSave *sv)
         memcpy(s->rec[1] + (b.y/2+j)*s->stride[1] + b.x/2, sv->rec_u + j*8, 8);
         memcpy(s->rec[2] + (b.y/2+j)*s->stride[2] + b.x/2, sv->rec_v + j*8, 8);
     }
-    memcpy(s->coeff_y,  s->save_coeff_y,  s->coeff_y_size);
-    memcpy(s->coeff_uv, s->save_coeff_uv, s->coeff_uv_size);
+    for (int j = 0; j < 4; j++)
+        memcpy(s->coeff_y + (b.y/4+1+j)*s->coeff_y_stride + b.x/4+1, sv->coeff_y + j*4, 4);
+    for (int j = 0; j < 2; j++)
+        memcpy(s->coeff_uv + (b.y/8+1+j)*s->coeff_uv_stride + b.x/8+1, sv->coeff_uv + j*2, 2);
 }
 
 static int64_t mb_ssd(VXEncContext *s, MBlock b)
 {
     int64_t d = 0;
     for (int plane = 0; plane < 3; plane++) {
-        int step = plane ? 2 : 1;
-        for (int j = 0; j < b.h; j += step)
-            for (int i = 0; i < b.w; i += step) {
-                int e = rec_get(s, plane, b.x+i, b.y+j) - goal_get(s, plane, b.x+i, b.y+j);
-                d += (int64_t)e * e;
+        const int step = plane ? 2 : 1, stride = s->stride[plane];
+        const uint8_t *rec  = plane_ptr(s, s->rec,  plane, b.x, b.y);
+        const uint8_t *goal = plane_ptr(s, s->goal, plane, b.x, b.y);
+
+        for (int j = 0; j < b.h / step; j++, rec += stride, goal += stride) {
+            unsigned row = 0;
+            for (int i = 0; i < b.w / step; i++) {
+                int e = rec[i] - goal[i];
+                row += e * e;
             }
+            d += row;
+        }
     }
     return d;
 }
@@ -799,8 +867,9 @@ static void rgb24_to_goal(VXEncContext *s, const AVFrame *frame)
             for (int dy = 0; dy < 2; dy++) {
                 const uint8_t *row = frame->data[0] + (ptrdiff_t)(cy*2+dy) * frame->linesize[0];
                 for (int dx = 0; dx < 2; dx++) {
-                    int r = row[(cx*2+dx)*3+0], g = row[(cx*2+dx)*3+1], b = row[(cx*2+dx)*3+2];
-                    int yy = (2*r + 4*g + b + 3) / 7;
+                    int r = row[(cx*2+dx)*3+0], b = row[(cx*2+dx)*3+2];
+                    /* the luma pass has this already (it never clips) */
+                    int yy = s->goal[0][(cy*2+dy) * s->stride[0] + cx*2+dx];
                     su += (b - yy) / 2 + 128;
                     sv += (r - yy) / 2 + 128;
                 }
@@ -817,8 +886,10 @@ static void set_qtab(VXEncContext *s, int q)
 {
     int qx = q % 6, qy = q / 6;
     double qstep;
-    for (int i = 0; i < 3; i++)
-        s->qtab[i] = quant4x4_tab[qx][i] << qy;
+    for (int i = 0; i < 3; i++) {
+        s->qtab[i]   = quant4x4_tab[qx][i] << qy;
+        s->qscale[i] = 64.0 / s->qtab[i];
+    }
     /* SSD-domain Lagrange multiplier J = SSD + lambda*bits. A residual level of
      * 1 reconstructs to ~qtab/64 in the pixel domain, so the effective quant
      * step is qtab[0]/64; H.264's lambda ~= 0.85*qstep^2 for SSD carries over. */
@@ -996,13 +1067,10 @@ static av_cold int vxenc_init(AVCodecContext *avctx)
     s->coeff_uv_size   = (s->height/8 + 1) * s->coeff_uv_stride;
     s->coeff_y  = av_malloc(s->coeff_y_size);
     s->coeff_uv = av_malloc(s->coeff_uv_size);
-    s->save_coeff_y  = av_malloc(s->coeff_y_size);
-    s->save_coeff_uv = av_malloc(s->coeff_uv_size);
     s->vectors_stride = s->width / 16 + 2;
     s->vectors = av_malloc((size_t)(s->height/16 + 1) * s->vectors_stride * sizeof(*s->vectors));
     if (!s->rec[0] || !s->rec[1] || !s->rec[2] || !s->goal[0] || !s->goal[1] ||
-        !s->goal[2] || !s->coeff_y || !s->coeff_uv || !s->save_coeff_y ||
-        !s->save_coeff_uv || !s->vectors)
+        !s->goal[2] || !s->coeff_y || !s->coeff_uv || !s->vectors)
         return AVERROR(ENOMEM);
 
     /* header quantizer (patched by the muxer if RC later picks another) */
@@ -1096,8 +1164,6 @@ static av_cold int vxenc_close(AVCodecContext *avctx)
     }
     av_freep(&s->coeff_y);
     av_freep(&s->coeff_uv);
-    av_freep(&s->save_coeff_y);
-    av_freep(&s->save_coeff_uv);
     av_freep(&s->vectors);
     if (s->fifo) {
         for (int i = 0; i < s->fifo_len; i++)
