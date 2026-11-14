@@ -120,6 +120,11 @@ python3 encode.py 3ds_camera3d adpcm left.mp4 right.mp4
 
 `--layout N` (default `4`) sets the MOFLEX 3D layout for `moflex3d` output.
 
+A 2D `moflex` carries the plain video descriptor, as retail 2D movies do; a 3D
+one carries the descriptor with the layout byte. Should a player want the
+layout descriptor on a 2D movie too (layout 6, "simple 2D"), which is what
+this muxer wrote before, add `--ffmpeg-args '-mo_vdesc 3'`.
+
 ## MobiClip rate control (`mo`, `moflex`, `moflex3d`, `mods`)
 
 Requires a `--enable-libx264` build against the
