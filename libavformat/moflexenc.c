@@ -91,7 +91,7 @@ typedef struct MOFLEXMuxContext {
     const AVClass *class;   /* MUST be first */
     int audio_codec;        /* -1=auto, 0=fastaudio, 1=adpcm, 2=pcm */
     int block_size;         /* block_size written to the 4C32 sync header */
-    int vdesc_type;         /* video descriptor type: 3 = WithLayout, 1 = plain */
+    int vdesc_type;         /* video descriptor type: 3 = WithLayout, 1 = plain, 0 = by layout */
     int gop_size;           /* unused placeholder kept for option compat */
     int audio_stream_index;
     int video_stream_index;
@@ -261,16 +261,22 @@ static void write_descriptors(AVFormatContext *s, AVIOContext *pb)
 {
     MOFLEXMuxContext *m = s->priv_data;
 
-    /* Video descriptor(s).  Retail BOSS moflex uses type 3
-     * (MoLiveStreamVideoWithLayout, 13 bytes = the 12-byte video descriptor +
-     * 1 layout byte).  The 3DS player appears to only fast-path (hardware-
-     * decode) the layout descriptor; a plain type-1 descriptor falls back to a
-     * slow software path that crawls (~1-3 FPS) and eventually crashes.  The
-     * layout byte = (ImageLayout & 0xF) | (ImageRotation << 4).  ImageLayout:
+    /* Video descriptor(s).  A 2D movie gets the plain type 1 descriptor (12
+     * bytes), which is what retail 2D files such as WarioWare Gold's carry
+     * and what other tools take for 2D: MoflexTool reads every type 3 stream
+     * as a stereo pair.  A 3D movie gets type 3 (MoLiveStreamVideoWithLayout,
+     * 13 bytes = the 12-byte video descriptor + 1 layout byte), as the retail
+     * BOSS movies do.  An earlier note here had the 3DS player crawl (~1-3
+     * FPS) and eventually crash on a type 1 descriptor; -mo_vdesc 3 writes a
+     * 2D movie with the layout descriptor (Simple2D) again if a player needs
+     * it.  The layout byte = (ImageLayout & 0xF) | (ImageRotation << 4).
+     * ImageLayout:
      * 0/1 Interleave3D L/R-first, 2/3 TopToBottom3D, 4/5 SideBySide3D, 6 Simple2D.
      * 3DS stereoscopic 3D is a SINGLE video stream whose frames pack both eyes
      * per this layout (NOT two video chunks — the player renders only the first
      * chunk).  Set -mo_layout 4 with a side-by-side packed frame for L/R 3D. */
+    if (!m->vdesc_type)
+        m->vdesc_type = m->nb_video == 1 && (m->mo_layout & 15) == 6 ? 1 : 3;
     for (int v = 0; v < m->nb_video; v++) {
         AVStream *st = s->streams[m->video_in[v]];
         int layout = m->vdesc_type == 3;
@@ -1249,12 +1255,11 @@ static const AVOption moflex_options[] = {
      * encoder emits 2048-byte blocks instead. */
     { "mo_block",   "fixed block size in bytes, zero-padded (4096 = retail, 2048 = 3DS SDK)", OFFSET(block_size),
       AV_OPT_TYPE_INT, {.i64 = MOFLEX_BLOCK_DEFAULT}, 512, 65536, ENC },
-    /* 3 = MoLiveStreamVideoWithLayout (retail; hardware fast path), 1 = plain
-     * video descriptor (what the 3DS SDK encoder writes).  Type 1 is reported
-     * to fall back to a slow software path on the 3DS player, so 3 stays the
-     * default; use 1 only to reproduce SDK output byte-for-byte. */
-    { "mo_vdesc",   "video descriptor type (3 = with layout/retail, 1 = plain/SDK)", OFFSET(vdesc_type),
-      AV_OPT_TYPE_INT, {.i64 = 3}, 1, 3, ENC },
+    /* 1 = plain video descriptor (retail 2D movies, the 3DS SDK encoder),
+     * 3 = MoLiveStreamVideoWithLayout (retail 3D movies), 0 = 1 for a 2D
+     * movie and 3 for a 3D one. */
+    { "mo_vdesc",   "video descriptor type (0 = plain for 2D and with layout for 3D, 1 = plain, 3 = with layout)", OFFSET(vdesc_type),
+      AV_OPT_TYPE_INT, {.i64 = 0}, 0, 3, ENC },
     { "super_moflex", "Enable Super MOFLEX trailer with extra audio, subtitles and metadata (0=auto, 1=force)", OFFSET(super_moflex), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, ENC },
     { "smoflex",      "Alias for -super_moflex", OFFSET(super_moflex), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, ENC },
     { "gop_size",   "(ignored) keyframe interval", OFFSET(gop_size), AV_OPT_TYPE_INT,
