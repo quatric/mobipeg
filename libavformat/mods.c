@@ -73,12 +73,15 @@ typedef struct MODSDemuxContext {
     int      sx_emit_blocks;  /* >0: aud_buf holds a pending SX audio packet */
     /* Last video-field length reported by the split decoder, for MODS_DBG. */
     int last_vfield;
+    /* Bytes between the video and the audio of a key frame: an N3 file has a
+     * 4-byte word there, an N2 file (the older TWL SDK output) nothing. */
+    int key_word;
 } MODSDemuxContext;
 
 
 static int mods_probe(const AVProbeData *p)
 {
-    if (memcmp(p->buf, "MODSN3\x0a\x00", 8))
+    if (memcmp(p->buf, "MODSN3\x0a\x00", 8) && memcmp(p->buf, "MODSN2\x0a\x00", 8))
         return 0;
     if (AV_RB32(p->buf + 8) == 0)
         return 0;
@@ -101,7 +104,9 @@ static int mods_read_header(AVFormatContext *s)
     if (!st)
         return AVERROR(ENOMEM);
 
-    avio_skip(pb, 8);   /* "MODS" + format id "N3" + video codec u16 (=0x0A) */
+    avio_skip(pb, 5);   /* "MODS" + format id "N2" or "N3" + video codec u16 (=0x0A) */
+    m->key_word = avio_r8(pb) == '2' ? 0 : 4;
+    avio_skip(pb, 2);
 
     st->nb_frames            = avio_rl32(pb);  /* 0x08 */
     st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
@@ -499,7 +504,7 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                     audio_start = vfield;
                     audio_size  = audio_blocks * m->audio_channels * 128;
                     if (is_key && audio_blocks > 0)
-                        audio_size += 4 + 4 * m->audio_channels;
+                        audio_size += m->key_word + 4 * m->audio_channels;
 
                     /* Where the audio starts, in order of how much the
                      * chunk actually tells us.
@@ -548,7 +553,7 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                                  * then u16 predictor. */
                                 int ok = 1;
                                 for (int c = 0; c < m->audio_channels; c++) {
-                                    int off = audio_start + 4 + c * 132;
+                                    int off = audio_start + m->key_word + c * 132;
                                     if (off + 2 > (int)size ||
                                         AV_RL16(pkt->data + off) > 88u) {
                                         ok = 0;
@@ -560,8 +565,8 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                             }
                         }
                     }
-                } else { /* FASTAUDIO: 4-byte keyframe word precedes blocks */
-                    int kf_word = (is_key && audio_blocks > 0) ? 4 : 0;
+                } else { /* FASTAUDIO: the keyframe word precedes the blocks */
+                    int kf_word = (is_key && audio_blocks > 0) ? m->key_word : 0;
                     audio_start = vfield + kf_word;
                     audio_size  = audio_blocks * m->audio_channels * 40;
                 }
@@ -573,18 +578,18 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                     audio_size  = stored_asize;
                     audio_start = size - 4 - spad - stored_asize;
                     if (m->audio_codec_id == AV_CODEC_ID_FASTAUDIO && audio_size >= 4 && is_key) {
-                        audio_start += 4;   /* skip the keyframe word */
-                        audio_size  -= 4;
+                        audio_start += m->key_word;   /* skip the keyframe word */
+                        audio_size  -= m->key_word;
                     }
                 } else if (m->audio_codec_id == AV_CODEC_ID_ADPCM_IMA_NDS) {
                     audio_size = audio_blocks * m->audio_channels * 128;
                     if (is_key && audio_blocks > 0)
-                        audio_size += 4 + 4 * m->audio_channels;
+                        audio_size += m->key_word + 4 * m->audio_channels;
                     audio_start = (int)size - audio_size;
                 } else {
                     /* FastAudio heuristic fallback: kf_word is 4 bytes before
                      * the blocks. */
-                    int kf_word = (is_key && audio_blocks > 0) ? 4 : 0;
+                    int kf_word = (is_key && audio_blocks > 0) ? m->key_word : 0;
                     audio_size = audio_blocks * m->audio_channels * 40;
                     int S = (int)size - audio_size - kf_word;
                     int e = S, mb_bits = 0;
@@ -632,11 +637,16 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
 
         if (audio_start >= 0 && audio_size >= 0 && audio_start + audio_size <= (int)size) {
             if (audio_size > 0) {
-                uint8_t *nb = av_realloc(m->aud_buf, audio_size);
+                /* the ADPCM decoder takes a key packet with the N3 keyframe
+                 * word in front; give it an empty one where the file has none */
+                const int fill = m->audio_codec_id == AV_CODEC_ID_ADPCM_IMA_NDS &&
+                                 size >= 2 && (pkt->data[1] & 0x80) ? 4 - m->key_word : 0;
+                uint8_t *nb = av_realloc(m->aud_buf, fill + audio_size);
                 if (nb) {
                     m->aud_buf = nb;
-                    memcpy(m->aud_buf, pkt->data + audio_start, audio_size);
-                    m->aud_size = audio_size;
+                    memset(m->aud_buf, 0, fill);
+                    memcpy(m->aud_buf + fill, pkt->data + audio_start, audio_size);
+                    m->aud_size = fill + audio_size;
                     m->aud_off  = 0;
                 }
             }
@@ -681,8 +691,8 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
                      * before the intra AFrame (retail writes real, non-zero data
                      * there; our muxer writes zeros). Always skip it on keyframes
                      * so the first AFrame the decoder sees is the intra one. */
-                    if (is_kf && audio_start + 4 <= (int)size)
-                        audio_start += 4;
+                    if (is_kf && audio_start + m->key_word <= (int)size)
+                        audio_start += m->key_word;
                     audio_size = (int)size - audio_start;
                 }
             }
