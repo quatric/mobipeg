@@ -264,41 +264,131 @@ static int find_best_index(const float *table, int size, float val)
     return best_idx;
 }
 
-static float get_residual_energy(const float *y, int nb_samples, const float *m, const ChannelItems *ch)
-{
-    float f0 = ch->f[0];
-    float f1 = ch->f[1];
-    float f2 = ch->f[2];
-    float f3 = ch->f[3];
-    float f4 = ch->f[4];
-    float f5 = ch->f[5];
-    float f6 = ch->f[6];
-    float f7 = ch->f[7];
-    float m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3];
-    float m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7];
-    float energy = 0;
-    for (int i = 0; i < nb_samples; i++) {
-        float x = y[i];
-        x -= m0 * f0; f0 += m0 * x;
-        x -= m1 * f1; f1 += m1 * x;
-        x -= m2 * f2; f2 += m2 * x;
-        x -= m3 * f3; f3 += m3 * x;
-        x -= m4 * f4; f4 += m4 * x;
-        x -= m5 * f5; f5 += m5 * x;
-        x -= m6 * f6; f6 += m6 * x;
-        x -= m7 * f7; f7 += m7 * x;
+/* One step of the decoder's lattice for lane l: x in, state shifted, x out. */
+#define FA_LATTICE(f, l, x, m0, m1, m2, m3, m4, m5, m6, m7) do { \
+        float f0 = f[0][l], f1 = f[1][l], f2 = f[2][l], f3 = f[3][l];  \
+        float f4 = f[4][l], f5 = f[5][l], f6 = f[6][l], f7 = f[7][l];  \
+        x -= m0 * f0; f0 += m0 * x;                                    \
+        x -= m1 * f1; f1 += m1 * x;                                    \
+        x -= m2 * f2; f2 += m2 * x;                                    \
+        x -= m3 * f3; f3 += m3 * x;                                    \
+        x -= m4 * f4; f4 += m4 * x;                                    \
+        x -= m5 * f5; f5 += m5 * x;                                    \
+        x -= m6 * f6; f6 += m6 * x;                                    \
+        x -= m7 * f7; f7 += m7 * x;                                    \
+        f[0][l] = f1; f[1][l] = f2; f[2][l] = f3; f[3][l] = f4;        \
+        f[4][l] = f5; f[5][l] = f6; f[6][l] = f7; f[7][l] = x;         \
+    } while (0)
 
-        f0 = f1;
-        f1 = f2;
-        f2 = f3;
-        f3 = f4;
-        f4 = f5;
-        f5 = f6;
-        f6 = f7;
-        f7 = x;
-        energy += x * x;
+/* Residual energy of y through the analysis lattice for each of the n
+ * candidate values of m[2] in m2.  Every candidate is a serial recursion over
+ * the samples; the candidates themselves are independent, so they are stepped
+ * side by side, each with exactly the arithmetic it would have had alone. */
+static void get_residual_energies(const float *y, int nb_samples, const float *m,
+                                  const float *m2, int n, const ChannelItems *ch,
+                                  float *energy)
+{
+    float f[8][16];
+    const float m0 = m[0], m1 = m[1], m3 = m[3];
+    const float m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7];
+
+    for (int j = 0; j < 8; j++)
+        for (int l = 0; l < n; l++)
+            f[j][l] = ch->f[j];
+    for (int l = 0; l < n; l++)
+        energy[l] = 0;
+
+    for (int i = 0; i < nb_samples; i++) {
+        for (int l = 0; l < n; l++) {
+            float x = y[i];
+            FA_LATTICE(f, l, x, m0, m1, m2[l], m3, m4, m5, m6, m7);
+            energy[l] += x * x;
+        }
     }
-    return energy;
+}
+
+#define FA_SCALES 64
+
+/* Closed-loop analysis-by-synthesis for one 64-sample block at one pad: the
+ * decoder excites only the sparse positions pad+j*3 and runs zeros in between,
+ * so the lattice state at each coded sample depends on the previously-quantized
+ * (and zero) excitations.  Replay the EXACT decoder lattice from the real state
+ * for every scale, choosing each coded excitation against the current state,
+ * and score by how well the lattice output matches the de-emphasised target y.
+ *
+ * The scales share their excitation positions and are otherwise independent
+ * recursions, so they are stepped side by side. */
+static void search_pad(const float *y, const float *m, const ChannelItems *ch,
+                       const float *q_scale_tab, int pad, int desired_bit,
+                       float *err, uint8_t (*cur_v)[FA_SCALES])
+{
+    float f[8][FA_SCALES], e[FA_SCALES];
+    const float m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3];
+    const float m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7];
+    int next_excite = pad;
+    int idx_3 = 0;
+
+    for (int j = 0; j < 8; j++)
+        for (int l = 0; l < FA_SCALES; l++)
+            f[j][l] = ch->f[j];
+    for (int l = 0; l < FA_SCALES; l++)
+        err[l] = 0;
+
+    for (int k = 0; k < 64; k++) {
+        const float yk = y[k];
+        int excite = 0;
+
+        if (k == next_excite) {
+            if (idx_3 < 21) {
+                for (int l = 0; l < FA_SCALES; l++) {
+                    const float q_scale = q_scale_tab[l];
+                    const float f0 = f[0][l], f1 = f[1][l], f2 = f[2][l], f3 = f[3][l];
+                    const float f4 = f[4][l], f5 = f[5][l], f6 = f[6][l], f7 = f[7][l];
+                    float e_ideal = yk;
+                    int q;
+
+                    e_ideal += m0 * f0 + m1 * f1 + m2 * f2 + m3 * f3 +
+                               m4 * f4 + m5 * f5 + m6 * f6 + m7 * f7;
+                    /* The j==20 excitation encodes a 4-bit value tmp = 2*q + desired_bit.
+                     * The decoder reconstructs: excitation = q_scale * (tmp - 7).
+                     * So we solve: q_scale*(2*q + desired_bit - 7) ≈ e_ideal
+                     * → q = round((e_ideal/q_scale + 7 - desired_bit) / 2) */
+                    if (idx_3 == 20) {
+                        q = (int)lrintf((e_ideal / q_scale + 7.0f - desired_bit) / 2.0f);
+                    } else {
+                        q = (int)lrintf((e_ideal / q_scale + 7.0f) / 2.0f);
+                    }
+                    if (q < 0) q = 0;
+                    if (q > 7) q = 7;
+                    cur_v[idx_3][l] = q;
+                    if (idx_3 == 20) {
+                        e[l] = q_scale * (2.0f * q + desired_bit - 7.0f);
+                    } else {
+                        e[l] = q_scale * (2.0f * q - 7.0f);
+                    }
+                }
+                idx_3++;
+                excite = 1;
+            }
+            next_excite += 3;
+        }
+
+        if (excite) {
+            for (int l = 0; l < FA_SCALES; l++) {
+                float x = e[l], d;
+                FA_LATTICE(f, l, x, m0, m1, m2, m3, m4, m5, m6, m7);
+                d = x - yk;
+                err[l] += d * d;
+            }
+        } else {
+            for (int l = 0; l < FA_SCALES; l++) {
+                float x = 0, d;
+                FA_LATTICE(f, l, x, m0, m1, m2, m3, m4, m5, m6, m7);
+                d = x - yk;
+                err[l] += d * d;
+            }
+        }
+    }
 }
 
 static av_cold int fastaudio_encode_init(AVCodecContext *avctx)
@@ -365,11 +455,11 @@ static int fastaudio_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
 
         int best_idx5 = 0;
         float min_energy = 1e30f;
+        float energy5[16];
+        get_residual_energies(y, 256, m, s->table[5], 16, ch, energy5);
         for (int i5 = 0; i5 < 16; i5++) {
-            m[2] = s->table[5][i5];
-            float energy = get_residual_energy(y, 256, m, ch);
-            if (energy < min_energy) {
-                min_energy = energy;
+            if (energy5[i5] < min_energy) {
+                min_energy = energy5[i5];
                 best_idx5 = i5;
             }
         }
@@ -396,84 +486,20 @@ static int fastaudio_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             int best_v[21] = { 0 };
             float min_err = 1e30f;
 
-            /* Closed-loop analysis-by-synthesis: the decoder excites only the
-             * sparse positions pad+j*3 and runs zeros in between, so the lattice
-             * state at each coded sample depends on the previously-quantized
-             * (and zero) excitations.  Evaluate every (pad,scale) by replaying
-             * the EXACT decoder lattice from the real state, choosing each coded
-             * excitation against the current state, and scoring by how well the
-             * lattice output matches the de-emphasised target y. */
+            /* Closed-loop analysis-by-synthesis over every (pad,scale), see
+             * search_pad(). */
             for (int p = 0; p < 4; p++) {
-                for (int s_idx = 0; s_idx < 64; s_idx++) {
-                    float q_scale = q_scale_tab[s_idx];
-                    float f0 = ch->f[0];
-                    float f1 = ch->f[1];
-                    float f2 = ch->f[2];
-                    float f3 = ch->f[3];
-                    float f4 = ch->f[4];
-                    float f5 = ch->f[5];
-                    float f6 = ch->f[6];
-                    float f7 = ch->f[7];
-                    float err = 0;
-                    int cur_v[21] = { 0 };
-                    int next_excite = p;
-                    int idx_3 = 0;
-                    for (int k = 0; k < 64; k++) {
-                        float e = 0;
-                        if (k == next_excite) {
-                            if (idx_3 < 21) {
-                                float e_ideal = y[i * 64 + k];
-                                e_ideal += m0 * f0 + m1 * f1 + m2 * f2 + m3 * f3 +
-                                           m4 * f4 + m5 * f5 + m6 * f6 + m7 * f7;
-                                /* The j==20 excitation encodes a 4-bit value tmp = 2*q + desired_bit.
-                                 * The decoder reconstructs: excitation = q_scale * (tmp - 7).
-                                 * So we solve: q_scale*(2*q + desired_bit - 7) ≈ e_ideal
-                                 * → q = round((e_ideal/q_scale + 7 - desired_bit) / 2) */
-                                int q;
-                                if (idx_3 == 20) {
-                                    q = (int)lrintf((e_ideal / q_scale + 7.0f - desired_bit) / 2.0f);
-                                } else {
-                                    q = (int)lrintf((e_ideal / q_scale + 7.0f) / 2.0f);
-                                }
-                                if (q < 0) q = 0;
-                                if (q > 7) q = 7;
-                                cur_v[idx_3] = q;
-                                if (idx_3 == 20) {
-                                    e = q_scale * (2.0f * q + desired_bit - 7.0f);
-                                } else {
-                                    e = q_scale * (2.0f * q - 7.0f);
-                                }
-                                idx_3++;
-                            }
-                            next_excite += 3;
-                        }
-                        float x = e;
-                        x -= m0 * f0; f0 += m0 * x;
-                        x -= m1 * f1; f1 += m1 * x;
-                        x -= m2 * f2; f2 += m2 * x;
-                        x -= m3 * f3; f3 += m3 * x;
-                        x -= m4 * f4; f4 += m4 * x;
-                        x -= m5 * f5; f5 += m5 * x;
-                        x -= m6 * f6; f6 += m6 * x;
-                        x -= m7 * f7; f7 += m7 * x;
+                float err[FA_SCALES];
+                uint8_t cur_v[21][FA_SCALES];
 
-                        f0 = f1;
-                        f1 = f2;
-                        f2 = f3;
-                        f3 = f4;
-                        f4 = f5;
-                        f5 = f6;
-                        f6 = f7;
-                        f7 = x;
-
-                        float d = x - y[i * 64 + k];
-                        err += d * d;
-                    }
-                    if (err < min_err) {
-                        min_err = err;
+                search_pad(y + i * 64, m, ch, q_scale_tab, p, desired_bit, err, cur_v);
+                for (int s_idx = 0; s_idx < FA_SCALES; s_idx++) {
+                    if (err[s_idx] < min_err) {
+                        min_err = err[s_idx];
                         best_pad = p;
                         best_scale = s_idx;
-                        memcpy(best_v, cur_v, sizeof(best_v));
+                        for (int j = 0; j < 21; j++)
+                            best_v[j] = cur_v[j][s_idx];
                     }
                 }
             }
