@@ -22,7 +22,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <float.h>
+#include <math.h>
+
+#include "libavutil/common.h"
 #include "libavutil/intfloat.h"
+#include "libavutil/intreadwrite.h"
+#include "libavutil/mathematics.h"
 #include "libavutil/mem.h"
 #include "avcodec.h"
 #include "bytestream.h"
@@ -32,6 +38,7 @@
 typedef struct ChannelItems {
     float f[8];
     float last;
+    float history[65];      /* encoder: the input just before the sub-frame */
 } ChannelItems;
 
 typedef struct FastAudioContext {
@@ -39,6 +46,11 @@ typedef struct FastAudioContext {
     float table[8][64];
 
     ChannelItems *ch;
+
+    /* encoder */
+    double window[64 + 256];
+    double lag_window[9];
+    float gain[64];
 } FastAudioContext;
 
 static av_cold int fastaudio_init(AVCodecContext *avctx)
@@ -194,190 +206,311 @@ static av_cold int fastaudio_close(AVCodecContext *avctx)
 
 #include "encode.h"
 
-static void write_bits(int bits, int *ppos, uint32_t *src, uint32_t val)
-{
-    int pos = *ppos;
-    pos += bits;
-    int shift = (-pos) & 31;
-    src[(pos - 1) / 32] |= (val & ((1U << bits) - 1)) << shift;
-    *ppos = pos;
-}
-
-static void compute_lpc(const float *samples, int nb_samples, float *lpc)
-{
-    double r[9] = { 0 };
-    for (int i = 0; i <= 8; i++) {
-        double sum = 0;
-        for (int j = 0; j < nb_samples - i; j++) {
-            sum += (double)samples[j] * samples[j + i];
-        }
-        r[i] = sum;
-    }
-
-    double a[9] = { 0 };
-    double new_a[9] = { 0 };
-    double error = r[0];
-
-    memset(lpc, 0, 8 * sizeof(float));
-
-    if (error < 1e-9) {
-        return;
-    }
-
-    for (int i = 1; i <= 8; i++) {
-        double sum = r[i];
-        for (int j = 1; j < i; j++) {
-            sum += a[j] * r[i - j];
-        }
-        double k = -sum / error;
-        if (k < -1.0) k = -1.0;
-        if (k > 1.0) k = 1.0;
-        lpc[i - 1] = k;
-        new_a[i] = k;
-        for (int j = 1; j < i; j++) {
-            new_a[j] = a[j] + k * a[i - j];
-        }
-        memcpy(a, new_a, (i + 1) * sizeof(*a));
-        error *= (1.0 - k * k);
-        if (error < 1e-9)
-            break;
-    }
-}
-
-static int find_best_index(const float *table, int size, float val)
-{
-    int best_idx = 0;
-    float min_diff = fabsf(table[0] - val);
-    for (int i = 1; i < size; i++) {
-        float diff = fabsf(table[i] - val);
-        if (diff < min_diff) {
-            min_diff = diff;
-            best_idx = i;
-        }
-    }
-    return best_idx;
-}
-
-/* One step of the decoder's lattice for lane l: x in, state shifted, x out. */
-#define FA_LATTICE(f, l, x, m0, m1, m2, m3, m4, m5, m6, m7) do { \
-        float f0 = f[0][l], f1 = f[1][l], f2 = f[2][l], f3 = f[3][l];  \
-        float f4 = f[4][l], f5 = f[5][l], f6 = f[6][l], f7 = f[7][l];  \
-        x -= m0 * f0; f0 += m0 * x;                                    \
-        x -= m1 * f1; f1 += m1 * x;                                    \
-        x -= m2 * f2; f2 += m2 * x;                                    \
-        x -= m3 * f3; f3 += m3 * x;                                    \
-        x -= m4 * f4; f4 += m4 * x;                                    \
-        x -= m5 * f5; f5 += m5 * x;                                    \
-        x -= m6 * f6; f6 += m6 * x;                                    \
-        x -= m7 * f7; f7 += m7 * x;                                    \
-        f[0][l] = f1; f[1][l] = f2; f[2][l] = f3; f[3][l] = f4;        \
-        f[4][l] = f5; f[5][l] = f6; f[6][l] = f7; f[7][l] = x;         \
-    } while (0)
-
-/* Residual energy of y through the analysis lattice for each of the n
- * candidate values of m[2] in m2.  Every candidate is a serial recursion over
- * the samples; the candidates themselves are independent, so they are stepped
- * side by side, each with exactly the arithmetic it would have had alone. */
-static void get_residual_energies(const float *y, int nb_samples, const float *m,
-                                  const float *m2, int n, const ChannelItems *ch,
-                                  float *energy)
-{
-    float f[8][16];
-    const float m0 = m[0], m1 = m[1], m3 = m[3];
-    const float m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7];
-
-    for (int j = 0; j < 8; j++)
-        for (int l = 0; l < n; l++)
-            f[j][l] = ch->f[j];
-    for (int l = 0; l < n; l++)
-        energy[l] = 0;
-
-    for (int i = 0; i < nb_samples; i++) {
-        for (int l = 0; l < n; l++) {
-            float x = y[i];
-            FA_LATTICE(f, l, x, m0, m1, m2[l], m3, m4, m5, m6, m7);
-            energy[l] += x * x;
-        }
-    }
-}
-
-#define FA_SCALES 64
-
-/* Closed-loop analysis-by-synthesis for one 64-sample block at one pad: the
- * decoder excites only the sparse positions pad+j*3 and runs zeros in between,
- * so the lattice state at each coded sample depends on the previously-quantized
- * (and zero) excitations.  Replay the EXACT decoder lattice from the real state
- * for every scale, choosing each coded excitation against the current state,
- * and score by how well the lattice output matches the de-emphasised target y.
+/*
+ * The encoder works the way the one of koori0831's MoflexTool does.  The
+ * filter of a sub-frame comes from a linear prediction analysis of the
+ * pre-emphasised input (the decoder de-emphasises), its reflection
+ * coefficients quantized with the tables the decoder reads them from.  Each
+ * of the four groups of a sub-frame is then 21 pulses, three samples apart
+ * from one of four starting points and of eight levels times a common gain,
+ * chosen to bring the decoder's output as close to the input as they can:
+ * least squares for the amplitudes, then a descent on the quantized levels
+ * for a few gains around the one the amplitudes ask for.
  *
- * The scales share their excitation positions and are otherwise independent
- * recursions, so they are stepped side by side. */
-static void search_pad(const float *y, const float *m, const ChannelItems *ch,
-                       const float *q_scale_tab, int pad,
-                       float *err, uint8_t (*cur_v)[FA_SCALES])
+ * An encoder that hands back a packet for every frame cannot see past the
+ * end of the sub-frame, so the analysis window closes there instead of
+ * reaching 64 samples further as MoflexTool's does.
+ */
+
+#define FA_ORDER   8
+#define FA_GROUP   64
+#define FA_PULSES  21
+#define FA_HISTORY 65      /* samples before a sub-frame that the analysis reads */
+#define FA_WINDOW  (FA_HISTORY - 1 + 256)
+
+static const uint8_t fa_table_size[8] = { 64, 64, 32, 32, 16, 16, 8, 8 };
+
+static void fa_put_bits(uint32_t *words, int *pos, int bits, unsigned value)
 {
-    float f[8][FA_SCALES], e[FA_SCALES];
-    const float m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3];
-    const float m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7];
-    int next_excite = pad;
-    int idx_3 = 0;
+    if (!bits)
+        return;
+    words[*pos >> 5] |= (value & ((1U << bits) - 1)) << (32 - (*pos & 31) - bits);
+    *pos += bits;
+}
 
-    for (int j = 0; j < 8; j++)
-        for (int l = 0; l < FA_SCALES; l++)
-            f[j][l] = ch->f[j];
-    for (int l = 0; l < FA_SCALES; l++)
-        err[l] = 0;
+/* What the decoder makes of n excitation samples, in place. */
+static void fa_synthesize(ChannelItems *ch, const float m[8], float *buf, int n)
+{
+    for (int i = 0; i < n; i++) {
+        float x = buf[i];
 
-    for (int k = 0; k < 64; k++) {
-        const float yk = y[k];
-        int excite = 0;
-
-        if (k == next_excite) {
-            if (idx_3 < 21) {
-                for (int l = 0; l < FA_SCALES; l++) {
-                    const float q_scale = q_scale_tab[l];
-                    const float f0 = f[0][l], f1 = f[1][l], f2 = f[2][l], f3 = f[3][l];
-                    const float f4 = f[4][l], f5 = f[5][l], f6 = f[6][l], f7 = f[7][l];
-                    float e_ideal = yk;
-                    int q;
-
-                    e_ideal += m0 * f0 + m1 * f1 + m2 * f2 + m3 * f3 +
-                               m4 * f4 + m5 * f5 + m6 * f6 + m7 * f7;
-                    /* All 21 excitations are three bits, rebuilt as
-                     * q_scale * (2 * q - 7). */
-                    q = (int)lrintf((e_ideal / q_scale + 7.0f) / 2.0f);
-                    if (q < 0) q = 0;
-                    if (q > 7) q = 7;
-                    cur_v[idx_3][l] = q;
-                    e[l] = q_scale * (2.0f * q - 7.0f);
-                }
-                idx_3++;
-                excite = 1;
-            }
-            next_excite += 3;
+        for (int j = 0; j < 8; j++) {
+            x -= m[j] * ch->f[j];
+            ch->f[j] += m[j] * x;
         }
+        memmove(&ch->f[0], &ch->f[1], sizeof(float) * 7);
+        ch->f[7] = x;
+        ch->last = x + ch->last * 0.86f;
+        buf[i] = ch->last * 2.f;
+    }
+}
 
-        if (excite) {
-            for (int l = 0; l < FA_SCALES; l++) {
-                float x = e[l], d;
-                FA_LATTICE(f, l, x, m0, m1, m2, m3, m4, m5, m6, m7);
-                d = x - yk;
-                err[l] += d * d;
+/* Reflection coefficients of the autocorrelation r[0..FA_ORDER]. */
+static void fa_levinson(const double *r, double *k)
+{
+    double a[FA_ORDER + 1] = { 0 }, tmp[FA_ORDER + 1];
+    double err = r[0];
+
+    for (int i = 1; i <= FA_ORDER; i++) {
+        double acc = r[i], ki;
+
+        for (int j = 1; j < i; j++)
+            acc += a[j] * r[i - j];
+        ki = err > 0 ? -acc / err : 0;
+        ki = av_clipd(ki, -0.999, 0.999);
+        k[i - 1] = ki;
+        memcpy(tmp, a, sizeof(tmp));
+        for (int j = 1; j < i; j++)
+            a[j] = tmp[j] + ki * tmp[i - j];
+        a[i] = ki;
+        err *= 1 - ki * ki;
+    }
+}
+
+/* Solve (A + eps I) x = b for a symmetric positive definite A. */
+static void fa_solve(double A[FA_PULSES][FA_PULSES], const double *b, double *x)
+{
+    double L[FA_PULSES][FA_PULSES], y[FA_PULSES];
+    double trace = 0, eps;
+
+    for (int i = 0; i < FA_PULSES; i++)
+        trace += A[i][i];
+    eps = 1e-9 * trace / FA_PULSES + 1e-30;
+    for (int i = 0; i < FA_PULSES; i++)
+        for (int j = 0; j <= i; j++) {
+            double s = A[i][j] + (i == j ? eps : 0);
+
+            for (int k = 0; k < j; k++)
+                s -= L[i][k] * L[j][k];
+            L[i][j] = i == j ? sqrt(FFMAX(s, 1e-300)) : s / L[j][j];
+        }
+    for (int i = 0; i < FA_PULSES; i++) {
+        double s = b[i];
+
+        for (int k = 0; k < i; k++)
+            s -= L[i][k] * y[k];
+        y[i] = s / L[i][i];
+    }
+    for (int i = FA_PULSES - 1; i >= 0; i--) {
+        double s = y[i];
+
+        for (int k = i + 1; k < FA_PULSES; k++)
+            s -= L[k][i] * x[k];
+        x[i] = s / L[i][i];
+    }
+}
+
+/* Starting point, gain and levels of the pulses whose response comes
+ * closest to target.  h is the response to one pulse; corr[d][n] the sum of
+ * h[i] * h[i + 3 * d] over the first n samples. */
+static void fa_search_group(const float *h, double (*corr)[FA_GROUP + 1],
+                            const float *gain_tab, const double *target,
+                            int *best_pad, int *best_gain, int best_levels[FA_PULSES])
+{
+    double best_err = DBL_MAX;
+    double G[FA_PULSES][FA_PULSES], b[FA_PULSES], amp[FA_PULSES], gq[FA_PULSES];
+    int q[FA_PULSES];
+
+    *best_pad = *best_gain = 0;
+    for (int j = 0; j < FA_PULSES; j++)
+        best_levels[j] = 4;
+
+    for (int pad = 0; pad < 4; pad++) {
+        double peak = 0;
+        int g0 = 0;
+
+        for (int j = 0; j < FA_PULSES; j++) {
+            const int pj = pad + 3 * j;
+            double sum = 0;
+
+            for (int n = pj; n < FA_GROUP; n++)
+                sum += h[n - pj] * target[n];
+            b[j] = sum;
+            for (int l = j; l < FA_PULSES; l++)
+                G[j][l] = G[l][j] = corr[l - j][FA_GROUP - pad - 3 * l];
+        }
+        fa_solve(G, b, amp);
+        for (int j = 0; j < FA_PULSES; j++)
+            peak = FFMAX(peak, fabs(amp[j]));
+        while (g0 < 63 && gain_tab[g0] * 7 < peak)
+            g0++;
+
+        for (int gi = FFMAX(0, g0 - 4); gi <= FFMIN(63, g0 + 3); gi++) {
+            const double gain = gain_tab[gi];
+            double err = 0;
+
+            for (int j = 0; j < FA_PULSES; j++)
+                q[j] = av_clip(lrint((amp[j] / gain + 7) / 2), 0, 7);
+            /* the error of levels u = 2q - 7 is g^2 u'Gu - 2 g u'b */
+            for (int j = 0; j < FA_PULSES; j++) {
+                double sum = 0;
+
+                for (int l = 0; l < FA_PULSES; l++)
+                    sum += G[j][l] * (2 * q[l] - 7);
+                gq[j] = sum;
             }
-        } else {
-            for (int l = 0; l < FA_SCALES; l++) {
-                float x = 0, d;
-                FA_LATTICE(f, l, x, m0, m1, m2, m3, m4, m5, m6, m7);
-                d = x - yk;
-                err[l] += d * d;
+            for (int pass = 0; pass < 3; pass++)
+                for (int j = 0; j < FA_PULSES; j++) {
+                    const int u0 = 2 * q[j] - 7;
+                    double best_delta = 0;
+                    int best_u = u0;
+
+                    for (int u = -7; u <= 7; u += 2) {
+                        const int d = u - u0;
+                        const double delta = -2 * gain * d * b[j] +
+                                             gain * gain * (2 * d * gq[j] + d * d * G[j][j]);
+
+                        if (d && delta < best_delta) {
+                            best_delta = delta;
+                            best_u     = u;
+                        }
+                    }
+                    if (best_u != u0) {
+                        const int d = best_u - u0;
+
+                        for (int l = 0; l < FA_PULSES; l++)
+                            gq[l] += G[l][j] * d;
+                        q[j] = (best_u + 7) / 2;
+                    }
+                }
+            for (int j = 0; j < FA_PULSES; j++)
+                err += -2 * gain * (2 * q[j] - 7) * b[j] + gain * gain * (2 * q[j] - 7) * gq[j];
+            if (err < best_err) {
+                best_err   = err;
+                *best_pad  = pad;
+                *best_gain = gi;
+                memcpy(best_levels, q, sizeof(q));
             }
         }
     }
+}
+
+static void fa_encode_subframe(FastAudioContext *s, ChannelItems *ch,
+                               const float *samples, uint8_t *dst)
+{
+    float x[FA_HISTORY + 256], m[8], h[FA_GROUP];
+    double win[FA_WINDOW], r[FA_ORDER + 1], refl[FA_ORDER];
+    double corr[FA_PULSES][FA_GROUP + 1];
+    int idx[8], gains[4], pads[4], levels[4][FA_PULSES];
+    uint32_t words[10] = { 0 };
+    ChannelItems impulse = { { 0 } };
+    int pos = 0;
+
+    memcpy(x, ch->history, sizeof(ch->history));
+    memcpy(x + FA_HISTORY, samples, 256 * sizeof(*x));
+    memcpy(ch->history, x + 256, sizeof(ch->history));
+
+    /* the filter: 64 samples of the past and the sub-frame, pre-emphasised */
+    for (int i = 0; i < FA_WINDOW; i++)
+        win[i] = (x[i + 1] - 0.86f * x[i]) * s->window[i];
+    for (int k = 0; k <= FA_ORDER; k++) {
+        double sum = 0;
+
+        for (int i = k; i < FA_WINDOW; i++)
+            sum += win[i] * win[i - k];
+        r[k] = sum * s->lag_window[k];
+    }
+    r[0] += 1e-9;
+    fa_levinson(r, refl);
+    for (int i = 0; i < 8; i++) {
+        double best = DBL_MAX;
+
+        idx[i] = 0;
+        for (int j = 0; j < fa_table_size[i]; j++) {
+            const double d = fabs(s->table[i][j] - refl[i]);
+            if (d < best) {
+                best   = d;
+                idx[i] = j;
+            }
+        }
+        m[7 - i] = s->table[i][idx[i]];
+    }
+
+    /* its response to a pulse, and that response's correlation with itself */
+    memset(h, 0, sizeof(h));
+    h[0] = 1;
+    fa_synthesize(&impulse, m, h, FA_GROUP);
+    for (int d = 0; d < FA_PULSES; d++) {
+        corr[d][0] = 0;
+        for (int i = 0; i < FA_GROUP; i++)
+            corr[d][i + 1] = corr[d][i] +
+                             (i + 3 * d < FA_GROUP ? (double)h[i] * h[i + 3 * d] : 0);
+    }
+
+    for (int g = 0; g < 4; g++) {
+        const float *in = x + FA_HISTORY + g * FA_GROUP;
+        ChannelItems ringing = *ch;
+        float buf[FA_GROUP] = { 0 };
+        double target[FA_GROUP];
+        float gain;
+
+        /* what is left to the pulses once the filter has rung out */
+        fa_synthesize(&ringing, m, buf, FA_GROUP);
+        for (int i = 0; i < FA_GROUP; i++)
+            target[i] = in[i] - buf[i];
+        fa_search_group(h, corr, s->gain, target, &pads[g], &gains[g], levels[g]);
+
+        memset(buf, 0, sizeof(buf));
+        gain = s->gain[gains[g]];
+        for (int j = 0; j < FA_PULSES; j++)
+            buf[pads[g] + 3 * j] = gain * (2 * levels[g][j] - 7);
+        fa_synthesize(ch, m, buf, FA_GROUP);
+    }
+
+    for (int i = 0; i < 8; i++)
+        fa_put_bits(words, &pos, bits[i], idx[i]);
+    for (int g = 3; g >= 0; g--)
+        fa_put_bits(words, &pos, 6, gains[g]);
+    for (int g = 3; g >= 0; g--)
+        fa_put_bits(words, &pos, 2, pads[g]);
+    for (int g = 0; g < 4; g++) {
+        const int *q = levels[g];
+
+        for (int j = 0; j < 20; j++) {
+            fa_put_bits(words, &pos, 3, q[j]);
+            /* the last pulse and a bit of the sixth coefficient share the
+             * four bits that close the two words of a group */
+            if (j == 9)
+                fa_put_bits(words, &pos, 2, q[20] >> 1);
+            if (j == 19)
+                fa_put_bits(words, &pos, 2, (q[20] & 1) << 1 | (idx[5] >> (3 - g) & 1));
+        }
+    }
+    for (int i = 0; i < 10; i++)
+        AV_WL32(dst + 4 * i, words[i]);
 }
 
 static av_cold int fastaudio_encode_init(AVCodecContext *avctx)
 {
+    FastAudioContext *s = avctx->priv_data;
+
     avctx->frame_size = 256;
+    /* A Hann window that rises over the past and the first half of the
+     * sub-frame and falls over the second, so that it is centred on the
+     * sub-frame and done where the input is. */
+    for (int i = 0; i < FA_WINDOW; i++) {
+        const int rise = FA_HISTORY - 1 + 128;
+        const double t = i < rise ? (i + 0.5) / (2 * rise)
+                                  : 0.5 + (i - rise + 0.5) / (2 * (FA_WINDOW - rise));
+        s->window[i] = 0.5 - 0.5 * cos(2 * M_PI * t);
+    }
+    /* a noise floor and a lag window keep the quantized filter of a pure
+     * tone from ringing */
+    s->lag_window[0] = 1.003;
+    for (int k = 1; k <= FA_ORDER; k++)
+        s->lag_window[k] = exp(-0.5 * pow(2 * M_PI * 0.004 * k, 2));
+    for (int i = 0; i < 64; i++)
+        s->gain[i] = av_int2float((i + 1) << 20) * powf(2.f, 116.f);
     return fastaudio_init(avctx);
 }
 
@@ -385,205 +518,18 @@ static int fastaudio_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
                                   const AVFrame *frame, int *got_packet_ptr)
 {
     FastAudioContext *s = avctx->priv_data;
-    int channels = avctx->ch_layout.nb_channels;
+    const int channels = avctx->ch_layout.nb_channels;
     int ret;
 
     if (frame->nb_samples != 256) {
         av_log(avctx, AV_LOG_ERROR, "Frame size must be exactly 256 samples (got %d)\n", frame->nb_samples);
         return AVERROR(EINVAL);
     }
-
     if ((ret = ff_alloc_packet(avctx, avpkt, 40 * channels)) < 0)
         return ret;
-
-    memset(avpkt->data, 0, 40 * channels);
-
-    uint8_t *dst = avpkt->data;
-
-    for (int channel = 0; channel < channels; channel++) {
-        ChannelItems *ch = &s->ch[channel];
-        const float *input = (const float *)frame->extended_data[channel];
-        float y[256];
-        float prev_sample = ch->last * 2.f;
-
-        for (int k = 0; k < 256; k++) {
-            y[k] = (input[k] - 0.86f * prev_sample) / 2.f;
-            prev_sample = input[k];
-        }
-
-        float m_opt[8];
-        compute_lpc(y, 256, m_opt);
-
-        int idx[8] = { 0 };
-        float m[8] = { 0 };
-
-        /* Decoder uses m[j]=table[7-j][...]: the wide/fine tables (table[0]/[1],
-         * 64 entries, ±1) back the high stages m[7]/m[6], coarse narrow tables
-         * back m[0]/m[1].  The largest reflection coefficients k_1,k_2
-         * (m_opt[0],m_opt[1]) need that range, so map m[j] <- m_opt[7-j]. */
-        idx[0] = find_best_index(s->table[7], 8, m_opt[7]);
-        idx[1] = find_best_index(s->table[6], 8, m_opt[6]);
-        idx[3] = find_best_index(s->table[4], 16, m_opt[4]);
-        idx[4] = find_best_index(s->table[3], 32, m_opt[3]);
-        idx[5] = find_best_index(s->table[2], 32, m_opt[2]);
-        idx[6] = find_best_index(s->table[1], 64, m_opt[1]);
-        idx[7] = find_best_index(s->table[0], 64, m_opt[0]);
-
-        m[0] = s->table[7][idx[0]];
-        m[1] = s->table[6][idx[1]];
-        m[3] = s->table[4][idx[3]];
-        m[4] = s->table[3][idx[4]];
-        m[5] = s->table[2][idx[5]];
-        m[6] = s->table[1][idx[6]];
-        m[7] = s->table[0][idx[7]];
-
-        int best_idx5 = 0;
-        float min_energy = 1e30f;
-        float energy5[16];
-        get_residual_energies(y, 256, m, s->table[5], 16, ch, energy5);
-        for (int i5 = 0; i5 < 16; i5++) {
-            if (energy5[i5] < min_energy) {
-                min_energy = energy5[i5];
-                best_idx5 = i5;
-            }
-        }
-        idx[2] = best_idx5;
-        m[2] = s->table[5][best_idx5];
-
-        float m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3];
-        float m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7];
-
-        int pad[4] = { 0 };
-        int scale_idx[4] = { 0 };
-        int v[4][21] = { {0} };
-        int high_2_bits[4] = { 0 };
-        int low_2_bits[4] = { 0 };
-
-        float q_scale_tab[64];
-        for (int s_idx = 0; s_idx < 64; s_idx++) {
-            q_scale_tab[s_idx] = av_int2float((s_idx + 1) << 20) * powf(2.f, 116.f);
-        }
-
-        for (int i = 0; i < 4; i++) {
-            int desired_bit = (best_idx5 >> (3 - i)) & 1;
-            int best_pad = 0, best_scale = 0;
-            int best_v[21] = { 0 };
-            float min_err = 1e30f;
-
-            /* Closed-loop analysis-by-synthesis over every (pad,scale), see
-             * search_pad(). */
-            for (int p = 0; p < 4; p++) {
-                float err[FA_SCALES];
-                uint8_t cur_v[21][FA_SCALES];
-
-                search_pad(y + i * 64, m, ch, q_scale_tab, p, err, cur_v);
-                for (int s_idx = 0; s_idx < FA_SCALES; s_idx++) {
-                    if (err[s_idx] < min_err) {
-                        min_err = err[s_idx];
-                        best_pad = p;
-                        best_scale = s_idx;
-                        for (int j = 0; j < 21; j++)
-                            best_v[j] = cur_v[j][s_idx];
-                    }
-                }
-            }
-
-            pad[i] = best_pad;
-            scale_idx[i] = best_scale;
-            memcpy(v[i], best_v, sizeof(best_v));
-
-            int v20 = best_v[20];
-            high_2_bits[i] = v20 >> 1;
-            low_2_bits[i] = ((v20 & 1) << 1) | desired_bit;
-
-            /* Commit the chosen block on the real channel state. */
-            float q_scale = q_scale_tab[best_scale];
-            float f0 = ch->f[0];
-            float f1 = ch->f[1];
-            float f2 = ch->f[2];
-            float f3 = ch->f[3];
-            float f4 = ch->f[4];
-            float f5 = ch->f[5];
-            float f6 = ch->f[6];
-            float f7 = ch->f[7];
-            int next_excite = best_pad;
-            int idx_3 = 0;
-            for (int k = 0; k < 64; k++) {
-                float x = 0;
-                if (k == next_excite) {
-                    if (idx_3 < 21) {
-                        x = q_scale * (2.0f * best_v[idx_3] - 7.0f);
-                        idx_3++;
-                    }
-                    next_excite += 3;
-                }
-
-                x -= m0 * f0; f0 += m0 * x;
-                x -= m1 * f1; f1 += m1 * x;
-                x -= m2 * f2; f2 += m2 * x;
-                x -= m3 * f3; f3 += m3 * x;
-                x -= m4 * f4; f4 += m4 * x;
-                x -= m5 * f5; f5 += m5 * x;
-                x -= m6 * f6; f6 += m6 * x;
-                x -= m7 * f7; f7 += m7 * x;
-
-                f0 = f1;
-                f1 = f2;
-                f2 = f3;
-                f3 = f4;
-                f4 = f5;
-                f5 = f6;
-                f6 = f7;
-                f7 = x;
-
-                ch->last = x + ch->last * 0.86f;
-            }
-            ch->f[0] = f0;
-            ch->f[1] = f1;
-            ch->f[2] = f2;
-            ch->f[3] = f3;
-            ch->f[4] = f4;
-            ch->f[5] = f5;
-            ch->f[6] = f6;
-            ch->f[7] = f7;
-        }
-
-        uint32_t src[10] = { 0 };
-        int ppos = 0;
-
-        write_bits(6, &ppos, src, idx[7]);
-        write_bits(6, &ppos, src, idx[6]);
-        write_bits(5, &ppos, src, idx[5]);
-        write_bits(5, &ppos, src, idx[4]);
-        write_bits(4, &ppos, src, idx[3]);
-        write_bits(3, &ppos, src, idx[1]);
-        write_bits(3, &ppos, src, idx[0]);
-
-        write_bits(6, &ppos, src, scale_idx[3]);
-        write_bits(6, &ppos, src, scale_idx[2]);
-        write_bits(6, &ppos, src, scale_idx[1]);
-        write_bits(6, &ppos, src, scale_idx[0]);
-        write_bits(2, &ppos, src, pad[3]);
-        write_bits(2, &ppos, src, pad[2]);
-        write_bits(2, &ppos, src, pad[1]);
-        write_bits(2, &ppos, src, pad[0]);
-
-        for (int i = 0; i < 4; i++) {
-            for (int j = 0; j <= 9; j++) {
-                write_bits(3, &ppos, src, v[i][j]);
-            }
-            write_bits(2, &ppos, src, high_2_bits[i]);
-
-            for (int j = 10; j <= 19; j++) {
-                write_bits(3, &ppos, src, v[i][j]);
-            }
-            write_bits(2, &ppos, src, low_2_bits[i]);
-        }
-
-        for (int w = 0; w < 10; w++) {
-            AV_WL32(dst + 40 * channel + w * 4, src[w]);
-        }
-    }
+    for (int channel = 0; channel < channels; channel++)
+        fa_encode_subframe(s, &s->ch[channel], (const float *)frame->extended_data[channel],
+                           avpkt->data + 40 * channel);
 
     *got_packet_ptr = 1;
     return 0;

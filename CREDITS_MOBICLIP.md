@@ -9,6 +9,8 @@ The implementation of Mobiclip support in this software was made possible thanks
 * [actimagine](https://github.com/CharlesVanEeckhout/actimagine/)
 * [flipnote.js](https://github.com/jaames/flipnote.js/)
 * [RocketVideoPlayer](https://github.com/RocketRobz/RocketVideoPlayer)
+* [Vid2RVID](https://github.com/RocketRobz/Vid2RVID) — the RVID encoder's choices and LZ parse follow it, so that the same input gives the same file
+* [MoflexTool](https://github.com/koori0831/MoflexTool) — the FastAudio encoder's analysis and pulse search follow its encoder; its decoders served as a reference for MOFLEX audio and video
 
 ## MODS encoder reference
 

@@ -37,9 +37,8 @@ typedef struct MobiAudioEnc {
     int draining;               /* set after flush() */
 } MobiAudioEnc;
 
-/* fastaudio_ds_mods: set 1 only for the DS .mods container, whose FastAudio
- * decode folds the shared low bit into each segment's last sample.  3DS .moflex
- * must pass 0 so its (already hardware-correct) bitstream stays unchanged. */
+/* fastaudio_ds_mods is unused: FastAudio is the same stream on the DS and the
+ * 3DS, the last sample of a group being three bits on both. */
 static int mobi_aenc_init(MobiAudioEnc *a, int target, enum AVCodecID adpcm_id,
                           const AVChannelLayout *chl, int sample_rate,
                           int fastaudio_ds_mods)
@@ -69,11 +68,8 @@ static int mobi_aenc_init(MobiAudioEnc *a, int target, enum AVCodecID adpcm_id,
     av_channel_layout_copy(&a->enc->ch_layout, chl);
     a->enc->sample_rate = sample_rate;
     a->enc->sample_fmt  = sfmt;
-    if (target == MOBI_AUDIO_FASTAUDIO) {
+    if (target == MOBI_AUDIO_FASTAUDIO)
         a->enc->frame_size = 256;
-        if (fastaudio_ds_mods && a->enc->priv_data)
-            av_opt_set_int(a->enc->priv_data, "ds_mods", 1, 0);
-    }
     if (avcodec_open2(a->enc, codec, NULL) < 0) {
         avcodec_free_context(&a->enc);
         return AVERROR(EINVAL);
