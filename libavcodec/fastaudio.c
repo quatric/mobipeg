@@ -37,7 +37,6 @@ typedef struct ChannelItems {
 typedef struct FastAudioContext {
     const AVClass *class;
     float table[8][64];
-    int ds;             /* Nintendo DS variant (FVDS movies) */
 
     ChannelItems *ch;
 } FastAudioContext;
@@ -47,7 +46,6 @@ static av_cold int fastaudio_init(AVCodecContext *avctx)
     FastAudioContext *s = avctx->priv_data;
 
     avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-    s->ds = avctx->codec_tag == MKTAG('F', 'V', 'D', 'S');
 
     for (int i = 0; i < 8; i++)
         s->table[0][i] = (i - 159.5f) / 160.f;
@@ -146,16 +144,12 @@ static int fastaudio_decode(AVCodecContext *avctx, AVFrame *frame,
                 float value = av_int2float((inds[i] + 1) << 20) * powf(2.f, 116.f);
 
                 for (int j = 0, tmp = 0; j < 21; j++) {
-                    float v_out;
-                    if (j == 20) {
-                        /* tmp is a 4-bit value (0-15) from two pairs of 2-bit reads.
-                         * PlayMobic: results[..] = scale * (sample60 - 7)
-                         * i.e. map 0-15 linearly to -7..+8, not 2*(tmp/2)-7. */
-                        v_out = s->ds ? 2.0f * (tmp >> 1) - 7.0f : (float)tmp - 7.0f;
-                    } else {
-                        v_out = 2.0f * read_bits(3, &pos, src) - 7.0f;
-                    }
-                    result[i * 64 + pads[i] + j * 3] = value * v_out;
+                    /* The last sample's three bits are the upper ones of tmp, the
+                     * four bits that close the two words of this sub-block; the
+                     * lowest one only selects m[2] and is no part of the sample. */
+                    const int v = j == 20 ? tmp >> 1 : read_bits(3, &pos, src);
+
+                    result[i * 64 + pads[i] + j * 3] = value * (2.0f * v - 7.0f);
 
                     if (j % 10 == 9)
                         tmp = 4 * tmp + read_bits(2, &pos, src);
@@ -319,7 +313,7 @@ static void get_residual_energies(const float *y, int nb_samples, const float *m
  * The scales share their excitation positions and are otherwise independent
  * recursions, so they are stepped side by side. */
 static void search_pad(const float *y, const float *m, const ChannelItems *ch,
-                       const float *q_scale_tab, int pad, int desired_bit,
+                       const float *q_scale_tab, int pad,
                        float *err, uint8_t (*cur_v)[FA_SCALES])
 {
     float f[8][FA_SCALES], e[FA_SCALES];
@@ -349,23 +343,13 @@ static void search_pad(const float *y, const float *m, const ChannelItems *ch,
 
                     e_ideal += m0 * f0 + m1 * f1 + m2 * f2 + m3 * f3 +
                                m4 * f4 + m5 * f5 + m6 * f6 + m7 * f7;
-                    /* The j==20 excitation encodes a 4-bit value tmp = 2*q + desired_bit.
-                     * The decoder reconstructs: excitation = q_scale * (tmp - 7).
-                     * So we solve: q_scale*(2*q + desired_bit - 7) ≈ e_ideal
-                     * → q = round((e_ideal/q_scale + 7 - desired_bit) / 2) */
-                    if (idx_3 == 20) {
-                        q = (int)lrintf((e_ideal / q_scale + 7.0f - desired_bit) / 2.0f);
-                    } else {
-                        q = (int)lrintf((e_ideal / q_scale + 7.0f) / 2.0f);
-                    }
+                    /* All 21 excitations are three bits, rebuilt as
+                     * q_scale * (2 * q - 7). */
+                    q = (int)lrintf((e_ideal / q_scale + 7.0f) / 2.0f);
                     if (q < 0) q = 0;
                     if (q > 7) q = 7;
                     cur_v[idx_3][l] = q;
-                    if (idx_3 == 20) {
-                        e[l] = q_scale * (2.0f * q + desired_bit - 7.0f);
-                    } else {
-                        e[l] = q_scale * (2.0f * q - 7.0f);
-                    }
+                    e[l] = q_scale * (2.0f * q - 7.0f);
                 }
                 idx_3++;
                 excite = 1;
@@ -492,7 +476,7 @@ static int fastaudio_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
                 float err[FA_SCALES];
                 uint8_t cur_v[21][FA_SCALES];
 
-                search_pad(y + i * 64, m, ch, q_scale_tab, p, desired_bit, err, cur_v);
+                search_pad(y + i * 64, m, ch, q_scale_tab, p, err, cur_v);
                 for (int s_idx = 0; s_idx < FA_SCALES; s_idx++) {
                     if (err[s_idx] < min_err) {
                         min_err = err[s_idx];
@@ -528,13 +512,7 @@ static int fastaudio_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
                 float x = 0;
                 if (k == next_excite) {
                     if (idx_3 < 21) {
-                        /* Reconstruct decoder's excitation for j==20: tmp = 2*q + desired_bit,
-                         * excitation = q_scale * (tmp - 7) = q_scale * (2*q + desired_bit - 7). */
-                        if (idx_3 == 20) {
-                            x = q_scale * (2.0f * best_v[idx_3] + desired_bit - 7.0f);
-                        } else {
-                            x = q_scale * (2.0f * best_v[idx_3] - 7.0f);
-                        }
+                        x = q_scale * (2.0f * best_v[idx_3] - 7.0f);
                         idx_3++;
                     }
                     next_excite += 3;
