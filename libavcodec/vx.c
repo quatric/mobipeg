@@ -54,6 +54,10 @@
 
 #include "vx_cavlc_vlc.h"
 
+#if ARCH_AARCH64 && HAVE_INTRINSICS_NEON
+#include <arm_neon.h>
+#endif
+
 static const uint8_t coeff_token_table_index[17] = {
     0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3
 };
@@ -662,6 +666,18 @@ static int predict_inter(VXDecCtx *c, MBlock b, MV pred_vec, int has_delta, cons
 
     for (int plane = 0; plane < 3; plane++) {
         int step = plane ? 2 : 1;
+
+        if (!c->gba_arena) {
+            /* The vector was checked against the picture, so nothing wraps
+             * around and each row is one run of reference pixels. */
+            const int n = (b.w + step - 1) / step;
+
+            for (int j = 0; j < b.h; j += step)
+                memcpy(c->dst.data[plane] + ((b.y + j) / step) * c->dst.linesize[plane] + b.x / step,
+                       ref->data[plane] + ((b.y + j + vec.y) / step) * ref->linesize[plane] +
+                       (b.x + vec.x) / step, n);
+            continue;
+        }
         for (int j = 0; j < b.h; j += step) {
             for (int i = 0; i < b.w; i += step) {
                 int val = px_get(c, ref, plane, b.x + i + vec.x,
@@ -703,6 +719,20 @@ static int predict_inter_dc(VXDecCtx *c, MBlock b)
     int dc[3] = { dcy, dcu, dcv };
     for (int plane = 0; plane < 3; plane++) {
         int step = plane ? 2 : 1;
+
+        if (!c->gba_arena) {
+            /* as in predict_inter(): in bounds, so row by row */
+            const int n = (b.w + step - 1) / step;
+
+            for (int j = 0; j < b.h; j += step) {
+                uint8_t *dst = c->dst.data[plane] + ((b.y + j) / step) * c->dst.linesize[plane] + b.x / step;
+                const uint8_t *src = ref->data[plane] + ((b.y + j + vec.y) / step) * ref->linesize[plane] +
+                                     (b.x + vec.x) / step;
+                for (int i = 0; i < n; i++)
+                    dst[i] = av_clip_uint8(src[i] + dc[plane]);
+            }
+            continue;
+        }
         for (int j = 0; j < b.h; j += step) {
             for (int i = 0; i < b.w; i += step) {
                 int val = px_get(c, ref, plane, b.x + i + vec.x,
@@ -737,6 +767,25 @@ static void idct_add(VXDecCtx *c, int x, int y, int plane, const int *dctv)
         dct[i + 4*1] = z1 + z2;
         dct[i + 4*2] = z1 - z2;
         dct[i + 4*3] = z0 - z3;
+    }
+
+    if (!c->gba_arena) {
+        /* the same second pass, on the plane itself */
+        const int linesize = c->dst.linesize[plane];
+        uint8_t *dst = c->dst.data[plane] + (y / step) * linesize + x / step;
+
+        for (int i = 0; i < 4; i++) {
+            int z0 = dct[0 + 4*i] + dct[2 + 4*i];
+            int z1 = dct[0 + 4*i] - dct[2 + 4*i];
+            int z2 = (dct[1 + 4*i] >> 1) - dct[3 + 4*i];
+            int z3 = dct[1 + 4*i] + (dct[3 + 4*i] >> 1);
+
+            dst[i + 0*linesize] = av_clip_uint8(dst[i + 0*linesize] + ((z0 + z3) >> 6));
+            dst[i + 1*linesize] = av_clip_uint8(dst[i + 1*linesize] + ((z1 + z2) >> 6));
+            dst[i + 2*linesize] = av_clip_uint8(dst[i + 2*linesize] + ((z1 - z2) >> 6));
+            dst[i + 3*linesize] = av_clip_uint8(dst[i + 3*linesize] + ((z0 - z3) >> 6));
+        }
+        return;
     }
 
     for (int i = 0; i < 4; i++) {
@@ -1264,8 +1313,32 @@ static void vx_yuv_to_rgb24(AVCodecContext *avctx, const AVFrame *yuv, AVFrame *
         const uint8_t *lu = yuv->data[1] + (ptrdiff_t)(y >> 1) * yuv->linesize[1];
         const uint8_t *lv = yuv->data[2] + (ptrdiff_t)(y >> 1) * yuv->linesize[2];
         uint8_t *out = rgb->data[0] + (ptrdiff_t)y * rgb->linesize[0];
+        int x = 0;
 
-        for (int x = 0; x < w; x++) {
+#if ARCH_AARCH64 && HAVE_INTRINSICS_NEON
+        /* the same sums, sixteen pixels at a time (the width is a multiple of
+         * 16); narrowing with saturation is the clip */
+        for (; x + 16 <= w; x += 16) {
+            const uint8x16_t yv  = vld1q_u8(ly + x);
+            const int16x8_t  cu  = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(lu + (x >> 1)), vdup_n_u8(128)));
+            const int16x8_t  cv  = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(lv + (x >> 1)), vdup_n_u8(128)));
+            const int16x8_t  r   = vshlq_n_s16(cv, 1);
+            const int16x8_t  g   = vsubq_s16(vnegq_s16(vshrq_n_s16(cu, 1)), cv);
+            const int16x8_t  b   = vshlq_n_s16(cu, 1);
+            const int16x8_t  y0  = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(yv)));
+            const int16x8_t  y1  = vreinterpretq_s16_u16(vmovl_high_u8(yv));
+            uint8x16x3_t px;
+
+            px.val[0] = vcombine_u8(vqmovun_s16(vaddq_s16(y0, vzip1q_s16(r, r))),
+                                    vqmovun_s16(vaddq_s16(y1, vzip2q_s16(r, r))));
+            px.val[1] = vcombine_u8(vqmovun_s16(vaddq_s16(y0, vzip1q_s16(g, g))),
+                                    vqmovun_s16(vaddq_s16(y1, vzip2q_s16(g, g))));
+            px.val[2] = vcombine_u8(vqmovun_s16(vaddq_s16(y0, vzip1q_s16(b, b))),
+                                    vqmovun_s16(vaddq_s16(y1, vzip2q_s16(b, b))));
+            vst3q_u8(out + x * 3, px);
+        }
+#endif
+        for (; x < w; x++) {
             int Y  = ly[x];
             int cu = lu[x >> 1] - 128;
             int cv = lv[x >> 1] - 128;
