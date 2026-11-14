@@ -17,6 +17,8 @@
 #include "mathops.h"
 #include "mpeg4videodata.h"
 
+#define FV_VLC_BITS 12
+
 typedef struct FVBitReader {
     const uint8_t *data;
     int size_bits;
@@ -29,60 +31,62 @@ typedef struct FastVideoContext {
     int16_t *mvy;
     uint8_t max_level[2][64];
     uint8_t max_run[2][32];
+    /* the code a 12-bit window starts with: its index and length (0: none) */
+    uint8_t vlc_index[1 << FV_VLC_BITS];
+    uint8_t vlc_len[1 << FV_VLC_BITS];
     int width, height;
     int mb_width, mb_height;
     int ref_index;
     int have_reference;
 } FastVideoContext;
 
+/* n bits (at most 24) starting at bit pos; they must lie inside the data,
+ * which is followed by the packet padding. */
+static av_always_inline unsigned fv_peek_bits(const FVBitReader *br, int pos, int n)
+{
+    const uint8_t *p = br->data + (pos >> 4) * 2;
+    const uint64_t v = (uint64_t)AV_RL16(p) << 32 | (uint64_t)AV_RL16(p + 2) << 16 |
+                       AV_RL16(p + 4);
+
+    return (v >> (48 - (pos & 15) - n)) & ((1U << n) - 1);
+}
+
 static int fv_get_bits(FVBitReader *br, int n, unsigned *value)
 {
-    unsigned v = 0;
-
     if (n < 0 || n > 24 || br->bit_pos > br->size_bits - n)
         return AVERROR_INVALIDDATA;
-    for (int i = 0; i < n; i++) {
-        const int pos = br->bit_pos++;
-        const uint16_t word = AV_RL16(br->data + (pos >> 4) * 2);
-        v = (v << 1) | ((word >> (15 - (pos & 15))) & 1);
-    }
-    *value = v;
+    *value = fv_peek_bits(br, br->bit_pos, n);
+    br->bit_pos += n;
     return 0;
 }
 
-static int fv_show_bits(const FVBitReader *br, int n, unsigned *value)
+/* The codes are 2 to 12 bits long and none is the start of another, so the
+ * next 12 bits (short of that at the end of the data, where the missing ones
+ * count as zero) pick out the one code that can match. */
+static int fv_get_vlc(const FastVideoContext *s, FVBitReader *br, int allow_escape)
 {
-    FVBitReader tmp = *br;
-    return fv_get_bits(&tmp, n, value);
+    const int left = br->size_bits - br->bit_pos;
+    unsigned window;
+    int len;
+
+    if (left >= FV_VLC_BITS)
+        window = fv_peek_bits(br, br->bit_pos, FV_VLC_BITS);
+    else if (left > 0)
+        window = fv_peek_bits(br, br->bit_pos, left) << (FV_VLC_BITS - left);
+    else
+        return AVERROR_INVALIDDATA;
+    len = s->vlc_len[window];
+    if (!len || len > left || (!allow_escape && s->vlc_index[window] == 102))
+        return AVERROR_INVALIDDATA;
+    br->bit_pos += len;
+    return s->vlc_index[window];
 }
 
-static int fv_get_vlc(FVBitReader *br, int allow_escape)
-{
-    for (int len = 2; len <= 12; len++) {
-        unsigned code;
-
-        if (fv_show_bits(br, len, &code) < 0)
-            return AVERROR_INVALIDDATA;
-        for (int i = 0; i < 102; i++) {
-            if (ff_mpeg4_intra_vlc[i][1] == len &&
-                ff_mpeg4_intra_vlc[i][0] == code) {
-                br->bit_pos += len;
-                return i;
-            }
-        }
-        if (allow_escape && len == ff_mpeg4_intra_vlc[102][1] &&
-            code == ff_mpeg4_intra_vlc[102][0]) {
-            br->bit_pos += len;
-            return 102;
-        }
-    }
-    return AVERROR_INVALIDDATA;
-}
-
-static int fv_decode_base(FVBitReader *br, int *last, int *run, int *level)
+static int fv_decode_base(const FastVideoContext *s, FVBitReader *br,
+                          int *last, int *run, int *level)
 {
     unsigned sign;
-    int code = fv_get_vlc(br, 0);
+    int code = fv_get_vlc(s, br, 0);
 
     if (code < 0 || fv_get_bits(br, 1, &sign) < 0)
         return AVERROR_INVALIDDATA;
@@ -102,7 +106,7 @@ static int fv_decode_dct(FastVideoContext *s, FVBitReader *br, int coeff[64])
         unsigned bit;
         int code, last, run, level, sign;
 
-        code = fv_get_vlc(br, 1);
+        code = fv_get_vlc(s, br, 1);
         if (code < 0)
             return code;
         if (code != 102) {
@@ -116,7 +120,7 @@ static int fv_decode_dct(FastVideoContext *s, FVBitReader *br, int coeff[64])
             if (fv_get_bits(br, 1, &bit) < 0)
                 return AVERROR_INVALIDDATA;
             if (!bit) {
-                if (fv_decode_base(br, &last, &run, &level) < 0)
+                if (fv_decode_base(s, br, &last, &run, &level) < 0)
                     return AVERROR_INVALIDDATA;
                 sign = level < 0;
                 level = FFABS(level) + s->max_level[last][run];
@@ -126,7 +130,7 @@ static int fv_decode_dct(FastVideoContext *s, FVBitReader *br, int coeff[64])
                 if (fv_get_bits(br, 1, &bit) < 0)
                     return AVERROR_INVALIDDATA;
                 if (!bit) {
-                    if (fv_decode_base(br, &last, &run, &level) < 0)
+                    if (fv_decode_base(s, br, &last, &run, &level) < 0)
                         return AVERROR_INVALIDDATA;
                     if (FFABS(level) >= 32)
                         return AVERROR_INVALIDDATA;
@@ -269,6 +273,30 @@ static uint8_t fv_half_sample(const uint8_t *src, int width, int height,
 static void fv_motion_tile(const uint8_t *src, int width, int height,
                            int hx, int hy, uint8_t dst[64])
 {
+    const int fx = hx & 1, fy = hy & 1;
+    const int x0 = hx >> 1, y0 = hy >> 1;
+
+    /* a tile that stays inside the plane needs none of the clipping */
+    if (x0 >= 0 && y0 >= 0 && x0 + 7 + fx < width && y0 + 7 + fy < height) {
+        const uint8_t *p = src + y0 * width + x0;
+
+        if (!fx && !fy) {
+            for (int y = 0; y < 8; y++)
+                memcpy(dst + y * 8, p + y * width, 8);
+        } else {
+            const uint8_t *q = p + fy * width + fx;
+
+            for (int y = 0; y < 8; y++)
+                for (int x = 0; x < 8; x++) {
+                    int a = p[y * width + x] >> 3;
+                    int b = q[y * width + x] >> 3;
+                    a = a ? 2 * a + 1 : 0;
+                    b = b ? 2 * b + 1 : 0;
+                    dst[y * 8 + x] = ((a + b) >> 2) << 3;
+                }
+        }
+        return;
+    }
     for (int y = 0; y < 8; y++)
         for (int x = 0; x < 8; x++)
             dst[y * 8 + x] = fv_half_sample(src, width, height,
@@ -456,6 +484,15 @@ static av_cold int fastvideo_decode_init(AVCodecContext *avctx)
         s->max_level[last][run] = FFMAX(s->max_level[last][run], level);
         s->max_run[last][level] = FFMAX(s->max_run[last][level], run);
     }
+    for (int i = 0; i < 103; i++) {
+        const int len = ff_mpeg4_intra_vlc[i][1];
+        const int first = ff_mpeg4_intra_vlc[i][0] << (FV_VLC_BITS - len);
+
+        for (int j = 0; j < 1 << (FV_VLC_BITS - len); j++) {
+            s->vlc_index[first + j] = i;
+            s->vlc_len[first + j]   = len;
+        }
+    }
     avctx->pix_fmt = AV_PIX_FMT_BGR555LE;
     return 0;
 }
@@ -540,19 +577,23 @@ typedef struct FVPutBitContext {
 typedef struct FastVideoEncContext {
     uint8_t *plane[3];
     int width, height;
+    /* the code for (last, run, |level|), or -1 where only an escape will do */
+    int8_t code[2][64][64];
 } FastVideoEncContext;
 
+/* Append the low n bits (at most 16) of value; fewer than 16 are ever left
+ * waiting in pb->word. */
 static int fv_put_bits(FVPutBitContext *pb, unsigned value, int n)
 {
-    for (int i = n - 1; i >= 0; i--) {
-        pb->word = (pb->word << 1) | ((value >> i) & 1);
-        if (++pb->bits == 16) {
-            if (pb->pos > pb->size - 2)
-                return AVERROR_BUFFER_TOO_SMALL;
-            AV_WL16(pb->data + pb->pos, pb->word);
-            pb->pos += 2;
-            pb->word = pb->bits = 0;
-        }
+    pb->word  = pb->word << n | (value & ((1U << n) - 1));
+    pb->bits += n;
+    if (pb->bits >= 16) {
+        if (pb->pos > pb->size - 2)
+            return AVERROR_BUFFER_TOO_SMALL;
+        pb->bits -= 16;
+        AV_WL16(pb->data + pb->pos, pb->word >> pb->bits);
+        pb->pos += 2;
+        pb->word &= (1U << pb->bits) - 1;
     }
     return 0;
 }
@@ -570,7 +611,8 @@ static int fv_flush_put_bits(FVPutBitContext *pb)
     return 0;
 }
 
-static int fv_encode_dct(FVPutBitContext *pb, const int coeff[64])
+static int fv_encode_dct(const FastVideoEncContext *s, FVPutBitContext *pb,
+                         const int coeff[64])
 {
     int last_nonzero = -1, run = 0;
 
@@ -594,12 +636,8 @@ static int fv_encode_dct(FVPutBitContext *pb, const int coeff[64])
             run++;
             continue;
         }
-        for (int j = 0; j < 102; j++)
-            if ((j >= 67) == last && ff_mpeg4_intra_run[j] == run &&
-                ff_mpeg4_intra_level[j] == FFABS(level)) {
-                code = j;
-                break;
-            }
+        if (FFABS(level) < 64)
+            code = s->code[last][run][FFABS(level)];
         if (code >= 0) {
             if (fv_put_bits(pb, ff_mpeg4_intra_vlc[code][0],
                             ff_mpeg4_intra_vlc[code][1]) < 0 ||
@@ -618,12 +656,15 @@ static int fv_encode_dct(FVPutBitContext *pb, const int coeff[64])
     return 0;
 }
 
-static int fv_quantize(int value, int index)
+static av_always_inline int fv_quantize(int value, int index)
 {
-    static const int dequant[4] = { 32, 23, 23, 64 };
-    const int quant = 262144 / dequant[index];
-    const int f = FFMIN(((1 << 17) + (quant >> 1)) / quant,
-                        ((21 << 12) + (quant >> 1)) / quant);
+#define FV_QUANT(dequant) (262144 / (dequant))
+#define FV_ROUND(dequant) FFMIN(((1 << 17) + (FV_QUANT(dequant) >> 1)) / FV_QUANT(dequant), \
+                                ((21 << 12) + (FV_QUANT(dequant) >> 1)) / FV_QUANT(dequant))
+    static const int quants[4] = { FV_QUANT(32), FV_QUANT(23), FV_QUANT(23), FV_QUANT(64) };
+    static const int rounds[4] = { FV_ROUND(32), FV_ROUND(23), FV_ROUND(23), FV_ROUND(64) };
+    const int quant = quants[index];
+    const int f = rounds[index];
 
     if (value < 0)
         return -(((f - value) * quant) >> 18);
@@ -708,6 +749,9 @@ static av_cold int fastvideo_encode_init(AVCodecContext *avctx)
         if (!s->plane[p])
             return AVERROR(ENOMEM);
     }
+    memset(s->code, -1, sizeof(s->code));
+    for (int i = 101; i >= 0; i--)
+        s->code[i >= 67][ff_mpeg4_intra_run[i]][ff_mpeg4_intra_level[i]] = i;
     return 0;
 }
 
@@ -745,13 +789,13 @@ static int fastvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
             dc = coeff[0];
             coeff[0] -= last_gdc;
             last_gdc = dc;
-            if ((ret = fv_encode_dct(&pb, coeff)) < 0)
+            if ((ret = fv_encode_dct(s, &pb, coeff)) < 0)
                 return ret;
             fv_encode_plane(s, frame, 0, x, y, coeff);
-            if ((ret = fv_encode_dct(&pb, coeff)) < 0)
+            if ((ret = fv_encode_dct(s, &pb, coeff)) < 0)
                 return ret;
             fv_encode_plane(s, frame, 2, x, y, coeff);
-            if ((ret = fv_encode_dct(&pb, coeff)) < 0)
+            if ((ret = fv_encode_dct(s, &pb, coeff)) < 0)
                 return ret;
         }
     if ((ret = fv_flush_put_bits(&pb)) < 0)
