@@ -621,12 +621,42 @@ static inline uint8_t adpcm_ima_compress_sample(ADPCMChannelStatus *c,
 {
     int delta  = sample - c->prev_sample;
     int step   = ff_adpcm_step_table[c->step_index];
-    int nibble = FFMIN(7, (abs(delta) * 8 + step) / (step * 2)) + (delta < 0) * 8;
+    /* level n stands for (n + 1/2) * step / 4, so the nearest one is found
+     * by rounding down */
+    int nibble = FFMIN(7, abs(delta) * 4 / step) + (delta < 0) * 8;
     c->prev_sample += ((step *
                         ff_adpcm_yamaha_difflookup[nibble]) / 8);
     c->prev_sample = av_clip_int16(c->prev_sample);
     c->step_index  = av_clip(c->step_index + ff_adpcm_index_table[nibble], 0, 88);
     return nibble;
+}
+
+/* The same with the choice MoflexTool's encoder makes: of the level found by
+ * rounding down and its two neighbours, the one the decoder brings closest. */
+static inline uint8_t adpcm_ima_moflex_compress_sample(ADPCMChannelStatus *c,
+                                                       int16_t sample)
+{
+    const int step  = ff_adpcm_step_table[c->step_index];
+    const int delta = abs(sample - c->prev_sample);
+    const int mag   = FFMIN(7, delta * 4 / step);
+    int best = mag, best_err = INT_MAX, diff;
+
+    for (int m = FFMAX(0, mag - 1); m <= FFMIN(7, mag + 1); m++) {
+        const int err = abs(delta - (((2 * m + 1) * step) >> 3));
+        if (err < best_err) {
+            best_err = err;
+            best     = m;
+        }
+    }
+    diff = ((2 * best + 1) * step) >> 3;
+    if (sample < c->prev_sample) {
+        c->prev_sample = av_clip_int16(c->prev_sample - diff);
+        best |= 8;
+    } else {
+        c->prev_sample = av_clip_int16(c->prev_sample + diff);
+    }
+    c->step_index = av_clip(c->step_index + ff_adpcm_index_table[best], 0, 88);
+    return best;
 }
 
 static inline uint8_t adpcm_ima_alp_compress_sample(ADPCMChannelStatus *c, int16_t sample)
@@ -1778,6 +1808,9 @@ static int adpcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
         /* Header: [LE16 step_index][LE16 predictor] per channel */
         for (int ch = 0; ch < channels; ch++) {
             ADPCMChannelStatus *cs = &c->status[ch];
+            /* the stream starts from its first sample */
+            if (!avctx->frame_num)
+                cs->prev_sample = samples_p[ch][0];
             bytestream_put_le16(&dst, cs->step_index);
             bytestream_put_le16(&dst, cs->prev_sample);
         }
@@ -1786,8 +1819,8 @@ static int adpcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             ADPCMChannelStatus *cs = &c->status[ch];
             for (int n = 0; n < 256; n += 2) {
                 uint8_t nibble;
-                nibble  = adpcm_ima_compress_sample(cs, samples_p[ch][n])     & 0x0F;
-                nibble |= adpcm_ima_compress_sample(cs, samples_p[ch][n + 1]) << 4;
+                nibble  = adpcm_ima_moflex_compress_sample(cs, samples_p[ch][n]);
+                nibble |= adpcm_ima_moflex_compress_sample(cs, samples_p[ch][n + 1]) << 4;
                 *dst++ = nibble;
             }
         }
