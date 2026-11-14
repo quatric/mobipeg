@@ -166,6 +166,22 @@ holding the top screen above the bottom one, and `-lazy 1` for a slightly
 tighter LZ10 parse than Vid2RVID's. The demuxer reads versions 1 to 5 of the
 format, dual screen videos included.
 
+## FastVideoDS (`fastvideo`)
+
+The video and the file are what Gericom's FastVideoDSEncoder makes of the same
+frames and sound when it runs as one job (`-j 1`), byte for byte: key frames
+and predicted frames with its motion search and quantizer, a key frame after
+250 predicted ones (`-g` on the ffmpeg `fastvideo` encoder) or when more than
+six blocks in ten would be intra, its ADPCM, and the table of key frames
+FastVideoDSPlayer needs to open the file.
+
+The player shows pictures 256 wide and up to 192 high (a multiple of 8;
+`--scale 256x144` for 16:9), and plays stereo sound at 47605 Hz, which is what
+`encode.py` resamples to. Without sound, or where it ends before the video,
+the file carries coded silence as the reference encoder's does. The encoder
+warns about a frame over the 64 KiB the player has room for; only pictures
+close to noise get there.
+
 ## Environment variables
 
 | Variable | Same as | Notes |

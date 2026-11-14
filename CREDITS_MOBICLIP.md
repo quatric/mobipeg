@@ -44,4 +44,7 @@ The implementation of Mobiclip support in this software was made possible thanks
   (`libavcodec/fastvideo.c` and the FastVideoDS entry in `encode.py`) is a
   port of Gericom's AVX2-gated FastVideoDS reference encoder, the same
   source of ActImagine-format expertise credited above for MobiclipDecoder
-  and the Mobiclip x264 fork.
+  and the Mobiclip x264 fork. The ADPCM coder (`libavcodec/adpcm_fvds.h`) and
+  the file layout (`libavformat/fvenc.c`) follow
+  [FastVideoDSEncoder](https://github.com/Gericom/FastVideoDSEncoder) and
+  [FastVideoDSPlayer](https://github.com/Gericom/FastVideoDSPlayer) as well.

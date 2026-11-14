@@ -1162,9 +1162,9 @@ def main():
         # stream is always dropped further down regardless of --audio.
         mode, dmx, scale, moaud, cvc = "vid", "hvqm4", "320:240", 0, "hvqm4"
     elif fmt == "fastvideo":
-        # ActImagine FastVideoDS (.fv). All-intra BGR555 DCT video; audio (if
-        # any) is adpcm_ima_moflex, muxed directly rather than through the
-        # mobiclip -mo_audio path, so moaud stays 0.
+        # Gericom's FastVideoDS (.fv): BGR555 DCT video with key and
+        # predicted frames, and its own ADPCM (adpcm_ima_fvds) muxed directly
+        # rather than through the mobiclip -mo_audio path, so moaud stays 0.
         mode, dmx, scale, moaud, cvc = "vid", "fv", "256:192", 0, "fastvideo"
     elif fmt == "flipnote":
         # Nintendo DSi Flipnote Studio (.ppm): 1-bit 256x192 frames, optional
@@ -1998,9 +1998,9 @@ def main():
         if audio == "none":
             enc_opts.append("-an")
         else:
-            enc_opts.extend(["-c:a", "adpcm_ima_moflex"])
-            if audio_rate > 0:
-                enc_opts.extend(["-ar", str(audio_rate)])
+            # FastVideoDSPlayer plays stereo at the DS mixer's 47605 Hz and
+            # nothing else, whatever the header says.
+            enc_opts.extend(["-c:a", "adpcm_ima_fvds", "-ar", "47605", "-ac", "2"])
     elif fmt in ("factor5", "f5vid"):
         # GameCube Factor 5 DivX: MPEG-4 ASP video + DSP-ADPCM audio. The
         # f5vid muxer re-codes each VOP into Factor 5's entropy layout, which
