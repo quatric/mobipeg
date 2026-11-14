@@ -751,13 +751,13 @@ def main():
         "--no-compress",
         dest="rvid_no_compress",
         action="store_true",
-        help="rvid only: store raw 16bpp frames instead of Nintendo LZ10 compression.",
+        help="rvid only: store raw frames instead of Nintendo LZ10 compression. By default frames are compressed up to the frame rate RocketVideoPlayer can decompress at (Vid2RVID's rule).",
     )
     parser.add_argument(
         "--rvid-interlaced",
         dest="rvid_interlaced",
         action="store_true",
-        help="rvid only: store one field per frame (interlaced).",
+        help="rvid only: store one field per frame (interlaced). By default this is done above the frame rate RocketVideoPlayer can show whole frames at (Vid2RVID's rule).",
     )
     parser.add_argument(
         "--rvid-no-dither",
@@ -1974,26 +1974,22 @@ def main():
         # RocketVideo: 16bpp (RGB555/565) frames, optional Nintendo LZ10, encoded
         # entirely by ffmpeg's rvid encoder. The encoder consumes rgb24 and packs
         # to 16bpp itself. Audio is raw PCM (the rvid muxer's native stream).
-        enc_opts.extend(
-            [
-                "-mode",
-                rvid_mode,
-                "-compress",
-                "0" if rvid_no_compress else "1",
-                "-interlaced",
-                "1" if rvid_interlaced else "0",
-                "-dither",
-                "0" if rvid_no_dither else "1",
-            ]
-        )
+        # Left alone, the encoder interlaces and compresses by Vid2RVID's
+        # frame-rate rules (what RocketVideoPlayer can keep up with), so only
+        # an explicit choice is passed on.
+        enc_opts.extend(["-mode", rvid_mode, "-dither", "0" if rvid_no_dither else "1"])
+        if rvid_no_compress:
+            enc_opts.extend(["-compress", "0"])
+        if rvid_interlaced:
+            enc_opts.extend(["-interlaced", "1"])
         if audio == "none":
             enc_opts.append("-an")
         else:
             # 16-bit PCM (pcm_s16le) is the higher-quality of the two rvid audio
             # stream types; the muxer writes it as the left/right sound stream.
+            # RocketVideoPlayer refuses anything above 32 kHz.
             enc_opts.extend(["-c:a", "pcm_s16le"])
-            if audio_rate > 0:
-                enc_opts.extend(["-ar", str(audio_rate)])
+            enc_opts.extend(["-ar", str(min(audio_rate, 32000) if audio_rate > 0 else 32000)])
     elif fmt == "hvqm4":
         # The hvqm4 muxer carries video only -- drop any audio stream
         # regardless of the --audio choice.

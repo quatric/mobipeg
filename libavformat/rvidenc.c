@@ -24,7 +24,17 @@
  *   0x200 header, u32 frame-offset table, compressed-size table (u32/frame for
  *   16bpp, u16/frame for 8bpp), the unique frame blobs (exact duplicates share
  *   an offset), then the left and right PCM streams.
+ *
+ * What RocketVideoPlayer expects of the file, beyond the layout:
+ *   - a frame offset is a multiple of four (its low two bits name the part of
+ *     a split file), so every stored frame is padded to four bytes;
+ *   - a dual screen video has two table entries per frame, top screen first;
+ *   - the frame rate byte is a whole rate, with bit 7 set when the real rate
+ *     is that times 1000/1001, or 0 for the DS's own 59.8261 Hz;
+ *   - sound is signed PCM, 8 or 16 bit, at 32000 Hz at most.
  */
+#include <math.h>
+
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "avformat.h"
@@ -43,7 +53,7 @@ typedef struct RVIDFrame {
 } RVIDFrame;
 
 typedef struct RVIDMuxContext {
-    int bmp_mode, interlaced, compressed;
+    int bmp_mode, interlaced, compressed, dual;
     int vres, width, have_video, video_stream;
 
     RVIDFrame *frames;
@@ -54,7 +64,7 @@ typedef struct RVIDMuxContext {
     int  hsize;
 
     /* audio */
-    int audio_16bit, channels, sample_rate, have_audio;
+    int audio_16bit, audio_flip, channels, sample_rate, have_audio;
     uint8_t *left, *right;
     size_t   left_size, right_size, left_cap, right_cap;
 } RVIDMuxContext;
@@ -92,26 +102,32 @@ static int rvid_init(AVFormatContext *s)
             m->bmp_mode   = par->extradata[0];
             m->interlaced = par->extradata[1];
             m->compressed = par->extradata[2];
+            m->dual       = par->extradata_size > 3 && par->extradata[3] == 1;
             m->width      = par->width;
-            m->vres       = m->interlaced ? par->height / 2 : par->height;
+            m->vres       = par->height / (m->dual ? 2 : 1) / (m->interlaced ? 2 : 1);
             if ((m->width != 240 && m->width != 256) ||
                 m->vres < 1 || m->vres > 255 || m->bmp_mode > 2 ||
-                (m->interlaced && (par->height & 1)))
+                par->height != m->vres * (m->dual ? 2 : 1) * (m->interlaced ? 2 : 1) ||
+                (m->dual && m->width != 256))
                 return AVERROR(EINVAL);
             m->video_stream = i;
             m->have_video = 1;
         } else if (par->codec_type == AVMEDIA_TYPE_AUDIO) {
             if (m->have_audio ||
-                (par->codec_id != AV_CODEC_ID_PCM_S16LE && par->codec_id != AV_CODEC_ID_PCM_U8) ||
+                (par->codec_id != AV_CODEC_ID_PCM_S16LE && par->codec_id != AV_CODEC_ID_PCM_S8 &&
+                 par->codec_id != AV_CODEC_ID_PCM_U8) ||
                 par->ch_layout.nb_channels < 1 || par->ch_layout.nb_channels > 2 ||
-                par->sample_rate < 1 || par->sample_rate > UINT16_MAX) {
+                par->sample_rate < 1 || par->sample_rate > 32000) {
                 av_log(s, AV_LOG_ERROR,
-                       "rvid: audio must be one mono/stereo PCM U8 or S16LE stream at 1-65535 Hz\n");
+                       "rvid: audio must be one mono/stereo PCM S16LE or S8 stream at "
+                       "no more than 32000 Hz (the player refuses higher rates)\n");
                 return AVERROR(EINVAL);
             }
             m->channels    = par->ch_layout.nb_channels;
             m->sample_rate = par->sample_rate;
             m->audio_16bit = (par->codec_id == AV_CODEC_ID_PCM_S16LE);
+            /* the DS plays 8 bit sound as signed samples */
+            m->audio_flip  = (par->codec_id == AV_CODEC_ID_PCM_U8);
             m->have_audio  = 1;
         } else {
             return AVERROR(EINVAL);
@@ -144,42 +160,64 @@ static int append(uint8_t **buf, size_t *size, size_t *cap,
     return 0;
 }
 
+static int rvid_add_frame(RVIDMuxContext *m, const uint8_t *data, int size)
+{
+    const int padded = FFALIGN(size, 4);
+    RVIDFrame *f;
+
+    if (m->nframes >= m->cap) {
+        int nc = FFMAX(m->cap * 2, 1024);
+        RVIDFrame *nf = av_realloc_array(m->frames, nc, sizeof(*nf));
+        if (!nf)
+            return AVERROR(ENOMEM);
+        m->frames = nf; m->cap = nc;
+    }
+    f = &m->frames[m->nframes];
+    f->size = padded;
+    f->data = av_mallocz(padded);
+    if (!f->data)
+        return AVERROR(ENOMEM);
+    memcpy(f->data, data, size);
+    f->hash = fnv1a(f->data, f->size);
+    f->dup_of = -1;
+    m->nframes++;
+    return 0;
+}
+
 static int rvid_write_packet(AVFormatContext *s, AVPacket *pkt)
 {
     RVIDMuxContext *m = s->priv_data;
     AVCodecParameters *par = s->streams[pkt->stream_index]->codecpar;
 
     if (par->codec_type == AVMEDIA_TYPE_VIDEO) {
-        RVIDFrame *f;
-        if (m->nframes >= m->cap) {
-            int nc = FFMAX(m->cap * 2, 1024);
-            RVIDFrame *nf = av_realloc_array(m->frames, nc, sizeof(*nf));
-            if (!nf)
-                return AVERROR(ENOMEM);
-            m->frames = nf; m->cap = nc;
+        int ret;
+
+        if (m->dual) {
+            /* the top screen's size, then both screens */
+            unsigned first;
+
+            if (pkt->size < 4 || (first = AV_RL32(pkt->data)) > pkt->size - 4)
+                return AVERROR_INVALIDDATA;
+            if ((ret = rvid_add_frame(m, pkt->data + 4, first)) < 0)
+                return ret;
+            return rvid_add_frame(m, pkt->data + 4 + first, pkt->size - 4 - first);
         }
-        f = &m->frames[m->nframes];
-        f->size = pkt->size;
-        f->data = av_malloc(pkt->size);
-        if (!f->data)
-            return AVERROR(ENOMEM);
-        memcpy(f->data, pkt->data, pkt->size);
-        f->hash = fnv1a(f->data, f->size);
-        f->dup_of = -1;
-        m->nframes++;
+        return rvid_add_frame(m, pkt->data, pkt->size);
     } else if (par->codec_type == AVMEDIA_TYPE_AUDIO) {
-        int bps = m->audio_16bit ? 2 : 1;
-        if (m->channels <= 1) {
-            return append(&m->left, &m->left_size, &m->left_cap,
-                          pkt->data, pkt->size);
-        } else {
-            int n = pkt->size / (bps * 2), k, ret;
-            for (k = 0; k < n; k++) {
-                if ((ret = append(&m->left, &m->left_size, &m->left_cap,
-                                  pkt->data + (2 * k) * bps, bps)) < 0)
-                    return ret;
-                if ((ret = append(&m->right, &m->right_size, &m->right_cap,
-                                  pkt->data + (2 * k + 1) * bps, bps)) < 0)
+        const int bps = m->audio_16bit ? 2 : 1;
+        const int n = pkt->size / (bps * m->channels);
+        int ret;
+
+        for (int k = 0; k < n; k++) {
+            for (int ch = 0; ch < m->channels; ch++) {
+                uint8_t sample[2];
+
+                memcpy(sample, pkt->data + (m->channels * k + ch) * bps, bps);
+                if (m->audio_flip)
+                    sample[0] ^= 0x80;
+                ret = ch ? append(&m->right, &m->right_size, &m->right_cap, sample, bps)
+                         : append(&m->left,  &m->left_size,  &m->left_cap,  sample, bps);
+                if (ret < 0)
                     return ret;
             }
         }
@@ -187,6 +225,10 @@ static int rvid_write_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
+/* The player counts frames against a multiple of the frame rate and reads one
+ * second of sound per that many frames, so the byte holds a whole rate; bit 7
+ * marks a rate 1000/1001 of it (23.976, 29.97, ...), which the player matches
+ * by reading 1.001 seconds of sound instead. */
 static int fps_byte(AVFormatContext *s)
 {
     RVIDMuxContext *m = s->priv_data;
@@ -194,6 +236,8 @@ static int fps_byte(AVFormatContext *s)
     AVRational fr = st->avg_frame_rate;
     double fps;
     int base, reduce;
+    if (fr.num <= 0 || fr.den <= 0)
+        fr = st->r_frame_rate;
     if (fr.num <= 0 || fr.den <= 0)
         fr = av_inv_q(st->time_base);
     fps = av_q2d(fr);
@@ -204,7 +248,11 @@ static int fps_byte(AVFormatContext *s)
     base = (int)(fps + 0.5);
     if (base < 1) base = 1;
     if (base > 127) base = 127;
-    reduce = (base - fps) >= 0.05;
+    reduce = fabs(fps - base * 1000.0 / 1001.0) < fabs(fps - base);
+    if (fabs(fps - (reduce ? base * 1000.0 / 1001.0 : base)) > 0.005)
+        av_log(s, AV_LOG_WARNING,
+               "rvid: %.3f fps is stored as %s%d fps; the video will play at that rate\n",
+               fps, reduce ? "1000/1001 of " : "", base);
     return base | (reduce ? 0x80 : 0);
 }
 
@@ -218,6 +266,8 @@ static int rvid_write_trailer(AVFormatContext *s)
 
     if (n == 0)
         return AVERROR(EINVAL);
+    if (m->dual && (n & 1))
+        return AVERROR_INVALIDDATA;
 
     /* dedup: hash table, linear probing */
     m->hsize = 1;
@@ -285,11 +335,11 @@ static int rvid_write_trailer(AVFormatContext *s)
     /* header */
     avio_wl32(pb, MKTAG('R', 'V', 'I', 'D'));
     avio_wl32(pb, 5);
-    avio_wl32(pb, n);
+    avio_wl32(pb, m->dual ? n / 2 : n);
     avio_w8(pb, fps_byte(s));
     avio_w8(pb, m->vres);
     avio_w8(pb, m->interlaced ? 1 : 0);
-    avio_w8(pb, m->width == 240 ? 2 : 0);      /* GBA / DS */
+    avio_w8(pb, m->width == 240 ? 2 : m->dual); /* GBA / DS dual screen / DS */
     avio_wl16(pb, m->have_audio ? m->sample_rate : 0);
     avio_w8(pb, m->audio_16bit ? 1 : 0);
     avio_w8(pb, m->bmp_mode);
@@ -345,7 +395,7 @@ const FFOutputFormat ff_rvid_muxer = {
     .p.long_name    = NULL_IF_CONFIG_SMALL("RocketVideo (RVID)"),
     .p.extensions   = "rvid",
     .priv_data_size = sizeof(RVIDMuxContext),
-    .p.audio_codec  = AV_CODEC_ID_PCM_U8,
+    .p.audio_codec  = AV_CODEC_ID_PCM_S16LE,
     .p.video_codec  = AV_CODEC_ID_RVID,
     .init           = rvid_init,
     .write_header   = rvid_write_header,
