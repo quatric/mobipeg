@@ -2811,6 +2811,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .long_name = NULL_IF_CONFIG_SMALL("ADPCM Rhetorex"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
+    {
+        .id        = AV_CODEC_ID_ADPCM_IMA_CITRIX,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "adpcm_citrix",
+        .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA Citrix"),
+        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
+    },
 
     /* Custom ADPCM codecs */
     {
@@ -2826,13 +2833,6 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .name      = "sx",
         .long_name = NULL_IF_CONFIG_SMALL("Siren Express"),
         .props     = AV_CODEC_PROP_LOSSY,
-    },
-    {
-        .id        = AV_CODEC_ID_ADPCM_IMA_CITRIX,
-        .type      = AVMEDIA_TYPE_AUDIO,
-        .name      = "adpcm_citrix",
-        .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA Citrix"),
-        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
     {
         .id        = AV_CODEC_ID_ADPCM_IMA_NDS,
