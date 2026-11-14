@@ -706,6 +706,8 @@ extern const FFCodec ff_adpcm_ima_iss_decoder;
 extern const FFCodec ff_adpcm_ima_magix_decoder;
 extern const FFCodec ff_adpcm_ima_mobiclip_wii_decoder;
 extern const FFCodec ff_adpcm_ima_nds_decoder;
+extern const FFCodec ff_adpcm_ima_fvds_decoder;
+extern const FFCodec ff_adpcm_ima_fvds_encoder;
 extern const FFCodec ff_adpcm_ima_moflex_decoder;
 extern const FFCodec ff_adpcm_ima_moflex_encoder;
 extern const FFCodec ff_adpcm_ima_mtf_decoder;

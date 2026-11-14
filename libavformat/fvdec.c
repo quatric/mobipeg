@@ -6,6 +6,7 @@
  */
 
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mathematics.h"
 #include "libavutil/mem.h"
 #include "avformat.h"
 #include "avio_internal.h"
@@ -73,10 +74,6 @@ static int fv_read_header(AVFormatContext *s)
         c->nb_keyframes < 0 || c->nb_keyframes > INT_MAX / 8)
         return AVERROR_INVALIDDATA;
 
-    /* skip past keyframe index table */
-    if (c->nb_keyframes > 0)
-        avio_skip(pb, c->nb_keyframes * 8);
-
     /* Video Stream */
     vst = avformat_new_stream(s, NULL);
     if (!vst)
@@ -91,13 +88,27 @@ static int fv_read_header(AVFormatContext *s)
     if (c->fps_num > 0 && c->fps_den > 0)
         avpriv_set_pts_info(vst, 64, c->fps_den, c->fps_num);
 
+    /* the table of key frames: frame number and the offset of its size word */
+    for (int i = 0; i < c->nb_keyframes; i++) {
+        const uint32_t frame  = avio_rl32(pb);
+        const uint32_t offset = avio_rl32(pb);
+
+        if (avio_feof(pb))
+            return AVERROR_INVALIDDATA;
+        av_add_index_entry(vst, offset, frame, 0, 0, AVINDEX_KEYFRAME);
+    }
+
     /* Audio Stream */
     if (c->channels > 0 && c->sample_rate > 0) {
         ast = avformat_new_stream(s, NULL);
         if (!ast)
             return AVERROR(ENOMEM);
         ast->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
-        ast->codecpar->codec_id    = AV_CODEC_ID_ADPCM_IMA_MOFLEX;
+        /* Every file FastVideoDSPlayer can open has a key frame table.  One
+         * without is from this muxer's first version, which stored blocks
+         * of the MobiClip ADPCM instead. */
+        ast->codecpar->codec_id    = c->nb_keyframes ? AV_CODEC_ID_ADPCM_IMA_FVDS
+                                                     : AV_CODEC_ID_ADPCM_IMA_MOFLEX;
         ast->codecpar->ch_layout.nb_channels = c->channels;
         ast->codecpar->sample_rate = c->sample_rate;
         c->astream = ast->index;
@@ -183,6 +194,29 @@ static int fv_read_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
+static int fv_read_seek(AVFormatContext *s, int stream_index, int64_t ts, int flags)
+{
+    FVDemuxContext *c = s->priv_data;
+    AVStream *vst = s->streams[c->vstream];
+    const AVIndexEntry *e;
+    int index;
+
+    if (stream_index == c->astream && c->astream >= 0)
+        ts = av_rescale_q(ts, s->streams[c->astream]->time_base, vst->time_base);
+    index = av_index_search_timestamp(vst, ts, flags);
+    if (index < 0 || !(e = avformat_index_get_entry(vst, index)))
+        return -1;
+    if (avio_seek(s->pb, e->pos, SEEK_SET) < 0)
+        return -1;
+    av_freep(&c->audio_data);
+    c->audio_block = c->audio_blocks = 0;
+    c->current_frame = e->timestamp;
+    /* the audio frames before a video frame are those that end by its start */
+    c->audio_pts = av_rescale_rnd((int64_t)c->sample_rate * c->current_frame,
+                                  c->fps_den, c->fps_num, AV_ROUND_DOWN) / 256 * 256;
+    return 0;
+}
+
 static int fv_read_close(AVFormatContext *s)
 {
     FVDemuxContext *c = s->priv_data;
@@ -199,5 +233,6 @@ const FFInputFormat ff_fv_demuxer = {
     .read_probe     = fv_probe,
     .read_header    = fv_read_header,
     .read_packet    = fv_read_packet,
+    .read_seek      = fv_read_seek,
     .read_close     = fv_read_close,
 };
