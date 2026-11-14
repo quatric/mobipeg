@@ -74,4 +74,13 @@ int avpriv_nintendo_lz10_bound(int size);
 int avpriv_nintendo_lz10_compress(const uint8_t *data, int data_size,
                                   uint8_t *out, int out_cap);
 
+/**
+ * The same without lazy matching: always the longest match at the current
+ * byte, the nearest one of that length. This is what the usual PC tools
+ * (EveryFileExplorer's compressor, which Vid2RVID uses) produce, so the output
+ * is theirs byte for byte.
+ */
+int avpriv_nintendo_lz10_compress_greedy(const uint8_t *data, int data_size,
+                                         uint8_t *out, int out_cap);
+
 #endif /* AVUTIL_NINTENDO_LZ_H */

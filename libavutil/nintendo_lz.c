@@ -106,8 +106,8 @@ static int lz10_match(const uint8_t *data, int offs, int length, int *back_out)
     return nr > 2 ? nr : 0;
 }
 
-int avpriv_nintendo_lz10_compress(const uint8_t *data, int data_size,
-                                  uint8_t *out, int out_cap)
+static int lz10_compress(const uint8_t *data, int data_size,
+                         uint8_t *out, int out_cap, int lazy)
 {
     int dstoffs = 4, length = data_size, offs = 0;
     int headeroffs = -1, nbits = 0;
@@ -131,7 +131,7 @@ int avpriv_nintendo_lz10_compress(const uint8_t *data, int data_size,
         }
 
         len = lz10_match(data, offs, length, &back);
-        if (len >= 3 && offs + 1 < length) {
+        if (lazy && len >= 3 && offs + 1 < length) {
             int nback, nlen = lz10_match(data, offs + 1, length, &nback);
             if (nlen > len)
                 len = 0;
@@ -166,4 +166,16 @@ int avpriv_nintendo_lz10_compress(const uint8_t *data, int data_size,
         out[dstoffs++] = 0;
     }
     return dstoffs;
+}
+
+int avpriv_nintendo_lz10_compress(const uint8_t *data, int data_size,
+                                  uint8_t *out, int out_cap)
+{
+    return lz10_compress(data, data_size, out, out_cap, 1);
+}
+
+int avpriv_nintendo_lz10_compress_greedy(const uint8_t *data, int data_size,
+                                         uint8_t *out, int out_cap)
+{
+    return lz10_compress(data, data_size, out, out_cap, 0);
 }

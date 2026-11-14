@@ -149,9 +149,22 @@ Requires a `--enable-libx264` build against the
 | Flag | Meaning |
 |---|---|
 | `--rvid-mode {rgb555,rgb565,256}` | Pixel mode: `rgb555` (default, unlimited color), `rgb565` (max color), `256` (8bpp palette). |
-| `--no-compress` | Store raw 16bpp frames instead of Nintendo LZ10. |
+| `--no-compress` | Store raw frames instead of Nintendo LZ10. |
 | `--rvid-interlaced` | One field per frame. |
 | `--rvid-no-dither` | Disable the checkerboard ordered dither used when reducing to 16bpp. |
+
+Left alone, the encoder makes the choices Vid2RVID makes, which follow what
+RocketVideoPlayer can keep up with: a 16bpp 256x192 video is compressed up to
+12 fps and stored as fields above 36 fps, an 8bpp one is compressed up to
+48 fps and stored as fields above 72 fps (smaller pictures get more room).
+With the same frames, sound and settings the file is the one Vid2RVID writes,
+byte for byte. Sound is signed PCM at 32000 Hz at most, the player's limit;
+`encode.py` resamples to 32000 Hz unless `--audio-rate` asks for less.
+
+The ffmpeg `rvid` encoder also takes `-dual_screen 1` for a 256x384 picture
+holding the top screen above the bottom one, and `-lazy 1` for a slightly
+tighter LZ10 parse than Vid2RVID's. The demuxer reads versions 1 to 5 of the
+format, dual screen videos included.
 
 ## Environment variables
 
