@@ -39,6 +39,10 @@
 #include "golomb.h"
 #include "mathops.h"
 
+#if ARCH_AARCH64 && HAVE_INTRINSICS_NEON
+#include <arm_neon.h>
+#endif
+
 #define MOBI_RL_VLC_BITS 12
 #define MOBI_MV_VLC_BITS 6
 
@@ -280,6 +284,7 @@ typedef struct MobiClipContext {
     uint8_t pre[32];
     MotionXY *motion;
     int     motion_size;
+    int     debug;          /* MOBI_DECDBG was set when the decoder opened */
 
     BswapDSPContext bdsp;
 } MobiClipContext;
@@ -319,6 +324,7 @@ static av_cold int mobiclip_init(AVCodecContext *avctx)
     }
 
     ff_bswapdsp_init(&s->bdsp);
+    s->debug = !!getenv("MOBI_DECDBG");
 
     avctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
@@ -363,7 +369,7 @@ static int setup_qtables(AVCodecContext *avctx, int64_t quantizer)
     return 0;
 }
 
-static void inverse4(unsigned *rs)
+static av_always_inline void inverse4(unsigned *rs)
 {
     unsigned a = rs[0] + rs[2];
     unsigned b = rs[0] - rs[2];
@@ -376,7 +382,7 @@ static void inverse4(unsigned *rs)
     rs[3] = a - c;
 }
 
-static void idct(int *arr, int size)
+static av_always_inline void idct(int *arr, int size)
 {
     int e, f, g, h;
     unsigned x3, x2, x1, x0;
@@ -425,16 +431,17 @@ static void read_run_encoding(AVCodecContext *avctx,
     *level = n & 0x1F;
 }
 
-static int add_coefficients(AVCodecContext *avctx, AVFrame *frame,
-                            int bx, int by, int size, int plane)
+static av_always_inline int add_coefficients_sized(AVCodecContext *avctx, AVFrame *frame,
+                                                   int bx, int by, int size, int plane)
 {
     MobiClipContext *s = avctx->priv_data;
     GetBitContext *gb = &s->gb;
-    int mat[64] = { 0 };
+    int mat[64];
     const uint8_t *ztab = size == 8 ? ff_zigzag_direct : zigzag4x4_tab;
     const int *qtab = s->qtab[size == 8];
     uint8_t *dst = frame->data[plane] + by * frame->linesize[plane] + bx;
 
+    memset(mat, 0, size * size * sizeof(*mat));
     for (int pos = 0; get_bits_left(gb) > 0; pos++) {
         int qval, last, run, level;
 
@@ -489,6 +496,18 @@ static int add_coefficients(AVCodecContext *avctx, AVFrame *frame,
     }
 
     return 0;
+}
+
+/* The block is 4x4 or 8x8; give each its own copy of the loops, with the
+ * size a constant. */
+static int add_coefficients(AVCodecContext *avctx, AVFrame *frame,
+                            int bx, int by, int size, int plane)
+{
+    if (size == 8)
+        return add_coefficients_sized(avctx, frame, bx, by, 8, plane);
+    if (size == 4)
+        return add_coefficients_sized(avctx, frame, bx, by, 4, plane);
+    return add_coefficients_sized(avctx, frame, bx, by, size, plane);
 }
 
 static int add_pframe_coefficients(AVCodecContext *avctx, AVFrame *frame,
@@ -1114,7 +1133,7 @@ static int predict_motion(AVCodecContext *avctx,
                 if (cand < 0)
                     cand += 6;
                 if (s->pic[cand]->data[0]) {
-                    if (getenv("MOBI_DECDBG"))
+                    if (s->debug)
                         av_log(avctx, AV_LOG_INFO,
                                "[DEC]   ref substituted sidx=%d -> %d\n", sidx, cand);
                     sidx = cand;
@@ -1128,7 +1147,7 @@ static int predict_motion(AVCodecContext *avctx,
             mv.y = mv.y + (unsigned)get_se_golomb(gb);
         }
         if (mv.x >= INT_MAX || mv.y >= INT_MAX) {
-            if (getenv("MOBI_DECDBG"))
+            if (s->debug)
                 av_log(avctx, AV_LOG_INFO, "[DEC]   MV overflow idx=%d mv=%d,%d\n",
                        index, mv.x, mv.y);
             return AVERROR_INVALIDDATA;
@@ -1156,7 +1175,7 @@ static int predict_motion(AVCodecContext *avctx,
             av_assert0(s->pic[s->current_pic]);
             av_assert0(s->pic[s->current_pic]->data[i]);
             if (!s->pic[sidx]->data[i]) {
-                if (getenv("MOBI_DECDBG"))
+                if (s->debug)
                     av_log(avctx, AV_LOG_INFO, "[DEC]   no refplane sidx=%d i=%d\n", sidx, i);
                 return AVERROR_INVALIDDATA;
             }
@@ -1175,7 +1194,7 @@ static int predict_motion(AVCodecContext *avctx,
                 offsety + (mv.y >> 1) < 0 ||
                 offsetx + width  + (mv.x + 1 >> 1) > fwidth ||
                 offsety + height + (mv.y + 1 >> 1) > fheight) {
-                if (getenv("MOBI_DECDBG"))
+                if (s->debug)
                     av_log(avctx, AV_LOG_INFO,
                            "[DEC]   MV oob i=%d off=%d,%d %dx%d mv=%d,%d f=%dx%d\n",
                            i, offsetx, offsety, width, height, mv.x, mv.y, fwidth, fheight);
@@ -1246,7 +1265,7 @@ static int predict_motion(AVCodecContext *avctx,
 
             idx2 = get_vlc2(gb, mv_vlc[s->moflex][tidx], MOBI_MV_VLC_BITS, 1);
 
-            if (getenv("MOBI_DECDBG"))
+            if (s->debug)
                 av_log(avctx, AV_LOG_INFO,
                        "[DEC]   split index=%d half=%d %dx%d tidx=%d -> idx2=%d\n",
                        index, i, width, height, tidx, idx2);
@@ -1284,8 +1303,29 @@ static void mobiclip_ycgco_to_rgb24(AVCodecContext *avctx,
         const uint8_t *lcg = yuv->data[1] + (ptrdiff_t)(y >> 1) * yuv->linesize[1];
         const uint8_t *lco = yuv->data[2] + (ptrdiff_t)(y >> 1) * yuv->linesize[2];
         uint8_t *out = rgb->data[0] + (ptrdiff_t)y * rgb->linesize[0];
+        int x = 0;
 
-        for (int x = 0; x < w; x++) {
+#if ARCH_AARCH64 && HAVE_INTRINSICS_NEON
+        /* the same sums, sixteen pixels at a time (the width is a multiple of
+         * 16); narrowing with saturation is the clip */
+        for (; x + 16 <= w; x += 16) {
+            const uint8x16_t yv  = vld1q_u8(ly + x);
+            const int16x8_t  cg  = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(lcg + (x >> 1)), vdup_n_u8(128)));
+            const int16x8_t  co  = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(lco + (x >> 1)), vdup_n_u8(128)));
+            const int16x8_t  y0  = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(yv)));
+            const int16x8_t  y1  = vreinterpretq_s16_u16(vmovl_high_u8(yv));
+            const int16x8_t  cg0 = vzip1q_s16(cg, cg), cg1 = vzip2q_s16(cg, cg);
+            const int16x8_t  co0 = vzip1q_s16(co, co), co1 = vzip2q_s16(co, co);
+            const int16x8_t  t0  = vsubq_s16(y0, cg0), t1 = vsubq_s16(y1, cg1);
+            uint8x16x3_t px;
+
+            px.val[0] = vcombine_u8(vqmovun_s16(vaddq_s16(t0, co0)), vqmovun_s16(vaddq_s16(t1, co1)));
+            px.val[1] = vcombine_u8(vqmovun_s16(vaddq_s16(y0, cg0)), vqmovun_s16(vaddq_s16(y1, cg1)));
+            px.val[2] = vcombine_u8(vqmovun_s16(vsubq_s16(t0, co0)), vqmovun_s16(vsubq_s16(t1, co1)));
+            vst3q_u8(out + x * 3, px);
+        }
+#endif
+        for (; x < w; x++) {
             int Y  = ly[x];
             int cg = lcg[x >> 1] - 128;
             int co = lco[x >> 1] - 128;
@@ -1380,7 +1420,7 @@ static int mobiclip_decode(AVCodecContext *avctx, AVFrame *rframe,
 
                 idx = get_vlc2(gb, mv_vlc[s->moflex][0], MOBI_MV_VLC_BITS, 1);
 
-                if (getenv("MOBI_DECDBG"))
+                if (s->debug)
                     av_log(avctx, AV_LOG_INFO, "[DEC] MB(%d,%d) bitpos=%d idx=%d\n",
                            x, y, mb_bit_pos, idx);
 
