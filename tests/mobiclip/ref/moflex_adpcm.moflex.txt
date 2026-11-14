@@ -1,5 +1,5 @@
 # streams
-stream,0,mobiclip,video,400,240,yuv420p,
+stream,0,mobiclip,video,400,240,yuv420p
 stream,1,adpcm_ima_moflex,audio,s16p,48000,2
 stream,2,unknown,data
 # packets
