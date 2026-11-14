@@ -985,6 +985,122 @@ static int64_t adpcm_argo_compress_block(ADPCMChannelStatus *cs, PutBitContext *
 }
 #endif
 
+#if ARCH_AARCH64 && HAVE_INTRINSICS_NEON
+#include <arm_neon.h>
+
+/* The search adpcm_thp_encode_block() and adpcm_afc_encode_block() do, with
+ * every candidate in a lane of its own: nb_index predictors (8 or 16, pairs
+ * f1[]/f2[]), each tried at its estimated scale and the next one up.  A lane
+ * does what the scalar loop does for that candidate -- the sums fit 32 bits
+ * as long as the history is 16-bit and no predictor pair is (-32768, -32768),
+ * which the caller checks -- and the winner is the first lane with the
+ * smallest error, the order the scalar loops try them in.
+ * Returns the winner's (index << 4) | scale. */
+static int adpcm_dsp_search_neon(const int16_t *samples, int count,
+                                 const int16_t *f1, const int16_t *f2, int nb_index,
+                                 uint8_t nib[16], int *hist1, int *hist2)
+{
+    enum { MAX_LANES = 32 };
+    const int nb_vec = nb_index / 2;            /* vectors of four lanes */
+    const int32x4_t in_h1 = vdupq_n_s32(*hist1), in_h2 = vdupq_n_s32(*hist2);
+    int32x4_t c1[MAX_LANES / 4], c2[MAX_LANES / 4], h1[MAX_LANES / 4], h2[MAX_LANES / 4];
+    int32x4_t scale[MAX_LANES / 4], half[MAX_LANES / 4];
+    int64x2_t err[MAX_LANES / 2];
+    int32_t q[16][MAX_LANES], tmp[MAX_LANES], scales[MAX_LANES];
+    int32_t lane_f1[MAX_LANES], lane_f2[MAX_LANES];
+    int64_t errs[MAX_LANES], best_err = INT64_MAX;
+    int best = 0;
+
+    /* the largest open-loop residual of each predictor, and from it the
+     * smallest scale that brings it down to 7 or less (15 at most) */
+    for (int v = 0; v < nb_index / 4; v++) {
+        const int32x4_t g1 = vmovl_s16(vld1_s16(f1 + 4 * v));
+        const int32x4_t g2 = vmovl_s16(vld1_s16(f2 + 4 * v));
+        int32x4_t a = in_h1, b = in_h2, maxres = vdupq_n_s32(0);
+
+        for (int n = 0; n < count; n++) {
+            const int32x4_t smp  = vdupq_n_s32(samples[n]);
+            const int32x4_t pred = vshrq_n_s32(vmlaq_s32(vmulq_s32(a, g1), b, g2), 11);
+
+            maxres = vmaxq_s32(maxres, vabdq_s32(smp, pred));
+            b = a;
+            a = smp;
+        }
+        /* maxres >> e <= 7 from e = (bits in maxres) - 3 on */
+        vst1q_s32(tmp + 4 * v,
+                  vminq_s32(vmaxq_s32(vsubq_s32(vdupq_n_s32(29), vclzq_s32(maxres)),
+                                      vdupq_n_s32(0)), vdupq_n_s32(15)));
+    }
+    for (int i = 0; i < nb_index; i++) {
+        scales[2 * i]     = tmp[i];
+        scales[2 * i + 1] = tmp[i] + 1;
+        lane_f1[2 * i] = lane_f1[2 * i + 1] = f1[i];
+        lane_f2[2 * i] = lane_f2[2 * i + 1] = f2[i];
+    }
+    for (int v = 0; v < nb_vec; v++) {
+        c1[v]    = vld1q_s32(lane_f1 + 4 * v);
+        c2[v]    = vld1q_s32(lane_f2 + 4 * v);
+        scale[v] = vld1q_s32(scales + 4 * v);
+        /* (1 << e) / 2 */
+        half[v]  = vshrq_n_s32(vshlq_s32(vdupq_n_s32(1), scale[v]), 1);
+        h1[v]    = in_h1;
+        h2[v]    = in_h2;
+        err[2 * v] = err[2 * v + 1] = vdupq_n_s64(0);
+    }
+
+    for (int n = 0; n < count; n++) {
+        const int32x4_t smp = vdupq_n_s32(samples[n]);
+
+        for (int v = 0; v < nb_vec; v++) {
+            const int32x4_t pred  = vshrq_n_s32(vmlaq_s32(vmulq_s32(h1[v], c1[v]), h2[v], c2[v]), 11);
+            const int32x4_t diff  = vsubq_s32(smp, pred);
+            const int32x4_t sign  = vshrq_n_s32(diff, 31);
+            const int32x4_t mag   = vshlq_s32(vaddq_s32(vabsq_s32(diff), half[v]), vnegq_s32(scale[v]));
+            const int32x4_t qv    = vmaxq_s32(vminq_s32(vsubq_s32(veorq_s32(mag, sign), sign),
+                                                        vdupq_n_s32(7)), vdupq_n_s32(-8));
+            const int32x4_t recon = vmaxq_s32(vminq_s32(vaddq_s32(pred, vshlq_s32(qv, scale[v])),
+                                                        vdupq_n_s32(32767)), vdupq_n_s32(-32768));
+            const int32x4_t d     = vsubq_s32(smp, recon);
+
+            err[2 * v]     = vmlal_s32(err[2 * v], vget_low_s32(d), vget_low_s32(d));
+            err[2 * v + 1] = vmlal_high_s32(err[2 * v + 1], d, d);
+            vst1q_s32(q[n] + 4 * v, qv);
+            h2[v] = h1[v];
+            h1[v] = recon;
+        }
+    }
+
+    for (int v = 0; v < 2 * nb_vec; v++)
+        vst1q_s64(errs + 2 * v, err[v]);
+    for (int i = 0; i < 2 * nb_index; i++)
+        if (scales[i] <= 15 && errs[i] < best_err) {
+            best_err = errs[i];
+            best     = i;
+        }
+
+    memset(nib, 0, 16);
+    for (int n = 0; n < count; n++)
+        nib[n] = q[n][best] & 0x0F;
+    vst1q_s32(tmp, h1[best / 4]);
+    *hist1 = tmp[best & 3];
+    vst1q_s32(tmp, h2[best / 4]);
+    *hist2 = tmp[best & 3];
+    return (best / 2) << 4 | scales[best];
+}
+
+/* Whether adpcm_dsp_search_neon()'s 32-bit sums are safe for this block. */
+static av_always_inline int adpcm_dsp_search_fits(const int16_t *f1, const int16_t *f2,
+                                                  int nb_index, int hist1, int hist2)
+{
+    if (hist1 < -32768 || hist1 > 32767 || hist2 < -32768 || hist2 > 32767)
+        return 0;
+    for (int i = 0; i < nb_index; i++)
+        if (f1[i] == -32768 && f2[i] == -32768)
+            return 0;
+    return 1;
+}
+#endif
+
 /* Encode one GameCube DSP-ADPCM block of up to 14 samples for a single
  * channel. The reconstruction here is bit-identical to the ADPCM_THP decoder
  * in adpcm.c, so the encoded nibbles decode back exactly. coefs is the flat
@@ -998,6 +1114,26 @@ static void adpcm_thp_encode_block(const int16_t *samples, int count,
     int64_t best_err = INT64_MAX;
     uint8_t best_nib[14] = { 0 };
     int best_h1 = *hist1, best_h2 = *hist2;
+
+#if ARCH_AARCH64 && HAVE_INTRINSICS_NEON
+    {
+        int16_t f1[8], f2[8];
+
+        for (int i = 0; i < 8; i++) {
+            f1[i] = coefs[i * 2];
+            f2[i] = coefs[i * 2 + 1];
+        }
+        if (adpcm_dsp_search_fits(f1, f2, 8, *hist1, *hist2)) {
+            uint8_t nib[16];
+            int header = adpcm_dsp_search_neon(samples, count, f1, f2, 8, nib, hist1, hist2);
+
+            dst[0] = header;
+            for (int n = 0; n < 14; n += 2)
+                dst[1 + n / 2] = nib[n] << 4 | nib[n + 1];
+            return;
+        }
+    }
+#endif
 
     for (int index = 0; index < 8; index++) {
         int64_t f1 = coefs[index * 2], f2 = coefs[index * 2 + 1];
@@ -1071,6 +1207,20 @@ static void adpcm_afc_encode_block(const int16_t *samples, int count,
     int64_t best_err = INT64_MAX;
     uint8_t best_nib[16] = { 0 };
     int best_h1 = *hist1, best_h2 = *hist2;
+
+#if ARCH_AARCH64 && HAVE_INTRINSICS_NEON
+    if (adpcm_dsp_search_fits(afc_coeffs[0], afc_coeffs[1], 16, *hist1, *hist2)) {
+        uint8_t nib[16];
+        int header = adpcm_dsp_search_neon(samples, count, afc_coeffs[0], afc_coeffs[1], 16,
+                                           nib, hist1, hist2);
+
+        /* AFC's header has the scale high and the index low */
+        dst[0] = (header & 15) << 4 | header >> 4;
+        for (int n = 0; n < 16; n += 2)
+            dst[1 + n / 2] = nib[n] << 4 | nib[n + 1];
+        return;
+    }
+#endif
 
     for (int index = 0; index < 16; index++) {
         int64_t f1 = afc_coeffs[0][index], f2 = afc_coeffs[1][index];
