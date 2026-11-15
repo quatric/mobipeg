@@ -1,5 +1,6 @@
 /*
  * Nintendo LZ10 (compression type 0x10)
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *

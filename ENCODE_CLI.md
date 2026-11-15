@@ -37,6 +37,7 @@ to `encode`.
 | `vx` | 256x192 | ActImagine VX (DS) |
 | `fastvideo` | 256x192 | FastVideoDS (`.fv`) |
 | `flipnote` | 256x192 | DSi Flipnote Studio (`.ppm`), 1-bit dithered, RSA-signed |
+| `flipnote3d` | 320x240 | 3DS Flipnote Studio 3D (`.kwz`), six colours on three layers, dithered; signed when a key is given |
 | `rvid` | 256x192 | RocketVideo (DS), native encoder |
 | `dpg` | 256x192 | MoonShell DPG (DS), MPEG-1 + MP2 |
 | `thp` | source | GameCube/Wii THP, Motion JPEG + `adpcm_thp` |
@@ -62,8 +63,9 @@ Audio-only outputs (no `input2`, `--scale`/`--keyframes`/etc. don't apply):
 | `3ds_sound` | Nintendo 3DS Sound AAC-LC |
 
 `decode` accepts any of the above, plus decode-only inputs the table in
-README lists as decode-only (Flipnote `.ppm`/`.kwz`, the FVMV/Caimans/VX++ GBA
-Video cartridge families, TiVo `.ty+`/MFS VideoClip resources) — nothing
+README lists as decode-only (the FVMV/Caimans/VX++ GBA Video cartridge
+families, First Hunt `.fv`, MOC2/MOC3 `.mo`, TiVo `.ty+`/MFS VideoClip
+resources) — nothing
 special to pass, just point it at the file.
 
 ## Audio codec (`audio` positional, encode mode only)
@@ -84,6 +86,7 @@ special to pass, just point it at the file.
 | `rvid` | `pcm`, `none` |
 | `fastvideo` | `adpcm`, `none` |
 | `flipnote` | `pcm` (8192 Hz mono), `none` |
+| `flipnote3d` | `pcm` (16364 Hz mono, stored as the note's ADPCM BGM), `none` |
 | `hvqm4`, `gba_ads`, `gba_hydrogen` | `none` (no audio support yet) |
 | `dsp`, `bns` | `adpcm` (the container's only option — no `none`) |
 | `brstm`, `bfstm`, `bcstm`, `ast` | `adpcm`, `pcm` |
@@ -170,6 +173,35 @@ The ffmpeg `rvid` encoder also takes `-dual_screen 1` for a 256x384 picture
 holding the top screen above the bottom one, and `-lazy 1` for a slightly
 tighter LZ10 parse than Vid2RVID's. The demuxer reads versions 1 to 5 of the
 format, dual screen videos included.
+
+## Flipnote (`flipnote`, `flipnote3d`)
+
+| Flag | Meaning |
+|---|---|
+| `--flipnote-author NAME` | Author name stored in the note, 10 characters at most (default `mobipeg`). Both formats. |
+| `--flipnote-dither {none,2x2,4x4,8x8}` | `flipnote3d`: ordered dither matrix used to reduce the picture to the six Flipnote colours (default `4x4`). `none` takes the nearest colour, `2x2` gives the plainest patterns, `8x8` the smoothest tones. |
+| `--flipnote-paper {white,black,red,yellow,green,blue}` | `flipnote3d`: paper colour (default `white`). Pixels of the paper colour are left blank on every layer. |
+| `--flipnote-key FILE` | `flipnote3d`: RSA private key to sign the note with (PKCS#1 or PKCS#8, DER or PEM). |
+| `--flipnote-loop` | `flipnote3d`: set the note's loop flag. |
+
+`flipnote3d` writes at one of the application's playback speeds (0.2, 0.5, 1,
+2, 4, 6, 8, 12, 20, 24 or 30 fps); `--fps` picks the nearest one and the
+default is 12. A note holds 999 frames at most, and the BGM is cut to the
+length of the animation.
+
+Layers are compressed the way Flipnote Studio 3D compresses them: every 8x8
+tile in its cheapest form, unchanged tiles skipped in runs. For the same
+layer contents that gives the application's own bytes; a comment and the
+first frame of a sample note saved by the application come back identical
+when decoded and written again. The muxer always uses one colour layout
+(layer A white and black, B blue and red, C yellow and green), so a note
+drawn with another layout decodes to the same pictures but not the same
+layer data. Flipnote Studio 3D only opens notes that carry its RSA-2048 signature.
+The signing key is part of the application and is not included here; without
+`--flipnote-key` the note is written unsigned, which mobipeg and other
+readers accept and the console does not. With a key, the muxer says whether
+it is the application's (by the checksum the format documentation
+publishes). `flipnote` (`.ppm`) notes are always signed.
 
 ## FastVideoDS (`fastvideo`)
 

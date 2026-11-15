@@ -1,4 +1,6 @@
 /*
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
+ *
  * This file is part of FFmpeg.
  *
  * This table was generated from the long and short names of AVCodecs
