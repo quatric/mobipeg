@@ -378,6 +378,7 @@ OBJS-$(CONFIG_KTX_MUXER)                 += ktxenc.o
 OBJS-$(CONFIG_KTX_DEMUXER)               += ktxdec.o
 OBJS-$(CONFIG_KUX_DEMUXER)               += flvdec.o
 OBJS-$(CONFIG_KWZ_DEMUXER)               += kwzdec.o
+OBJS-$(CONFIG_KWZ_MUXER)                 += kwzenc.o
 OBJS-$(CONFIG_KVAG_DEMUXER)              += kvag.o
 OBJS-$(CONFIG_KVAG_MUXER)                += kvag.o rawenc.o
 OBJS-$(CONFIG_LAF_DEMUXER)               += lafdec.o
@@ -815,6 +816,7 @@ SHLIBOBJS-$(CONFIG_MP3_MUXER)            += mpegaudiotabs.o
 SHLIBOBJS-$(CONFIG_MXF_MUXER)            += golomb_tab.o \
                                             rangecoder_dec.o
 SHLIBOBJS-$(CONFIG_NUT_MUXER)            += mpegaudiotabs.o
+SHLIBOBJS-$(CONFIG_KWZ_MUXER)            += jpegtables.o
 SHLIBOBJS-$(CONFIG_RTPDEC)               += jpegtables.o
 SHLIBOBJS-$(CONFIG_RTP_MUXER)            += golomb_tab.o jpegtables.o \
                                             mpeg4audio_sample_rates.o

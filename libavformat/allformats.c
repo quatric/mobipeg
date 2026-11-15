@@ -279,6 +279,7 @@ extern const FFInputFormat  ff_ktx_demuxer;
 extern const FFOutputFormat ff_ktx_muxer;
 extern const FFInputFormat  ff_kux_demuxer;
 extern const FFInputFormat  ff_kwz_demuxer;
+extern const FFOutputFormat ff_kwz_muxer;
 extern const FFInputFormat  ff_kvag_demuxer;
 extern const FFOutputFormat ff_kvag_muxer;
 extern const FFInputFormat  ff_laf_demuxer;
