@@ -30,6 +30,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/mem.h"
+#include "libavutil/opt.h"
 #include "avcodec.h"
 #include "bytestream.h"
 #include "codec_internal.h"
@@ -48,7 +49,9 @@ typedef struct FastAudioContext {
     ChannelItems *ch;
 
     /* encoder */
-    double window[64 + 256];
+    uint8_t *lookahead;     /* AVOption: the samples after the next frame */
+    int lookahead_size;     /* (has to follow lookahead) */
+    double window[64 + 256 + 64];
     double lag_window[9];
     float gain[64];
 } FastAudioContext;
@@ -207,26 +210,34 @@ static av_cold int fastaudio_close(AVCodecContext *avctx)
 #include "encode.h"
 
 /*
- * The encoder works the way the one of koori0831's MoflexTool does.  The
- * filter of a sub-frame comes from a linear prediction analysis of the
- * pre-emphasised input (the decoder de-emphasises), its reflection
- * coefficients quantized with the tables the decoder reads them from.  Each
- * of the four groups of a sub-frame is then 21 pulses, three samples apart
- * from one of four starting points and of eight levels times a common gain,
- * chosen to bring the decoder's output as close to the input as they can:
- * least squares for the amplitudes, then a descent on the quantized levels
- * for a few gains around the one the amplitudes ask for.
+ * The encoder is the one of koori0831's MoflexTool, operation for operation,
+ * so that the same samples give the same bytes.  The filter of a sub-frame
+ * comes from a linear prediction analysis of the pre-emphasised input (the
+ * decoder de-emphasises), its reflection coefficients quantized with the
+ * tables the decoder reads them from.  Each of the four groups of a
+ * sub-frame is then 21 pulses, three samples apart from one of four starting
+ * points and of eight levels times a common gain, chosen to bring the
+ * decoder's output as close to the input as they can: least squares for the
+ * amplitudes, then a descent on the quantized levels for a few gains around
+ * the one the amplitudes ask for.
  *
- * An encoder that hands back a packet for every frame cannot see past the
- * end of the sub-frame, so the analysis window closes there instead of
- * reaching 64 samples further as MoflexTool's does.
+ * The analysis window reaches 64 samples past the sub-frame.  A frame is
+ * coded when it comes, so those samples have to be handed over beforehand in
+ * the "lookahead" option, which the MobiClip muxers do; without them the
+ * window sees silence there, which costs next to nothing but is no longer
+ * what MoflexTool writes.
+ *
+ * None of the arithmetic below may be contracted into fused multiply-adds:
+ * the results have to be those of the separate operations.
  */
+#pragma STDC FP_CONTRACT OFF
 
-#define FA_ORDER   8
-#define FA_GROUP   64
-#define FA_PULSES  21
-#define FA_HISTORY 65      /* samples before a sub-frame that the analysis reads */
-#define FA_WINDOW  (FA_HISTORY - 1 + 256)
+#define FA_ORDER     8
+#define FA_GROUP     64
+#define FA_PULSES    21
+#define FA_HISTORY   65     /* samples before a sub-frame that the analysis reads */
+#define FA_LOOKAHEAD 64
+#define FA_WINDOW    (FA_HISTORY - 1 + 256 + FA_LOOKAHEAD)
 
 static const uint8_t fa_table_size[8] = { 64, 64, 32, 32, 16, 16, 8, 8 };
 
@@ -312,7 +323,9 @@ static void fa_solve(double A[FA_PULSES][FA_PULSES], const double *b, double *x)
 
 /* Starting point, gain and levels of the pulses whose response comes
  * closest to target.  h is the response to one pulse; corr[d][n] the sum of
- * h[i] * h[i + 3 * d] over the first n samples. */
+ * h[i] * h[i + 3 * d] over the first n samples, which is the product of the
+ * responses to two pulses d places apart where the later one has n samples
+ * left in the group. */
 static void fa_search_group(const float *h, double (*corr)[FA_GROUP + 1],
                             const float *gain_tab, const double *target,
                             int *best_pad, int *best_gain, int best_levels[FA_PULSES])
@@ -396,9 +409,10 @@ static void fa_search_group(const float *h, double (*corr)[FA_GROUP + 1],
 }
 
 static void fa_encode_subframe(FastAudioContext *s, ChannelItems *ch,
-                               const float *samples, uint8_t *dst)
+                               const float *samples, const float *lookahead,
+                               uint8_t *dst)
 {
-    float x[FA_HISTORY + 256], m[8], h[FA_GROUP];
+    float x[FA_HISTORY + 256 + FA_LOOKAHEAD], m[8], h[FA_GROUP];
     double win[FA_WINDOW], r[FA_ORDER + 1], refl[FA_ORDER];
     double corr[FA_PULSES][FA_GROUP + 1];
     int idx[8], gains[4], pads[4], levels[4][FA_PULSES];
@@ -408,11 +422,18 @@ static void fa_encode_subframe(FastAudioContext *s, ChannelItems *ch,
 
     memcpy(x, ch->history, sizeof(ch->history));
     memcpy(x + FA_HISTORY, samples, 256 * sizeof(*x));
+    if (lookahead)
+        memcpy(x + FA_HISTORY + 256, lookahead, FA_LOOKAHEAD * sizeof(*x));
+    else
+        memset(x + FA_HISTORY + 256, 0, FA_LOOKAHEAD * sizeof(*x));
     memcpy(ch->history, x + 256, sizeof(ch->history));
 
-    /* the filter: 64 samples of the past and the sub-frame, pre-emphasised */
-    for (int i = 0; i < FA_WINDOW; i++)
-        win[i] = (x[i + 1] - 0.86f * x[i]) * s->window[i];
+    /* the filter: 64 samples of the past, the sub-frame and 64 samples of
+     * what follows, pre-emphasised in single precision */
+    for (int i = 0; i < FA_WINDOW; i++) {
+        const float pre = x[i + 1] - 0.86f * x[i];
+        win[i] = pre * s->window[i];
+    }
     for (int k = 0; k <= FA_ORDER; k++) {
         double sum = 0;
 
@@ -420,7 +441,7 @@ static void fa_encode_subframe(FastAudioContext *s, ChannelItems *ch,
             sum += win[i] * win[i - k];
         r[k] = sum * s->lag_window[k];
     }
-    r[0] += 1e-9;
+    r[0] = r[0] + 1e-9;
     fa_levinson(r, refl);
     for (int i = 0; i < 8; i++) {
         double best = DBL_MAX;
@@ -442,9 +463,11 @@ static void fa_encode_subframe(FastAudioContext *s, ChannelItems *ch,
     fa_synthesize(&impulse, m, h, FA_GROUP);
     for (int d = 0; d < FA_PULSES; d++) {
         corr[d][0] = 0;
-        for (int i = 0; i < FA_GROUP; i++)
-            corr[d][i + 1] = corr[d][i] +
-                             (i + 3 * d < FA_GROUP ? (double)h[i] * h[i + 3 * d] : 0);
+        for (int i = 0; i < FA_GROUP; i++) {
+            /* a single precision product, summed in double */
+            const float product = i + 3 * d < FA_GROUP ? h[i + 3 * d] * h[i] : 0;
+            corr[d][i + 1] = corr[d][i] + product;
+        }
     }
 
     for (int g = 0; g < 4; g++) {
@@ -456,8 +479,10 @@ static void fa_encode_subframe(FastAudioContext *s, ChannelItems *ch,
 
         /* what is left to the pulses once the filter has rung out */
         fa_synthesize(&ringing, m, buf, FA_GROUP);
-        for (int i = 0; i < FA_GROUP; i++)
-            target[i] = in[i] - buf[i];
+        for (int i = 0; i < FA_GROUP; i++) {
+            const float left = in[i] - buf[i];
+            target[i] = left;
+        }
         fa_search_group(h, corr, s->gain, target, &pads[g], &gains[g], levels[g]);
 
         memset(buf, 0, sizeof(buf));
@@ -495,15 +520,9 @@ static av_cold int fastaudio_encode_init(AVCodecContext *avctx)
     FastAudioContext *s = avctx->priv_data;
 
     avctx->frame_size = 256;
-    /* A Hann window that rises over the past and the first half of the
-     * sub-frame and falls over the second, so that it is centred on the
-     * sub-frame and done where the input is. */
-    for (int i = 0; i < FA_WINDOW; i++) {
-        const int rise = FA_HISTORY - 1 + 128;
-        const double t = i < rise ? (i + 0.5) / (2 * rise)
-                                  : 0.5 + (i - rise + 0.5) / (2 * (FA_WINDOW - rise));
-        s->window[i] = 0.5 - 0.5 * cos(2 * M_PI * t);
-    }
+    /* a Hann window centred on the sub-frame */
+    for (int i = 0; i < FA_WINDOW; i++)
+        s->window[i] = 0.5 - 0.5 * cos(2 * M_PI * (i + 0.5) / FA_WINDOW);
     /* a noise floor and a lag window keep the quantized filter of a pure
      * tone from ringing */
     s->lag_window[0] = 1.003;
@@ -527,9 +546,17 @@ static int fastaudio_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
     }
     if ((ret = ff_alloc_packet(avctx, avpkt, 40 * channels)) < 0)
         return ret;
-    for (int channel = 0; channel < channels; channel++)
+    for (int channel = 0; channel < channels; channel++) {
+        const int have = s->lookahead_size == channels * FA_LOOKAHEAD * sizeof(float);
+        float lookahead[FA_LOOKAHEAD];
+
+        if (have)
+            memcpy(lookahead, s->lookahead + channel * sizeof(lookahead), sizeof(lookahead));
         fa_encode_subframe(s, &s->ch[channel], (const float *)frame->extended_data[channel],
-                           avpkt->data + 40 * channel);
+                           have ? lookahead : NULL, avpkt->data + 40 * channel);
+    }
+    /* it was for this frame only */
+    s->lookahead_size = 0;
 
     *got_packet_ptr = 1;
     return 0;
@@ -555,9 +582,18 @@ const FFCodec ff_fastaudio_decoder = {
     .p.capabilities = AV_CODEC_CAP_DR1,
 };
 
+static const AVOption fastaudio_encoder_options[] = {
+    { "lookahead", "the 64 samples per channel that follow the next frame, as native floats, "
+                   "one channel after the other; used for that frame only",
+      offsetof(FastAudioContext, lookahead), AV_OPT_TYPE_BINARY, { .str = NULL }, 0, 0,
+      AV_OPT_FLAG_AUDIO_PARAM | AV_OPT_FLAG_ENCODING_PARAM | AV_OPT_FLAG_RUNTIME_PARAM },
+    { NULL }
+};
+
 static const AVClass fastaudio_encoder_class = {
     .class_name = "fastaudio encoder",
     .item_name  = av_default_item_name,
+    .option     = fastaudio_encoder_options,
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
