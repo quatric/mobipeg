@@ -4,6 +4,7 @@
  * Copyright (c) 2002-2004 Michael Niedermayer <michaelni@gmx.at>
  *
  * 4MV & hq & B-frame encoding stuff by Michael Niedermayer <michaelni@gmx.at>
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -77,17 +78,11 @@
 #include <limits.h>
 #include "sp5x.h"
 
-#define QUANT_BIAS_SHIFT 8
-
 #define QMAT_SHIFT_MMX 16
-#define QMAT_SHIFT 21
 
 static int encode_picture(MPVMainEncContext *const s, const AVPacket *pkt);
 static int dct_quantize_refine(MPVEncContext *const s, int16_t *block, int16_t *weight, int16_t *orig, int n, int qscale);
 static int sse_mb(MPVEncContext *const s);
-static int dct_quantize_c(MPVEncContext *const s,
-                          int16_t *block, int n,
-                          int qscale, int *overflow);
 static int dct_quantize_trellis_c(MPVEncContext *const s, int16_t *block, int n, int qscale, int *overflow);
 
 static uint8_t default_fcode_tab[MAX_MV * 2 + 1];
@@ -297,10 +292,12 @@ static av_cold void mpv_encode_defaults(MPVMainEncContext *const m)
 
 av_cold void ff_dct_encode_init(MPVEncContext *const s)
 {
-    s->dct_quantize = dct_quantize_c;
+    s->dct_quantize = ff_dct_quantize_c;
 
 #if ARCH_X86
     ff_dct_encode_init_x86(s);
+#elif ARCH_AARCH64
+    ff_dct_encode_init_aarch64(s);
 #endif
 
     if (s->c.avctx->trellis)
@@ -2587,7 +2584,7 @@ static av_always_inline void encode_mb_internal(MPVEncContext *const s,
     }
 
     // non c quantize code returns incorrect block_last_index FIXME
-    if (s->c.alternate_scan && s->dct_quantize != dct_quantize_c) {
+    if (s->c.alternate_scan && s->dct_quantize != ff_dct_quantize_c) {
         for (i = 0; i < mb_block_count; i++) {
             int j;
             if (s->c.block_last_index[i] > 0) {
@@ -4612,9 +4609,9 @@ void ff_block_permute(int16_t *block, const uint8_t *permutation,
     }
 }
 
-static int dct_quantize_c(MPVEncContext *const s,
-                          int16_t *block, int n,
-                          int qscale, int *overflow)
+int ff_dct_quantize_c(MPVEncContext *const s,
+                      int16_t *block, int n,
+                      int qscale, int *overflow)
 {
     int i, last_non_zero, q, start_i;
     const int *qmat;

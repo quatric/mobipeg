@@ -2,6 +2,7 @@
  * Generic DCT based hybrid video encoder
  * Copyright (c) 2000, 2001, 2002 Fabrice Bellard
  * Copyright (c) 2002-2004 Michael Niedermayer
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -42,6 +43,9 @@
 #include "ratecontrol.h"
 
 #define MPVENC_MAX_B_FRAMES 16
+
+#define QUANT_BIAS_SHIFT 8
+#define QMAT_SHIFT 21
 
 typedef struct MPVEncContext {
     MpegEncContext c;           ///< the common base context
@@ -184,6 +188,13 @@ typedef struct MPVEncContext {
                       int motion_x, int motion_y);
 
     int (*dct_quantize)(struct MPVEncContext *s, int16_t *block/*align 16*/, int n, int qscale, int *overflow);
+
+    /**
+     * Position of every coefficient in the scan dct_quantize_scan, plus one;
+     * kept by the vectorised dct_quantize to find the last coefficient.
+     */
+    const uint8_t *dct_quantize_scan;
+    uint8_t dct_quantize_scan_pos[64];
 
     me_cmp_func ildct_cmp[2]; ///< 0 = intra, 1 = non-intra
     me_cmp_func n_sse_cmp[2]; ///< either SSE or NSSE cmp func
@@ -401,6 +412,10 @@ void ff_write_quant_matrix(PutBitContext *pb, uint16_t *matrix);
 
 void ff_dct_encode_init(MPVEncContext *s);
 void ff_dct_encode_init_x86(MPVEncContext *s);
+void ff_dct_encode_init_aarch64(MPVEncContext *s);
+
+int ff_dct_quantize_c(MPVEncContext *s, int16_t *block, int n,
+                      int qscale, int *overflow);
 
 void ff_convert_matrix(MPVEncContext *s, int (*qmat)[64], uint16_t (*qmat16)[2][64],
                        const uint16_t *quant_matrix, int bias, int qmin, int qmax, int intra);

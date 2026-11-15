@@ -12,6 +12,7 @@ OBJS-$(CONFIG_IDCTDSP)                  += aarch64/idctdsp_init_aarch64.o
 OBJS-$(CONFIG_LLVIDDSP)                 += aarch64/lossless_videodsp_init.o
 OBJS-$(CONFIG_ME_CMP)                   += aarch64/me_cmp_init_aarch64.o
 OBJS-$(CONFIG_MPEGAUDIODSP)             += aarch64/mpegaudiodsp_init.o
+OBJS-$(CONFIG_MPEGVIDEOENC)             += aarch64/mpegvideoenc_init.o
 OBJS-$(CONFIG_MPEGVIDEOENCDSP)          += aarch64/mpegvideoencdsp_init.o
 OBJS-$(CONFIG_NEON_CLOBBER_TEST)        += aarch64/neontest.o
 OBJS-$(CONFIG_PIXBLOCKDSP)              += aarch64/pixblockdsp_init_aarch64.o
