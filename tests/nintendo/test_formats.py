@@ -25,6 +25,10 @@ def rvid_frame(payload, mode=1, compressed=True):
         struct.pack_into('<I', header, 20, 0x204)
         sizes = struct.pack('<H' if mode == 0 else '<I',
                             len(payload) - (512 if mode == 0 else 0))
+        # Frames start on four bytes: the low two bits of a frame offset name
+        # the part of a split file, so the size table is padded as Vid2RVID
+        # pads it.
+        sizes += bytes(-len(sizes) % 4)
     else:
         sizes = b''
     return header + struct.pack('<I', 0x204 + len(sizes)) + sizes + payload
@@ -138,7 +142,10 @@ class NintendoFormatTests(unittest.TestCase):
 
     def test_rvid_pcm_roundtrips(self):
         for channels in (1, 2):
-            for codec, bps in (('pcm_u8', 1), ('pcm_s16le', 2)):
+            # 8 bit sound is signed in the file (what RocketVideoPlayer plays),
+            # so unsigned input is stored with its sign bit flipped.
+            for codec, bps, stored in (('pcm_s8', 1, 's8'), ('pcm_u8', 1, 's8'),
+                                       ('pcm_s16le', 2, 's16le')):
                 with self.subTest(channels=channels, codec=codec):
                     raw = bytes((i * 37 + i // 17) % 256 for i in range(3200 * channels * bps))
                     source = self.root / 'source.pcm'
@@ -154,9 +161,11 @@ class NintendoFormatTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
                     result = subprocess.run([
                         FFMPEG, '-v', 'error', '-xerror', '-i', str(output), '-map', '0:a',
-                        '-c:a', 'copy', '-f', codec[4:], '-'],
+                        '-c:a', 'copy', '-f', stored, '-'],
                         capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                    if codec == 'pcm_u8':
+                        raw = bytes(b ^ 0x80 for b in raw)
                     self.assertEqual(result.stdout, raw)
 
     def test_rvid_rejects_invalid_tables_and_audio_ranges(self):
