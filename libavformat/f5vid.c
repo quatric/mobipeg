@@ -161,26 +161,27 @@ static int f5bw_ensure(F5BitW *w, int extra)
     return 0;
 }
 
-static int f5bw_put(F5BitW *w, uint32_t val, int n)
+static av_always_inline int f5bw_put(F5BitW *w, uint32_t val, int n)
 {
+    uint64_t acc;
+    int nb;
+
     if (n <= 0)
         return 0;
-    if (n == 32) {
-        /* avoid UB of 32-bit shift */
-        int ret = f5bw_put(w, val >> 16, 16);
+    /* eight bytes are stored at a time, however few of them are complete */
+    if (w->len + 8 > w->size) {
+        int ret = f5bw_ensure(w, 8);
         if (ret < 0)
             return ret;
-        return f5bw_put(w, val & 0xFFFFu, 16);
     }
-    w->cache = (w->cache << n) | (val & ((1u << n) - 1));
-    w->nbits += n;
-    while (w->nbits >= 8) {
-        int ret;
-        w->nbits -= 8;
-        if ((ret = f5bw_ensure(w, 1)) < 0)
-            return ret;
-        w->buf[w->len++] = (w->cache >> w->nbits) & 0xFF;
-    }
+    /* up to 7 pending bits, then up to 32 new ones */
+    acc = (uint64_t)(w->cache & ((1u << w->nbits) - 1)) << n |
+          (val & (UINT32_MAX >> (32 - n)));
+    nb  = w->nbits + n;
+    AV_WB64(w->buf + w->len, acc << (64 - nb));
+    w->len  += nb >> 3;
+    w->nbits = nb & 7;
+    w->cache = acc;
     return 0;
 }
 
@@ -279,6 +280,10 @@ static uint32_t f5br_show(F5BitR *r, int n)
         r->err = 1;
         return 0;
     }
+    /* n + 7 <= 32, so four bytes always hold the field; only the last
+     * three bytes of the buffer need the bit by bit path */
+    if ((r->pos >> 3) + 4 <= (r->nbits + 7) >> 3)
+        return (AV_RB32(r->buf + (r->pos >> 3)) << (r->pos & 7)) >> (32 - n);
     for (i = 0; i < n; i++)
         v = (v << 1) | ((r->buf[(r->pos + i) >> 3] >> (7 - ((r->pos + i) & 7))) & 1);
     return v;
@@ -296,10 +301,10 @@ static uint32_t f5br_get(F5BitR *r, int n)
 static int f5_copy_bits(F5BitR *r, F5BitW *w, int n)
 {
     int ret;
-    while (n >= 8) {
-        if ((ret = f5bw_put(w, f5br_get(r, 8), 8)) < 0)
+    while (n > 24) {
+        if ((ret = f5bw_put(w, f5br_get(r, 24), 24)) < 0)
             return ret;
-        n -= 8;
+        n -= 24;
     }
     if (n > 0)
         if ((ret = f5bw_put(w, f5br_get(r, n), n)) < 0)
@@ -505,11 +510,8 @@ static int f5_skip_ac_block(F5BitR *r, F5BitW *w)
             v2 = e2 & 0x1ffff;
             if (ln2 > 16 || v2 == 0x1bff)
                 return -1;
-            f5_copy_bits(r, w, ln2);
-            if (r->err)
-                return -1;
-            /* sign bit */
-            f5_copy_bits(r, w, 1);
+            /* codeword and sign bit */
+            f5_copy_bits(r, w, ln2 + 1);
             if (r->err)
                 return -1;
             if ((v2 >> 16) & 1)
@@ -517,10 +519,7 @@ static int f5_skip_ac_block(F5BitR *r, F5BitW *w)
             continue;
         }
         last = (v >> 16) & 1;
-        f5_copy_bits(r, w, ln);
-        if (r->err)
-            return -1;
-        f5_copy_bits(r, w, 1); /* sign */
+        f5_copy_bits(r, w, ln + 1); /* codeword and sign */
         if (r->err)
             return -1;
         if (last)
@@ -763,10 +762,8 @@ static int f5_skip_ac_block_inter(F5BitR *r, F5BitW *w)
             v2 = e2 & 0x1ffff;
             if (ln2 > 16 || v2 == 0x1bff)
                 return -1;
-            f5_copy_bits(r, w, ln2);
-            if (r->err)
-                return -1;
-            f5_copy_bits(r, w, 1);
+            /* codeword and sign bit */
+            f5_copy_bits(r, w, ln2 + 1);
             if (r->err)
                 return -1;
             if ((v2 >> 12) & 1)
@@ -774,10 +771,7 @@ static int f5_skip_ac_block_inter(F5BitR *r, F5BitW *w)
             continue;
         }
         last = (v >> 12) & 1;
-        f5_copy_bits(r, w, ln);
-        if (r->err)
-            return -1;
-        f5_copy_bits(r, w, 1); /* sign */
+        f5_copy_bits(r, w, ln + 1); /* codeword and sign */
         if (r->err)
             return -1;
         if (last)
@@ -1676,12 +1670,23 @@ typedef struct F5VIDMuxContext {
 static uint32_t f5mv_enc[65];
 static int f5mv_enc_done;
 
+/* Standard motion magnitude code by its 12-bit peek: (len << 8) | magnitude,
+ * 0 where no codeword starts with those bits. */
+static uint16_t f5mv_dec[4096];
+
 static void f5mv_enc_build(void)
 {
     int pk;
     if (f5mv_enc_done)
         return;
     memset(f5mv_enc, 0, sizeof(f5mv_enc));
+    memset(f5mv_dec, 0, sizeof(f5mv_dec));
+    for (pk = 0; pk <= 32; pk++) {
+        const int ln = f5mv_std[pk][1];
+        const int first = f5mv_std[pk][0] << (12 - ln);
+        for (int k = 0; k < 1 << (12 - ln); k++)
+            f5mv_dec[first + k] = ln << 8 | pk;
+    }
     for (pk = 4; pk < 4096; pk++) {
         uint32_t e;
         int ln, v;
@@ -1851,8 +1856,17 @@ static int f5mux_parse_vol(void *logctx, const uint8_t *buf, int size,
  * + residual). reslen = fcode-1. Returns 0 ok, -1 fail. */
 static int f5mux_motion(F5BitR *r, F5BitW *w, int reslen)
 {
-    int m, ln, sign, i, flen;
+    int m, ln, sign, flen;
     uint32_t p, enc, fcode;
+    if (r->pos + 12 <= r->nbits) {
+        /* the code is a prefix code: one 12-bit peek settles it */
+        p = f5mv_dec[f5br_show(r, 12)];
+        if (!p)
+            return -1;
+        ln = p >> 8;
+        m  = p & 0xFF;
+        goto found;
+    }
     for (ln = 1; ln <= 12; ln++) {
         p = f5br_show(r, ln);
         if (r->err)
@@ -1878,13 +1892,8 @@ found:
         return -1;
     if (f5bw_put(w, fcode, flen) < 0)
         return -1;
-    for (i = 0; i < reslen; i++) {
-        int b = f5br_get(r, 1);
-        if (r->err)
-            return -1;
-        if (f5bw_put(w, b, 1) < 0)
-            return -1;
-    }
+    if (reslen > 0 && f5_copy_bits(r, w, reslen) < 0)
+        return -1;
     return 0;
 }
 
