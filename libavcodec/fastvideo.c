@@ -7,6 +7,7 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
+#include "libavutil/intmath.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 
@@ -624,6 +625,11 @@ typedef struct FastVideoEncContext {
     uint8_t max_run[2][64];     /* largest run with a code, by level */
     /* bits of (last, run, level + 64), sign and escapes included */
     uint8_t bit_length[2][64][128];
+    /* The same weighed for the trellis, by level + 64 and then run: the
+     * code when more coefficients follow in the low half, the code for the
+     * last one in the high half.  Row 128 is all zero. */
+    uint32_t cost[129][64];
+    int min_block_bits;         /* the fewest bits a block of coefficients takes */
 } FastVideoEncContext;
 
 /* Append the low n bits (at most 16) of value; fewer than 16 are ever left
@@ -705,48 +711,62 @@ static av_always_inline int fv_code_form(const FastVideoEncContext *s, int last,
     return -1;
 }
 
-/* Bits of a block whose last coded coefficient is at last_nonzero. */
-static int fv_dct_bits(const FastVideoEncContext *s, const int coeff[64],
-                       int last_nonzero)
+/* 64 flags, each a byte that is zero or one, as the bits of one word. */
+static av_always_inline uint64_t fv_pack_flags(const uint8_t flags[64])
 {
-    int bits = 0, run = 0;
+    uint64_t mask = 0;
 
-    for (int i = 0; i < last_nonzero; i++) {
-        if (!coeff[i]) {
-            run++;
-            continue;
-        }
-        bits += coeff[i] >= -64 && coeff[i] < 64 ? s->bit_length[0][run][coeff[i] + 64] : 28;
-        run = 0;
-    }
-    return bits + (coeff[last_nonzero] >= -64 && coeff[last_nonzero] < 64
-                   ? s->bit_length[1][run][coeff[last_nonzero] + 64] : 28);
+    /* the low bit of each of eight bytes, gathered into one byte */
+    for (int i = 0; i < 64; i += 8)
+        mask |= (AV_RL64(flags + i) * UINT64_C(0x0102040810204080) >> 56) << i;
+    return mask;
 }
 
-static int fv_last_nonzero(const int coeff[64])
+/* Which of the 64 coefficients are not zero, coefficient i in bit i. */
+static av_always_inline uint64_t fv_nonzero_mask(const int coeff[64])
 {
-    for (int i = 63; i > 0; i--)
-        if (coeff[i])
-            return i;
-    return 0;
+    uint8_t nonzero[64];
+
+    for (int i = 0; i < 64; i++)
+        nonzero[i] = coeff[i] != 0;
+    return fv_pack_flags(nonzero);
+}
+
+/* Bits of a block with these coefficients; an empty one is its first
+ * coefficient as a raw zero. */
+static int fv_dct_bits(const FastVideoEncContext *s, const int coeff[64])
+{
+    uint64_t mask = fv_nonzero_mask(coeff);
+    int bits = 0, prev = -1;
+
+    if (!mask)
+        mask = 1;
+    while (mask) {
+        const int i = ff_ctzll(mask);
+        const int last = !(mask &= mask - 1);
+
+        bits += coeff[i] >= -64 && coeff[i] < 64 ? s->bit_length[last][i - prev - 1][coeff[i] + 64] : 28;
+        prev  = i;
+    }
+    return bits;
 }
 
 static int fv_encode_dct(const FastVideoEncContext *s, FVPutBitContext *pb,
                          const int coeff[64])
 {
-    const int last_nonzero = fv_last_nonzero(coeff);
-    int run = 0;
+    /* an empty block is its first coefficient as a raw zero */
+    uint64_t mask = fv_nonzero_mask(coeff);
+    int prev = -1;
 
-    for (int i = 0; i <= last_nonzero; i++) {
-        const int last = i == last_nonzero;
+    if (!mask)
+        mask = 1;
+    while (mask) {
+        const int i = ff_ctzll(mask);
+        const int last = !(mask &= mask - 1);
+        const int run = i - prev - 1;
         const int level = coeff[i];
         int form, code, ret = 0;
 
-        /* an empty block is its first coefficient as a raw zero */
-        if (!level && last_nonzero) {
-            run++;
-            continue;
-        }
         code = fv_code_form(s, last, run, FFABS(level), &form);
         if (form) {
             ret |= fv_put_bits(pb, 3, 7);
@@ -769,7 +789,7 @@ static int fv_encode_dct(const FastVideoEncContext *s, FVPutBitContext *pb,
         }
         if (ret < 0)
             return AVERROR_BUFFER_TOO_SMALL;
-        run = 0;
+        prev = i;
     }
     return 0;
 }
@@ -786,9 +806,12 @@ static av_always_inline int fv_quantize(int value, int index)
     const int quant = fv_quant[index];
     const int f = rounds[index];
 
-    if (value < 0)
-        return -(((f - value) * quant) >> 18);
-    return ((f + value) * quant) >> 18;
+    /* the magnitude is rounded, then the sign put back: which sign a
+     * coefficient has is not something to branch on */
+    const int sign = value >> 31;
+    const int level = ((f + ((value ^ sign) - sign)) * quant) >> 18;
+
+    return (level ^ sign) - sign;
 }
 
 static av_always_inline void fv_dct4(const uint8_t pixels[4], const uint8_t pred[4],
@@ -804,59 +827,70 @@ static av_always_inline void fv_dct4(const uint8_t pixels[4], const uint8_t pred
     dct[3] = t1 - t3;
 }
 
+/* The sixteen groups of four samples of a block in coding order: where a
+ * group is, and where the group it is predicted from is next to it.  The
+ * first one is predicted from the green plane, or from nothing. */
+static const struct {
+    int8_t x, y, pred_x, pred_y;
+} fv_groups[16] = {
+    { 0, 0,  0,  0 }, { 1, 0, -1, 0 }, { 0, 1, 0, -1 }, { 1, 1, -1, 0 },
+    { 4, 0, -4,  0 }, { 5, 0, -1, 0 }, { 4, 1, 0, -1 }, { 5, 1, -1, 0 },
+    { 0, 4,  0, -4 }, { 1, 4, -1, 0 }, { 0, 5, 0, -1 }, { 1, 5, -1, 0 },
+    { 4, 4, -4,  0 }, { 5, 4, -1, 0 }, { 4, 5, 0, -1 }, { 5, 5, -1, 0 },
+};
+
 /* Code one plane of an intra macroblock: src is the macroblock in the
  * picture, dst the plane it is rebuilt in at (mbx, mby), green the rebuilt
  * green plane (NULL when this is it). */
-static void fv_encode_intra(const uint8_t *src, int src_stride,
-                            uint8_t *dst, const uint8_t *green, int stride,
-                            int mbx, int mby, int coeff[64])
+static av_always_inline void fv_encode_intra(const uint8_t *src, int src_stride,
+                                             uint8_t *dst, const uint8_t *green, int stride,
+                                             int mbx, int mby, int coeff[64])
 {
     uint8_t pred[4], pixels[4], out[4];
-    int group = 0;
 
-    for (int y3 = 0; y3 < 8; y3 += 4)
-        for (int x3 = 0; x3 < 8; x3 += 4)
-            for (int y2 = 0; y2 < 2; y2++)
-                for (int x2 = 0; x2 < 2; x2++, group++) {
-                    const int x = mbx + x3 + x2;
-                    const int y = mby + y3 + y2;
-                    int dct[4];
+    for (int group = 0; group < 16; group++) {
+        const int x = mbx + fv_groups[group].x;
+        const int y = mby + fv_groups[group].y;
+        int dct[4];
 
-                    if (!x3 && !x2 && !y3 && !y2) {
-                        if (!green)
-                            memset(pred, 0, sizeof(pred));
-                        else
-                            fv_get_group(green, stride, x, y, pred);
-                    } else if (!x2 && y2) {
-                        fv_get_group(dst, stride, mbx + x3, y - 1, pred);
-                    } else if (!x2 && x3) {
-                        fv_get_group(dst, stride, x - 4, y, pred);
-                    } else if (!x2 && !y2 && y3) {
-                        fv_get_group(dst, stride, x, y - 4, pred);
-                    } else {
-                        fv_get_group(dst, stride, x - 1, y, pred);
-                    }
-                    fv_get_group(src, src_stride, x3 + x2, y3 + y2, pixels);
-                    fv_dct4(pixels, pred, dct);
-                    for (int i = 0; i < 4; i++) {
-                        const int quantized = fv_quantize(dct[i], i);
-                        coeff[i * 16 + group] = quantized;
-                        dct[i] = quantized * fv_dequant[i];
-                    }
-                    fv_idct4(dct, pred, out);
-                    fv_put_group(dst, stride, x, y, out);
-                }
+        if (group)
+            fv_get_group(dst, stride, x + fv_groups[group].pred_x,
+                         y + fv_groups[group].pred_y, pred);
+        else if (green)
+            fv_get_group(green, stride, x, y, pred);
+        else
+            memset(pred, 0, sizeof(pred));
+        fv_get_group(src, src_stride, fv_groups[group].x, fv_groups[group].y, pixels);
+        fv_dct4(pixels, pred, dct);
+        for (int i = 0; i < 4; i++) {
+            const int quantized = fv_quantize(dct[i], i);
+            coeff[i * 16 + group] = quantized;
+            dct[i] = quantized * fv_dequant[i];
+        }
+        fv_idct4(dct, pred, out);
+        fv_put_group(dst, stride, x, y, out);
+    }
 }
 
 /* Quantize the 64 coefficients of a predicted block's plane, weighing the
  * error of each choice against the bits of its code (after the trellis of
  * FFmpeg's MPEG encoders).  Returns the last coded position, -1 for none. */
+typedef struct FVSurvivor {
+    int pos;                    /* the run of zeros before the next coefficient starts here */
+    int score;                  /* of the best way to code what comes before */
+} FVSurvivor;
+
 static int fv_quantize_trellis(const FastVideoEncContext *s, int dst[64])
 {
     enum { ESC_LENGTH = 28, LAMBDA = 200 };
     const unsigned threshold1 = (1U << 18) - 1, threshold2 = threshold1 << 1;
-    int run_tab[65], level_tab[65], score_tab[65], survivor[65];
-    int coeff[2][64], coeff_count[64];
+    int run_tab[65], level_tab[65];
+    /* The list is gone through four at a time, so that how often the loop
+     * goes round changes rarely; the places past its end hold starts that
+     * can never win. */
+    enum { NEVER = 256 * 256 * 256 * 120 + (1 << 20) };
+    FVSurvivor survivor[65 + 3];
+    int first[2] = { 0 }, first_count = 0;      /* the choices for coefficient 0 */
     int last_run = 0, last_level = 0, last_score = 0, last_i = 0;
     int last_nonzero = -1, survivor_count = 1, dc, i2;
 
@@ -870,83 +904,86 @@ static int fv_quantize_trellis(const FastVideoEncContext *s, int dst[64])
         return -1;
     }
 
-    for (int i = 0; i <= last_nonzero; i++) {
-        int level = dst[i] * fv_quant[i >> 4];
-
-        if ((unsigned)level + threshold1 > threshold2) {
-            if (level > 0) {
-                level >>= 18;
-                coeff[0][i] = level;
-                coeff[1][i] = level - 1;
-            } else {
-                level = -level >> 18;
-                coeff[0][i] = -level;
-                coeff[1][i] = -level + 1;
-            }
-            coeff_count[i] = FFMIN(level, 2);
-        } else {
-            coeff[0][i] = (level >> 31) | 1;
-            coeff_count[i] = 1;
-        }
-    }
-
-    score_tab[0] = 0;
-    survivor[0]  = 0;
+    survivor[0] = (FVSurvivor){ 0, 0 };
+    survivor[1] = survivor[2] = survivor[3] = (FVSurvivor){ 0, NEVER };
     for (int i = 0; i <= last_nonzero; i++) {
         const int dct_coeff = FFABS(dst[i]);
         const int zero_distortion = dct_coeff * dct_coeff;
+        const int dequant = fv_dequant[i >> 4];
         int best_score = 256 * 256 * 256 * 120;
+        int level = dst[i] * fv_quant[i >> 4];
+        int values[2], count = 1;
 
-        for (int k = 0; k < coeff_count[i]; k++) {
-            const int value = coeff[k][i];
-            const int unquant = FFABS(value) * fv_dequant[i >> 4];
+        /* the level it rounds down to and the one below, or one for a
+         * coefficient that rounds to nothing */
+        {
+            const int sign = level >> 31;
+            const int rounds = (unsigned)level + threshold1 > threshold2;
+
+            level     = rounds ? FFABS(level) >> 18 : 1;
+            values[0] = (level ^ sign) - sign;
+            values[1] = ((level - 1) ^ sign) - sign;
+            count     = rounds ? FFMIN(level, 2) : 1;
+        }
+        if (!i) {
+            first[0] = values[0];
+            first[1] = values[1];
+            first_count = count;
+        }
+
+        for (int k = 0; k < count; k++) {
+            const int value = values[k];
+            const int unquant = FFABS(value) * dequant;
             const int coded = value >= -64 && value < 64;
-            int distortion = (unquant - dct_coeff) * (unquant - dct_coeff) - zero_distortion;
+            /* an escape costs the same wherever the run starts */
+            const uint32_t *const cost = s->cost[coded ? value + 64 : 128];
+            const int distortion = (unquant - dct_coeff) * (unquant - dct_coeff) - zero_distortion +
+                                   (coded ? 0 : ESC_LENGTH * LAMBDA);
+            int best = best_score, best_run = 0;
+            int last = last_score, run_last = 0;
 
             /* The best way to code this value when more coefficients follow
              * (best) and when none do (last), over the places the run before
              * it can start.  The comparisons are kept out of the way of the
              * branch predictor: which start wins is close to random. */
-            {
-                const uint8_t *const bits  = &s->bit_length[0][0][(value + 64) & 127];
-                const uint8_t *const bits1 = &s->bit_length[1][0][(value + 64) & 127];
-                const int lambda = coded ? LAMBDA : 0;
-                int best = best_score, best_run = 0;
-                int last = last_score, run_last = 0;
-
-                if (!coded)
-                    distortion += ESC_LENGTH * LAMBDA;
-                for (int j = survivor_count - 1; j >= 0; j--) {
-                    const int run   = i - survivor[j];
-                    const int base  = distortion + score_tab[survivor[j]];
-                    const int score = base + bits[run * 128] * lambda;
-                    const int score_last = base + bits1[run * 128] * lambda;
-
-                    best_run = score < best ? run : best_run;
-                    best     = score < best ? score : best;
-                    run_last = score_last < last ? run : run_last;
-                    last     = score_last < last ? score_last : last;
-                }
-                if (best < best_score) {
-                    best_score = best;
-                    run_tab[i + 1] = best_run;
-                    level_tab[i + 1] = value;
-                }
-                if (last < last_score) {
-                    last_score = last;
-                    last_run = run_last;
-                    last_level = value;
-                    last_i = i + 1;
-                }
+#define FV_TRY(j) do {                                                  \
+                const int run   = i - survivor[j].pos;                  \
+                const int base  = distortion + survivor[j].score;       \
+                const int score = base + (cost[run] & 0xFFFF);          \
+                const int score_last = base + (cost[run] >> 16);        \
+                                                                        \
+                best_run = score < best ? run : best_run;               \
+                best     = score < best ? score : best;                 \
+                run_last = score_last < last ? run : run_last;          \
+                last     = score_last < last ? score_last : last;       \
+            } while (0)
+            for (int j = (survivor_count + 3) & ~3; j > 0; j -= 4) {
+                FV_TRY(j - 1);
+                FV_TRY(j - 2);
+                FV_TRY(j - 3);
+                FV_TRY(j - 4);
+            }
+#undef FV_TRY
+            if (best < best_score) {
+                best_score = best;
+                run_tab[i + 1] = best_run;
+                level_tab[i + 1] = value;
+            }
+            if (last < last_score) {
+                last_score = last;
+                last_run = run_last;
+                last_level = value;
+                last_i = i + 1;
             }
         }
-        score_tab[i + 1] = best_score;
 
         for (; survivor_count; survivor_count--)
-            if (score_tab[survivor[survivor_count - 1]] <=
+            if (survivor[survivor_count - 1].score <=
                 best_score + (last_nonzero <= 27 ? 0 : LAMBDA))
                 break;
-        survivor[survivor_count++] = i + 1;
+        survivor[survivor_count++] = (FVSurvivor){ i + 1, best_score };
+        for (int j = 0; j < 3; j++)
+            survivor[survivor_count + j] = (FVSurvivor){ i + 1, NEVER };
     }
 
     dc = FFABS(dst[0]);
@@ -958,8 +995,8 @@ static int fv_quantize_trellis(const FastVideoEncContext *s, int dst[64])
     if (!last_nonzero) {
         int best_level = 0, best_score = dc * dc;
 
-        for (int k = 0; k < coeff_count[0]; k++) {
-            const int value = coeff[k][0];
+        for (int k = 0; k < first_count; k++) {
+            const int value = first[k];
             const int unquant = ((FFABS(value) * fv_dequant[0] >> 3) + 4) >> 3 << 6;
             const int distortion = (unquant - dc) * (unquant - dc);
             const int score = distortion + (value >= -64 && value < 64
@@ -1004,6 +1041,11 @@ static int fv_encode_residual(const FastVideoEncContext *s, const uint8_t *src,
                         coeff[i * 16 + group] = dct[i];
                 }
     last = fv_quantize_trellis(s, coeff);
+    if (last < 0) {
+        /* nothing coded: the block is its prediction */
+        memcpy(out, pred, 64);
+        return 1;
+    }
 
     group = 0;
     for (int y3 = 0; y3 < 8; y3 += 4)
@@ -1018,7 +1060,7 @@ static int fv_encode_residual(const FastVideoEncContext *s, const uint8_t *src,
                     fv_idct4(dct, p, rebuilt);
                     fv_put_group(out, 8, x3 + x2, y3 + y2, rebuilt);
                 }
-    return last < 0 ? 1 : 1 + fv_dct_bits(s, coeff, last);
+    return 1 + fv_dct_bits(s, coeff);
 }
 
 static av_always_inline int fv_sad64(const uint8_t *a, int a_stride, const uint8_t *b)
@@ -1031,18 +1073,64 @@ static av_always_inline int fv_sad64(const uint8_t *a, int a_stride, const uint8
     return sum;
 }
 
+/* What a vector leaves of one plane of a block: the same number as the
+ * prediction built with fv_motion_tile() and compared with the picture
+ * gives, without building it where the block lies inside the plane. */
+static av_always_inline int fv_vector_error(const uint8_t *src, const uint8_t *ref,
+                                            int width, int height, int hx, int hy)
+{
+    const int fx = hx & 1, fy = hy & 1;
+    const int x0 = hx >> 1, y0 = hy >> 1;
+    uint8_t block[64];
+
+    if (x0 >= 0 && y0 >= 0 && x0 + 7 + fx < width && y0 + 7 + fy < height) {
+        const uint8_t *p = ref + y0 * width + x0;
+
+        if (!fx && !fy) {
+            int sum = 0;
+
+            for (int y = 0; y < 8; y++)
+                for (int x = 0; x < 8; x++)
+                    sum += FFABS(src[y * width + x] - p[y * width + x]);
+            return sum;
+        }
+    }
+    fv_motion_tile(ref, width, height, hx, hy, block);
+    return fv_sad64(src, width, block);
+}
+
 typedef struct FVSearch {
     const FastVideoEncContext *s;
     const uint8_t *src[3];      /* the macroblock in the picture */
     uint8_t *const *ref;
     FVMotionVector center, cheap;
+    /* The diamonds overlap from one step to the next: what the vectors
+     * already tried scored, by the low bits of the vector. */
+    struct {
+        FVMotionVector vec;
+        int score;
+    } tried[64];
 } FVSearch;
 
-static int fv_distortion(const FVSearch *c, FVMotionVector vec)
+static av_always_inline void fv_forget_vectors(FVSearch *c)
+{
+    /* a slot holds vectors with its own low bits: no vector has these */
+    for (int i = 0; i < FF_ARRAY_ELEMS(c->tried); i++)
+        c->tried[i].vec.x = i + 1;
+}
+
+/* The error of a vector, or some smaller number above limit once it is
+ * known to be above limit. */
+static int fv_distortion(FVSearch *c, FVMotionVector vec, int limit)
 {
     const FastVideoEncContext *s = c->s;
-    uint8_t block[64];
+    const int slot = (vec.x & 7) | (vec.y & 7) << 3;
     int score = 0;
+
+    /* The limit only ever comes down, so a score that was cut short above
+     * the limit of its time is above this one as well. */
+    if (c->tried[slot].vec.x == vec.x && c->tried[slot].vec.y == vec.y)
+        return c->tried[slot].score;
 
     /* The player draws the picture as two halves of a texture, and a block
      * may not reach from one into what lies past the other. */
@@ -1050,9 +1138,12 @@ static int fv_distortion(const FVSearch *c, FVMotionVector vec)
         (c->center.y >= (s->height >> 1) * 2 && vec.y < 0))
         return 999999;
     for (int p = 0; p < 3; p++) {
-        fv_motion_tile(c->ref[p], s->width, s->height, vec.x, vec.y, block);
-        score += fv_sad64(c->src[p], s->width, block);
+        score += fv_vector_error(c->src[p], c->ref[p], s->width, s->height, vec.x, vec.y);
+        if (score > limit)
+            break;
     }
+    c->tried[slot].vec   = vec;
+    c->tried[slot].score = score;
     return score;
 }
 
@@ -1067,19 +1158,24 @@ static int fv_vector_bits(const FVSearch *c, FVMotionVector vec)
 /* Large then small diamond search from the predicted vector, in half
  * samples; the vector kept is the one with the best error plus four times
  * its bits, while the search itself walks towards the least error. */
-static FVMotionVector fv_find_motion_vector(const FVSearch *c)
+static FVMotionVector fv_find_motion_vector(FVSearch *c)
 {
     static const FVMotionVector diamond[2][8] = {
         { { -2, 0 }, { -1, -1 }, { 0, -2 }, { 1, -1 }, { 2, 0 }, { 1, 1 }, { 0, 2 }, { -1, 1 } },
         { { -1, 0 }, { 0, -1 }, { 1, 0 }, { 0, 1 } },
     };
     enum { LAMBDA = 4 };
-    int best_score = fv_distortion(c, c->center);
+    /* A vector changes nothing below unless its error is at most the least
+     * so far, or at most what the best total leaves once its bits are paid
+     * for; the planes after the one that takes it past both are not looked
+     * at. */
+#define FV_LIMIT(bits) FFMAX(best_score, best_rd - (bits) * LAMBDA)
+    int best_score = (fv_forget_vectors(c), fv_distortion(c, c->center, INT_MAX));
     int best_bits  = fv_vector_bits(c, c->center);
     int best_rd    = best_bits * LAMBDA + best_score;
     FVMotionVector best_rd_vec = c->center, best_vec = c->center, search_center;
-    int score = fv_distortion(c, c->cheap);
     int bits  = fv_vector_bits(c, c->cheap);
+    int score = fv_distortion(c, c->cheap, FV_LIMIT(bits));
     int rd    = bits * LAMBDA + score;
 
     if (score < best_score || (score == best_score && bits < best_bits)) {
@@ -1103,8 +1199,8 @@ static FVMotionVector fv_find_motion_vector(const FVSearch *c)
                 const FVMotionVector vec = { search_center.x + diamond[pass][i].x,
                                              search_center.y + diamond[pass][i].y };
 
-                score = fv_distortion(c, vec);
                 bits  = fv_vector_bits(c, vec);
+                score = fv_distortion(c, vec, FV_LIMIT(bits));
                 rd    = bits * LAMBDA + score;
                 if (score < best_score || (score == best_score && bits < best_bits)) {
                     best_score = score;
@@ -1121,6 +1217,7 @@ static FVMotionVector fv_find_motion_vector(const FVSearch *c)
             search_center = best_vec;
         } while (best_idx != -1 && count < 128);
     }
+#undef FV_LIMIT
     return best_rd_vec;
 }
 
@@ -1150,6 +1247,18 @@ static void fv_store_tile(uint8_t *plane, int stride, int x, int y, const uint8_
         memcpy(plane + (y + row) * stride + x, tile + row * 8, 8);
 }
 
+/* What a block costs: its error and its bits.  Single precision, one
+ * operation at a time, as the reference computes it; it does not decrease
+ * when either number grows. */
+static av_always_inline float fv_block_cost(int diff, int bits)
+{
+    const float lambda = 0.35f;
+    float cost = diff * lambda;
+
+    cost += bits;
+    return cost;
+}
+
 /* Work out one block of a predicted frame at (x, y): l, a and ar are the
  * blocks to its left, above and above right, where there are any. */
 static void fv_encode_p_block(const FastVideoEncContext *s, int x, int y,
@@ -1157,7 +1266,6 @@ static void fv_encode_p_block(const FastVideoEncContext *s, int x, int y,
                               const FVBlock *ar, FVBlock *blk)
 {
     static const uint8_t plane_order[3] = { 1, 0, 2 };   /* green, red, blue */
-    const float lambda = 0.35f;
     uint8_t *const *ref = s->plane[s->cur ^ 1];
     uint8_t *const *dec = s->plane[s->cur];
     const FVMotionVector *lv = l ? &l->vec : NULL, *av = a ? &a->vec : NULL;
@@ -1180,14 +1288,6 @@ static void fv_encode_p_block(const FastVideoEncContext *s, int x, int y,
     vec.y -= y << 1;
     same = vec.x == last_vec.x && vec.y == last_vec.y;
 
-    for (int k = 0; k < 3; k++) {
-        const int p = plane_order[k];
-
-        fv_encode_intra(search.src[p], s->width, i_tile[p],
-                        k ? i_tile[1] : NULL, 8, 0, 0, i_coeff[k]);
-        i_bits += fv_dct_bits(s, i_coeff[k], fv_last_nonzero(i_coeff[k]));
-    }
-
     if (!same)
         p_bits += fv_signed_varint_bits(vec.x - last_vec.x) +
                   fv_signed_varint_bits(vec.y - last_vec.y);
@@ -1196,18 +1296,24 @@ static void fv_encode_p_block(const FastVideoEncContext *s, int x, int y,
 
         p_bits += fv_encode_residual(s, search.src[p], s->width, pred[p],
                                      p_tile[p], p_coeff[k]);
-    }
-
-    for (int p = 0; p < 3; p++) {
-        diff_i += fv_sad64(search.src[p], s->width, i_tile[p]);
         diff_p += fv_sad64(search.src[p], s->width, p_tile[p]);
     }
-    /* single precision, one operation at a time, as the reference
-     * computes it */
-    i_cost  = diff_i * lambda;
-    i_cost += i_bits;
-    p_cost  = diff_p * lambda;
-    p_cost += p_bits;
+    p_cost = fv_block_cost(diff_p, p_bits);
+
+    /* The intra block costs no less than the planes coded so far plus the
+     * fewest bits the others can take; once that is not below the cost of
+     * the predicted block the rest of it need not be worked out, and where
+     * the predicted block costs next to nothing none of it. */
+    i_cost = fv_block_cost(0, i_bits + 3 * s->min_block_bits);
+    for (int k = 0; k < 3 && i_cost < p_cost; k++) {
+        const int p = plane_order[k];
+
+        fv_encode_intra(search.src[p], s->width, i_tile[p],
+                        k ? i_tile[1] : NULL, 8, 0, 0, i_coeff[k]);
+        i_bits += fv_dct_bits(s, i_coeff[k]);
+        diff_i += fv_sad64(search.src[p], s->width, i_tile[p]);
+        i_cost  = fv_block_cost(diff_i, i_bits + (2 - k) * s->min_block_bits);
+    }
 
     blk->intra = i_cost < p_cost;
     if (blk->intra) {
@@ -1420,6 +1526,15 @@ static av_cold int fastvideo_encode_init(AVCodecContext *avctx)
                 s->bit_length[last][run][value + 64] =
                     extra[form] + (form < 3 ? ff_mpeg4_intra_vlc[code][1] : 0);
             }
+    for (int value = 0; value < 128; value++)
+        for (int run = 0; run < 64; run++)
+            s->cost[value][run] = s->bit_length[0][run][value] * 200 |
+                                  s->bit_length[1][run][value] * 200 << 16;
+    /* every block ends in one code for a last coefficient */
+    s->min_block_bits = 28;
+    for (int run = 0; run < 64; run++)
+        for (int value = 0; value < 128; value++)
+            s->min_block_bits = FFMIN(s->min_block_bits, s->bit_length[1][run][value]);
     s->gop = avctx->gop_size >= 0 ? avctx->gop_size : 250;
     return 0;
 }

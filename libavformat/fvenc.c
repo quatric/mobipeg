@@ -37,6 +37,10 @@ typedef struct FVMuxContext {
     uint32_t frame_count;
     int64_t audio_frames;       /* audio frames written */
     FVDSADPCMState state[2];    /* where the coder of each channel stands */
+    /* Silence soon leaves the coder where it found it, and the block it
+     * codes from there is the one it coded the time before. */
+    FVDSADPCMState silence_from, silence_to;
+    uint8_t silence[FVDS_ADPCM_BLOCK_SIZE];
     uint32_t *keys;             /* frame number and offset of each key frame */
     unsigned keys_alloc;
     unsigned nb_keys;
@@ -143,9 +147,22 @@ static int fv_write_record(AVFormatContext *s)
         } else {
             /* past the end of the audio, or without any, the reference
              * encoder goes on coding silence */
-            for (int ch = 0; ch < 2; ch++)
-                fvds_adpcm_encode_block(silence, block + ch * FVDS_ADPCM_BLOCK_SIZE,
-                                        &c->state[ch]);
+            for (int ch = 0; ch < 2; ch++) {
+                FVDSADPCMState *const state = &c->state[ch];
+                uint8_t *const dst = block + ch * FVDS_ADPCM_BLOCK_SIZE;
+
+                if (state->started && c->silence_from.started &&
+                    state->last  == c->silence_from.last &&
+                    state->index == c->silence_from.index) {
+                    memcpy(dst, c->silence, FVDS_ADPCM_BLOCK_SIZE);
+                    *state = c->silence_to;
+                    continue;
+                }
+                c->silence_from = *state;
+                fvds_adpcm_encode_block(silence, dst, state);
+                c->silence_to = *state;
+                memcpy(c->silence, dst, FVDS_ADPCM_BLOCK_SIZE);
+            }
         }
         avio_write(s->pb, frame, FV_AUDIO_FRAME);
     }
