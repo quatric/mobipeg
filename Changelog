@@ -1,10 +1,37 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
-version 2.3:
+version 3.0:
+- Rebased onto FFmpeg master (2026-11-14)
 - FVDS (First Hunt) demuxer and video decoder, bit-exact against the game's own decoder; FastAudio DS variant
 - MobiClip mus1 audio demuxer; fla2/fla3 Em-Flash payload descrambling; fla3/vid3 tags
 - Em-Flash (Pixter Multimedia fla2/fla3) decoder: a software Flash 3-5 player with an ActionScript 1 interpreter, matched against Ruffle
+- MOFLEX: frame-interleaved 3D keeps both eyes of a picture together, so the 3DS player gets its audio once per picture and no longer stutters
+- MOFLEX: a 2D movie carries the plain video descriptor, as retail 2D movies do; MoflexTool no longer takes it for 3D
+- MODS: the audio of key frames in N2 (TWL SDK) files is read instead of dropped
+- AAC encoder: fixed an endless loop on a loud onset after near-silence
+- Fixed a crash opening MobiClip Wii ADPCM and Siren Express streams (codec descriptor out of order)
+- Flipnote Studio (PPM) muxer: 256x192 1-bit video, optional 8192 Hz BGM as ADPCM, signed with RSA-1024/SHA-1 so the DSi accepts the note
+- encode.py and the GUI gained a `flipnote` format (DSi Flipnote Studio .ppm, dithered to 1-bit)
+- Flipnote Studio 3D (KWZ) muxer: 320x240, six colours dithered in Oklab over three layers, the application's own tile compression, ADPCM BGM, JPEG thumbnail, RSA-2048 signature with a key given by -kwz_key
+- encode.py and the GUI gained a `flipnote3d` format and the Flipnote options (author, dither, paper, key, loop)
+- FastVideoDS (.fv) encoder: predicted frames, motion search and trellis quantizer; with the same pictures and samples the file is byte for byte the one FastVideoDSEncoder writes
+- FastVideoDS: adpcm_ima_fvds audio codec, key frame table in the muxer (FastVideoDSPlayer needs it), seeking by the table in the demuxer
+- RocketVideo (.rvid): the muxer writes what Vid2RVID writes, byte for byte, in RGB555, RGB565 and 256 colour mode, compressed or not, interlaced, at NTSC rates and with two screens (-dual_screen 1)
+- RocketVideo: raw frames inside compressed files, 1000/1001 frame rates, signed 8 bit sound, header versions 1 to 4 and dual screen videos decode
+- FastAudio encoder: linear prediction and a least squares pulse search, the method of MoflexTool; about 13 dB signal to noise instead of 6, and the same samples give the same packets as MoflexTool
+- FastAudio decoder: the last sample of a sub-block is rebuilt from three bits, bit-exact with the reference decoders again
+- MOFLEX ADPCM encoder: picks the nearest IMA level again (about 5 dB better) and writes the nibbles MoflexTool writes
+- Speed, same output (Apple M4): Mobiclip video encoding about 3x faster; VX video 3x; VX audio (codebook) 19x to 23x; THP, AFC and DSP ADPCM encoding 2.3x to 7x
+- Speed, same output (Apple M4): THP video encoding 1.5x to 1.9x and Factor 5 video encoding 1.1x to 1.3x (NEON quantizer, coders that visit only nonzero coefficients)
+- Speed, same output (Apple M4): Mobiclip decoding 1.3x to 2x, VX decoding 2.2x to 3x, FastVideoDS decoding 4x to 10x
+- FastAudio encoding is several times faster than in 2.3 as well, with the new encoder
+- FastVideoDS encoder codes block rows in parallel and gives the same bytes at any thread count
+- GUI: subprocess output is decoded as UTF-8; environment-only errors are no longer reported to Sentry
+- CI: macOS builds moved to the macos-15 runner (macos-14 was retired)
+
+
+version 2.3:
 - VX audio (GBA) demuxer and muxer with stereo support
 - Mobiclip MO/MODS/MOFLEX: full regression test suite against retail fixtures, stable remux, real frame rate, keyframe tables, and stream-copy support
 - Mobiclip MO/MODS/MOFLEX: fixed overflow/OOB reads, short reads, leaks, and invalid stream handling; switched to 64-bit timestamps
@@ -15,8 +42,6 @@ version 2.3:
 - GUI: handle unwriteable output directories cleanly, fix Encode HQ visibility, probe stereo layout off the Tk thread
 - Filtered legacy/charmap noise out of Sentry crash reporting; disabled sentry-native debug logging in fftools
 - Windows x86/x86_64 builds ship ffplay.exe and SDL2.dll again (missing since 2.0); the build now fails if ffplay is absent
-- Flipnote Studio (PPM) muxer: 256x192 1-bit video, optional 8192 Hz BGM as ADPCM, signed with RSA-1024/SHA-1 so the DSi accepts the note
-- encode.py and the GUI gained a `flipnote` format (DSi Flipnote Studio .ppm, dithered to 1-bit)
 - CI: retry dav1d downloads and fail fast on cross-toolchain apt install failures
 
 
