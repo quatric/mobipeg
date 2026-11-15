@@ -2,6 +2,7 @@
  * MPEG-4 encoder
  * Copyright (c) 2000,2001 Fabrice Bellard
  * Copyright (c) 2002-2010 Michael Niedermayer <michaelni@gmx.at>
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * This file is part of FFmpeg.
  *
@@ -21,6 +22,7 @@
  */
 
 #include "libavutil/attributes.h"
+#include "libavutil/intmath.h"
 #include "libavutil/log.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
@@ -35,6 +37,7 @@
 #include "mpeg4videodefs.h"
 #include "mpeg4videoenc.h"
 #include "mpegvideoenc.h"
+#include "nzmask.h"
 #include "profiles.h"
 #include "put_bits.h"
 #include "version.h"
@@ -333,25 +336,29 @@ static inline void mpeg4_encode_ac_coeffs(const int16_t block[64],
                                           const uint8_t *const len_tab)
 {
     int last_non_zero = i - 1;
+    /* the coefficients at i..last_index-1 that are not zero */
+    uint64_t mask = ff_block_nonzero_mask(block, scan_table) &
+                    ((UINT64_C(1) << last_index) - (UINT64_C(1) << i));
 
     /* AC coefs */
-    for (; i < last_index; i++) {
-        int level = block[scan_table[i]];
-        if (level) {
-            int run = i - last_non_zero - 1;
-            level += 64;
-            if ((level & (~127)) == 0) {
-                const int index = UNI_MPEG4_ENC_INDEX(0, run, level);
-                put_bits(ac_pb, len_tab[index], bits_tab[index]);
-            } else {  // ESC3
-                put_bits(ac_pb,
-                         7 + 2 + 1 + 6 + 1 + 12 + 1,
-                         (3 << 23) + (3 << 21) + (0 << 20) + (run << 14) +
-                         (1 << 13) + (((level - 64) & 0xfff) << 1) + 1);
-            }
-            last_non_zero = i;
+    while (mask) {
+        const int pos = ff_ctzll(mask);
+        int level = block[scan_table[pos]];
+        int run   = pos - last_non_zero - 1;
+        level += 64;
+        if ((level & (~127)) == 0) {
+            const int index = UNI_MPEG4_ENC_INDEX(0, run, level);
+            put_bits(ac_pb, len_tab[index], bits_tab[index]);
+        } else {  // ESC3
+            put_bits(ac_pb,
+                     7 + 2 + 1 + 6 + 1 + 12 + 1,
+                     (3 << 23) + (3 << 21) + (0 << 20) + (run << 14) +
+                     (1 << 13) + (((level - 64) & 0xfff) << 1) + 1);
         }
+        last_non_zero = pos;
+        mask &= mask - 1;
     }
+    i = last_index;
     /* if (i <= last_index) */ {
         int level = block[scan_table[i]];
         int run   = i - last_non_zero - 1;

@@ -3,6 +3,7 @@
  * Copyright (c) 2000, 2001 Fabrice Bellard
  * Copyright (c) 2003 Alex Beregszaszi
  * Copyright (c) 2003-2004 Michael Niedermayer
+ * Copyright (c) 2026 quatric - quatricsoftware@gmail.com
  *
  * Support for external huffman table, various fixes (AVID workaround),
  * aspecting, new decode_frame mechanism and apple mjpeg-b support
@@ -32,6 +33,7 @@
 
 #include "config_components.h"
 
+#include "libavutil/intmath.h"
 #include "libavutil/mem.h"
 
 #include "avcodec.h"
@@ -43,6 +45,7 @@
 #include "mjpeg.h"
 #include "mjpegenc.h"
 #include "mpegvideoenc.h"
+#include "nzmask.h"
 #include "profiles.h"
 
 /**
@@ -121,45 +124,45 @@ static int mjpeg_amv_encode_picture_header(MPVMainEncContext *const m)
  * Encodes and outputs the entire frame in the JPEG format.
  *
  * @param main The MPVMainEncContext.
+ * @param total_bits Size of the entropy coded data, as returned by
+ *                   mjpeg_build_optimal_huffman().
  */
-static void mjpeg_encode_picture_frame(MPVMainEncContext *const main)
+static void mjpeg_encode_picture_frame(MPVMainEncContext *const main,
+                                       size_t total_bits)
 {
     MPVEncContext *const s = &main->s;
-    int nbits, code, table_id;
     MJpegContext *m = s->mjpeg_ctx;
-    uint8_t  *huff_size[4] = { m->huff_size_dc_luminance,
-                               m->huff_size_dc_chrominance,
-                               m->huff_size_ac_luminance,
-                               m->huff_size_ac_chrominance };
-    uint16_t *huff_code[4] = { m->huff_code_dc_luminance,
-                               m->huff_code_dc_chrominance,
-                               m->huff_code_ac_luminance,
-                               m->huff_code_ac_chrominance };
-    size_t total_bits = 0;
+    const uint8_t  *const huff_size[4] = { m->huff_size_dc_luminance,
+                                           m->huff_size_dc_chrominance,
+                                           m->huff_size_ac_luminance,
+                                           m->huff_size_ac_chrominance };
+    const uint16_t *const huff_code[4] = { m->huff_code_dc_luminance,
+                                           m->huff_code_dc_chrominance,
+                                           m->huff_code_ac_luminance,
+                                           m->huff_code_ac_chrominance };
+    static const uint16_t table_size[4] = { 12, 12, 256, 256 };
+    /* length of each code word in the high half, the word in the low half */
+    uint32_t huff[4][256];
+    const MJpegHuffmanCode *const end = m->huff_buffer + m->huff_ncode;
     size_t bytes_needed;
 
     main->header_bits = get_bits_diff(s);
-    // Estimate the total size first
-    for (int i = 0; i < m->huff_ncode; i++) {
-        table_id = m->huff_buffer[i].table_id;
-        code = m->huff_buffer[i].code;
-        nbits = code & 0xf;
-
-        total_bits += huff_size[table_id][code] + nbits;
-    }
 
     bytes_needed = (total_bits + 7) / 8;
     ff_mpv_reallocate_putbitbuffer(s, bytes_needed, bytes_needed);
 
-    for (int i = 0; i < m->huff_ncode; i++) {
-        table_id = m->huff_buffer[i].table_id;
-        code = m->huff_buffer[i].code;
-        nbits = code & 0xf;
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < table_size[i]; j++)
+            huff[i][j] = huff_size[i][j] << 16 | huff_code[i][j];
 
-        put_bits(&s->pb, huff_size[table_id][code], huff_code[table_id][code]);
-        if (nbits != 0) {
-            put_sbits(&s->pb, nbits, m->huff_buffer[i].mant);
-        }
+    /* A code word has 16 bits at most and the bits after it 15 at most,
+     * so both go out in one write. */
+    for (const MJpegHuffmanCode *c = m->huff_buffer; c < end; c++) {
+        const int      nbits = c->code & 0xf;
+        const uint32_t e     = huff[c->table_id][c->code];
+
+        put_bits(&s->pb, (e >> 16) + nbits,
+                 (e & 0xFFFF) << nbits | (c->mant & ((1U << nbits) - 1)));
     }
 
     m->huff_ncode = 0;
@@ -173,8 +176,9 @@ static void mjpeg_encode_picture_frame(MPVMainEncContext *const main)
  * Stores the Huffman tables in the bits_* and val_* arrays in the MJpegContext.
  *
  * @param m MJpegContext containing the JPEG buffer.
+ * @return the number of bits the buffer takes once coded with these tables
  */
-static void mjpeg_build_optimal_huffman(MJpegContext *m)
+static size_t mjpeg_build_optimal_huffman(MJpegContext *m)
 {
     MJpegEncHuffmanContext dc_luminance_ctx;
     MJpegEncHuffmanContext dc_chrominance_ctx;
@@ -223,6 +227,23 @@ static void mjpeg_build_optimal_huffman(MJpegContext *m)
                                  m->huff_code_ac_chrominance,
                                  m->bits_ac_chrominance,
                                  m->val_ac_chrominance);
+
+    /* The counts the tables were made from also give the coded size. */
+    {
+        const uint8_t *const huff_size[4] = { m->huff_size_dc_luminance,
+                                              m->huff_size_dc_chrominance,
+                                              m->huff_size_ac_luminance,
+                                              m->huff_size_ac_chrominance };
+        size_t total_bits = 0;
+
+        for (int i = 0; i < 4; i++)
+            for (int code = 0; code < (i < 2 ? 12 : 256); code++)
+                if (ctx[i]->val_count[code])
+                    total_bits += (size_t)ctx[i]->val_count[code] *
+                                  (huff_size[i][code] + (code & 0xf));
+
+        return total_bits;
+    }
 }
 #endif
 
@@ -248,7 +269,7 @@ int ff_mjpeg_encode_stuffing(MPVEncContext *const s, int last_mb_y)
          * therefore the following cast is allowed. */
         MPVMainEncContext *const main = (MPVMainEncContext*)s;
 
-        mjpeg_build_optimal_huffman(m);
+        const size_t total_bits = mjpeg_build_optimal_huffman(m);
 
         // Replace the VLCs with the optimal ones.
         // The default ones may be used for trellis during quantization.
@@ -260,7 +281,7 @@ int ff_mjpeg_encode_stuffing(MPVEncContext *const s, int last_mb_y)
         s->intra_chroma_ac_vlc_last_length = m->uni_chroma_ac_vlc_len;
 
         mjpeg_encode_picture_header(s);
-        mjpeg_encode_picture_frame(main);
+        mjpeg_encode_picture_frame(main, total_bits);
     }
 #endif
 
@@ -363,8 +384,10 @@ static void mjpeg_encode_coef(MJpegContext *s, uint8_t table_id, int val, int ru
  */
 static void record_block(MPVEncContext *const s, int16_t block[], int n)
 {
-    int i, j, table_id;
-    int component, dc, last_index, val, run;
+    const uint8_t *const scan = s->c.intra_scantable.permutated;
+    int table_id;
+    int component, dc, last_index, val, run, prev;
+    uint64_t mask;
     MJpegContext *m = s->mjpeg_ctx;
 
     /* DC coef */
@@ -379,25 +402,23 @@ static void record_block(MPVEncContext *const s, int16_t block[], int n)
 
     /* AC coefs */
 
-    run = 0;
     last_index = s->c.block_last_index[n];
     table_id |= 2;
 
-    for(i=1;i<=last_index;i++) {
-        j = s->c.intra_scantable.permutated[i];
-        val = block[j];
+    /* the coefficients at 1..last_index that are not zero */
+    mask = last_index > 0 ? ff_block_nonzero_mask(block, scan) &
+                            ((UINT64_C(2) << last_index) - 2) : 0;
+    prev = 0;
+    while (mask) {
+        const int i = ff_ctzll(mask);
 
-        if (val == 0) {
-            run++;
-        } else {
-            while (run >= 16) {
-                mjpeg_encode_code(m, table_id, 0xf0);
-                run -= 16;
-            }
-            mjpeg_encode_coef(m, table_id, val, run);
-            run = 0;
-        }
+        for (run = i - prev - 1; run >= 16; run -= 16)
+            mjpeg_encode_code(m, table_id, 0xf0);
+        mjpeg_encode_coef(m, table_id, block[scan[i]], run);
+        prev  = i;
+        mask &= mask - 1;
     }
+    run = last_index > 0 ? last_index - prev : 0;
 
     /* output EOB only if not already 64 values */
     if (last_index < 63 || run != 0)
@@ -406,8 +427,10 @@ static void record_block(MPVEncContext *const s, int16_t block[], int n)
 
 static void encode_block(MPVEncContext *const s, int16_t block[], int n)
 {
-    int mant, nbits, code, i, j;
+    const uint8_t *const scan = s->c.intra_scantable.permutated;
+    int mant, nbits, code, prev;
     int component, dc, run, last_index, val;
+    uint64_t mask;
     const MJpegContext *const m = s->mjpeg_ctx;
     const uint16_t *huff_code_ac;
     const uint8_t  *huff_size_ac;
@@ -429,33 +452,35 @@ static void encode_block(MPVEncContext *const s, int16_t block[], int n)
 
     /* AC coefs */
 
-    run = 0;
     last_index = s->c.block_last_index[n];
-    for(i=1;i<=last_index;i++) {
-        j = s->c.intra_scantable.permutated[i];
-        val = block[j];
-        if (val == 0) {
-            run++;
-        } else {
-            while (run >= 16) {
-                put_bits(&s->pb, huff_size_ac[0xf0], huff_code_ac[0xf0]);
-                run -= 16;
-            }
-            mant = val;
-            if (val < 0) {
-                val = -val;
-                mant--;
-            }
 
-            nbits= av_log2_16bit(val) + 1;
-            code = (run << 4) | nbits;
+    /* the coefficients at 1..last_index that are not zero */
+    mask = last_index > 0 ? ff_block_nonzero_mask(block, scan) &
+                            ((UINT64_C(2) << last_index) - 2) : 0;
+    prev = 0;
+    while (mask) {
+        const int i = ff_ctzll(mask);
 
-            put_bits(&s->pb, huff_size_ac[code], huff_code_ac[code]);
+        for (run = i - prev - 1; run >= 16; run -= 16)
+            put_bits(&s->pb, huff_size_ac[0xf0], huff_code_ac[0xf0]);
 
-            put_sbits(&s->pb, nbits, mant);
-            run = 0;
+        val  = block[scan[i]];
+        mant = val;
+        if (val < 0) {
+            val = -val;
+            mant--;
         }
+
+        nbits= av_log2_16bit(val) + 1;
+        code = (run << 4) | nbits;
+
+        put_bits(&s->pb, huff_size_ac[code], huff_code_ac[code]);
+
+        put_sbits(&s->pb, nbits, mant);
+        prev  = i;
+        mask &= mask - 1;
     }
+    run = last_index > 0 ? last_index - prev : 0;
 
     /* output EOB only if not already 64 values */
     if (last_index < 63 || run != 0)
