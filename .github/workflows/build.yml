@@ -774,10 +774,10 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────
-  # macOS — arm64 on macos-14, x86_64 on macos-13, then lipo into universal
+  # macOS — arm64 natively and x86_64 cross-built on macos-15, then lipo into universal
   # ─────────────────────────────────────────────────────────────────────────
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v5
@@ -1049,7 +1049,7 @@ jobs:
             python_arch: arm64
 
           - target: macos-universal
-            os: macos-14
+            os: macos-15
             ext: tar.gz
             python_arch: x64
 
