@@ -606,6 +606,9 @@ static int moflex_write_header(AVFormatContext *s)
         }
         m->aenc_inited = 1;
         m->audio_rate  = apar->sample_rate;
+        /* audio is placed by its sample count when the file is written out,
+         * so a frame can wait for the samples after it */
+        m->aenc.wait_lookahead = 1;
     }
 
     m->block_start  = -1;

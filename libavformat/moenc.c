@@ -28,6 +28,7 @@
 #include "mo.h"
 #include "libavutil/avassert.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/opt.h"
 #include "libavutil/sha.h"
 #include "libavcodec/adpcm_data.h"
 #include "libavcodec/avcodec.h"
@@ -1056,8 +1057,20 @@ static int flush_chunk(AVFormatContext *s)
                         int16_t s = (si < mo->pcm_samples)
                                     ? mo->pcm_buf[si * mo->channels + ch]
                                     : 0;
-                        dst[n] = s / 32767.0f;
+                        dst[n] = s / 32768.0f;
                     }
+                }
+                /* the 64 samples after the frame, as far as they are here,
+                 * for the encoder's analysis */
+                if (mo->channels <= 2) {
+                    float ahead[2 * 64] = { 0 };
+
+                    for (int ch = 0; ch < mo->channels; ch++)
+                        for (int n = 0; n < 64 && (fi + 1) * 256 + n < mo->pcm_samples; n++)
+                            ahead[ch * 64 + n] =
+                                mo->pcm_buf[((fi + 1) * 256 + n) * mo->channels + ch] / 32768.0f;
+                    av_opt_set_bin(mo->fa_enc->priv_data, "lookahead", (const uint8_t *)ahead,
+                                   mo->channels * 64 * sizeof(float), 0);
                 }
                 mo->fa_frame->nb_samples = 256;
                 AVPacket *fa_pkt = av_packet_alloc();
@@ -1710,7 +1723,6 @@ static void mo_deinit(AVFormatContext *s)
     avcodec_free_context(&mo->vorbis_enc);
 }
 
-#include "libavutil/opt.h"
 #define OFFSET(x) offsetof(MoMuxContext, x)
 #define ENC AV_OPT_FLAG_ENCODING_PARAM
 

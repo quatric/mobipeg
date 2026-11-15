@@ -35,7 +35,30 @@ typedef struct MobiAudioEnc {
     int nsamp;                  /* buffered sample-frames (per channel) */
     int cap;                    /* capacity in sample-frames */
     int draining;               /* set after flush() */
+    /* FastAudio: hold a frame back until the 64 samples after it are here,
+     * for the encoder to look at.  For a muxer that places its audio by
+     * sample count; one that takes what is ready with each video frame
+     * leaves this off and the encoder then sees what has arrived so far. */
+    int wait_lookahead;
 } MobiAudioEnc;
+
+#define MOBI_FASTAUDIO_LOOKAHEAD 64
+
+/* Hand the FastAudio encoder the samples that follow the frame about to be
+ * sent: those buffered after its first frame_size ones, silence beyond. */
+static int mobi_aenc_set_lookahead(MobiAudioEnc *a)
+{
+    float ahead[2 * MOBI_FASTAUDIO_LOOKAHEAD] = { 0 };
+
+    if (a->target != MOBI_AUDIO_FASTAUDIO || a->channels > 2)
+        return 0;
+    for (int ch = 0; ch < a->channels; ch++)
+        for (int n = 0; n < MOBI_FASTAUDIO_LOOKAHEAD && a->frame_size + n < a->nsamp; n++)
+            ahead[ch * MOBI_FASTAUDIO_LOOKAHEAD + n] =
+                a->buf[(a->frame_size + n) * a->channels + ch] / 32768.0f;
+    return av_opt_set_bin(a->enc->priv_data, "lookahead", (const uint8_t *)ahead,
+                          a->channels * MOBI_FASTAUDIO_LOOKAHEAD * sizeof(float), 0);
+}
 
 /* fastaudio_ds_mods is unused: FastAudio is the same stream on the DS and the
  * 3DS, the last sample of a group being three bits on both. */
@@ -159,10 +182,14 @@ static int mobi_aenc_recv(MobiAudioEnc *a, AVPacket *out)
         if (ret == 0 || ret != AVERROR(EAGAIN))
             return ret; /* 0=packet, AVERROR_EOF or error returned as-is */
 
-        if (a->nsamp >= a->frame_size) {
+        if (a->nsamp >= a->frame_size +
+                        (a->wait_lookahead && !a->draining &&
+                         a->target == MOBI_AUDIO_FASTAUDIO ? MOBI_FASTAUDIO_LOOKAHEAD : 0)) {
             /* Deinterleave a full frame into the planar scratch frame. */
             if (av_frame_make_writable(a->frame) < 0)
                 return AVERROR(ENOMEM);
+            if ((ret = mobi_aenc_set_lookahead(a)) < 0)
+                return ret;
             a->frame->nb_samples = a->frame_size;
             for (int ch = 0; ch < a->channels; ch++) {
                 if (a->frame->format == AV_SAMPLE_FMT_FLTP) {
