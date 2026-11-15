@@ -20,16 +20,16 @@ such as audio, video, subtitles and related metadata.
 | Factor 5 DivX | `.vid` | GameCube (Factor 5) | ✅ | ✅ |
 | FastVideo DS | `.fv` | Nintendo DS | ✅ | ✅ |
 | FVDS (First Hunt) | `.fv` | Nintendo DS (Metroid Prime Hunters: First Hunt demo) | — | ✅ |
-| Flipnote Studio | `.ppm` | Nintendo DS / DSi | — | ✅ |
-| Flipnote Studio 3D | `.kwz` | Nintendo 3DS | — | ✅ |
+| Flipnote Studio | `.ppm` | Nintendo DS / DSi | ✅ | ✅ |
+| Flipnote Studio 3D | `.kwz` | Nintendo 3DS | ✅ (signed when given the key) | ✅ |
 | GBA FVMV | `.gba` | Game Boy Advance (Pokémon) | — | ✅ |
-| GBA Video (ADS) | `.mmstr` / `.gba` | Game Boy Advance (Majesco) | ✅ | ✅ |
+| GBA Video (ADS / Hydrogen) | `.mmstr` / `.gba` | Game Boy Advance (Majesco) | ✅ (`.mmstr` resources, video only) | ✅ |
 | GBA Video (Caimans 2.2) | `.gba` | Game Boy Advance | — | ✅ |
 | GBA Video (CaimansPro) | `.gba` | Game Boy Advance | — | ✅ |
 | GBA Video (VX++) | `.gba` | Game Boy Advance (ActImagine) | — | ✅ |
 | HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
 | Nintendo Channel | `.3gp` | Wii | ✅ | ✅ |
-| Nintendo 3DS Camera (2D) | `.avi` | Nintendo 3DS | ✅ | ✅ |
+| Nintendo 3DS Camera (2D / 3D) | `.avi` | Nintendo 3DS | ✅ | ✅ |
 | MO | `.mo` | Nintendo Wii | ✅ | ✅ |
 | MOC2 / MOC3 | `.mo` | Nintendo Wii (early MobiClip) | — | ✅ (`fla2`/`fla3` are Em-Flash (Flash 3-5) movies, rendered by the `emflash` decoder: shapes, text, buttons, sprites, masks and ActionScript 1; `-autoclick 2` presses on-screen buttons so games get past their menus, `-fla_frames N` sets the length, `-video_width`/`-video_height` render at any size; `-fla_data 1 -c copy -f data out.swf` writes the movie as an SWF file, `-fla_raw 1` the bare payload) |
 | MODS | `.mods` | Nintendo DS | ✅ | ✅ |
@@ -56,6 +56,7 @@ such as audio, video, subtitles and related metadata.
 | BTSND | `.btsnd` | Nintendo Wii U (boot sound) | ✅ | ✅ |
 | DSP-ADPCM | `.dsp` | GameCube / Wii / 3DS | ✅ | ✅ |
 | HPS | `.hps` | GameCube (HAL Laboratory) | — | ✅ |
+| MobiClip mus1 | `.mo` | Pixter Multimedia | — | ✅ |
 | NUS3BANK | `.nus3bank`, `.nus3audio` | Nintendo Wii U / 3DS | ✅ | ✅ |
 | RWAV | `.brwav`, `.rwav` | Nintendo Wii | ✅ | ✅ |
 | SADL | `.sadl` | Nintendo DS (Level-5) | — | ✅ |
@@ -97,6 +98,31 @@ ffmpeg -i sound.bcwav out.wav
 They are FFmpeg-level formats only: `encode.py` and the GUI do not list them
 among their audio targets yet, so use `ffmpeg` directly.
 
+Several encoders are written against a reference implementation and give
+its output exactly for the same input, which is how they are tested:
+
+| Output | Reference | What matches |
+|--------|-----------|--------------|
+| FastVideoDS `.fv` (video, `adpcm_ima_fvds` audio, container) | [FastVideoDSEncoder](https://github.com/Gericom/FastVideoDSEncoder) | the whole file |
+| RVID `.rvid` | [Vid2RVID](https://github.com/RocketRobz/Vid2RVID) | the whole file |
+| MOFLEX FastAudio | [MoflexTool](https://github.com/koori0831/MoflexTool) | every audio packet |
+| MOFLEX IMA ADPCM | MoflexTool | every sample code |
+| Flipnote Studio 3D `.kwz` layers | notes saved by Flipnote Studio 3D | the compressed data of a layer that stands alone or skips unchanged tiles in runs, for the same layer contents |
+
+Both Flipnote formats are written as well as read. `.ppm` notes are 256x192,
+1-bit and signed with the DSi application's key. `.kwz` notes are 320x240 in
+the six Flipnote colours spread over three layers, with ordered dithering, a
+JPEG thumbnail and the BGM in the format's 2/4-bit ADPCM. Flipnote Studio 3D
+only opens notes carrying its own RSA-2048 signature, and that key is not
+part of mobipeg: pass it with `--flipnote-key` (`-kwz_key` on the `ffmpeg`
+command line) to get a signed note, or leave it out for an unsigned one that
+mobipeg and other readers still play.
+
+```sh
+python3 encode.py flipnote pcm input.mp4
+python3 encode.py flipnote3d pcm input.mp4 --flipnote-key kwz_key.der
+```
+
 MOC2 and MOC3 are the two MobiClip container generations that predate the
 `.mo` layout the `mo` demuxer reads, and use the same `.mo` extension. The
 `moc3` demuxer covers the `fla2`, `gvi3` and `vid2` payload tags; `vid2`
@@ -106,9 +132,10 @@ decode-only — new files are written in the `mo` layout — and `vid2` seeking
 is not implemented. Its header size is not fixed (64 bytes on MOC2,
 240/284/288/292 on MOC3), so it is read from the header rather than assumed.
 
-Decode-only inputs (the FVMV, Caimans, and VX++ GBA Video cartridge families
-and both Flipnote formats) can be transcoded into any of the encodable formats above, or
-previewed with `encode.py decode <file>`. Series-3 TiVo
+Decode-only inputs (the FVMV, Caimans, and VX++ GBA Video cartridge families,
+First Hunt `.fv`, MOC2 / MOC3 and HPS, SADL and mus1 audio) can be transcoded
+into any of the encodable formats above, or previewed with
+`encode.py decode <file>`. Series-3 TiVo
 TyStreams (and MFS VideoClip resources) are handled through an internal
 port of the `s3tots` tool, which losslessly rewraps them to MPEG-2 TS
 before FFmpeg reads them.

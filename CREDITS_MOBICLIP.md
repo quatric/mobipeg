@@ -50,3 +50,20 @@ The implementation of Mobiclip support in this software was made possible thanks
   the file layout (`libavformat/fvenc.c`) follow
   [FastVideoDSEncoder](https://github.com/Gericom/FastVideoDSEncoder) and
   [FastVideoDSPlayer](https://github.com/Gericom/FastVideoDSPlayer) as well.
+
+## Flipnote Studio (`.ppm`) and Flipnote Studio 3D (`.kwz`)
+
+* [Flipnote Collective](https://github.com/Flipnote-Collective) — the
+  [PPM](https://github.com/Flipnote-Collective/flipnote-studio-docs/wiki/PPM-format)
+  and [KWZ](https://github.com/Flipnote-Collective/flipnote-studio-3d-docs/wiki/KWZ-Format)
+  format documentation the demuxers and muxers are written from.
+* [flipnote.js](https://github.com/jaames/flipnote.js/) by **James Daniel** —
+  the reference the decoders are ported from, and the source of the sample
+  notes the `.kwz` muxer's layer compression was checked against.
+
+## mobipeg
+
+* **quatric** (<quatricsoftware@gmail.com>) — the mobipeg fork itself: the
+  Mobiclip, ActImagine, FastVideoDS, RVID, GBA Video, HVQM4, Flipnote and
+  Nintendo audio encoders, decoders, muxers and demuxers, `encode.py` and the
+  GUI.
