@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 quatric - quatricsoftware@gmail.com
 import os
 import sys
 import subprocess
@@ -679,7 +680,7 @@ def main():
         "fmt",
         nargs="?",
         default="mo",
-        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
+        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
     )
     parser.add_argument(
         "audio",
@@ -764,6 +765,38 @@ def main():
         dest="rvid_no_dither",
         action="store_true",
         help="rvid only: disable the checkerboard ordered dither used when reducing to 16bpp.",
+    )
+    parser.add_argument(
+        "--flipnote-author",
+        dest="flipnote_author",
+        default="",
+        help="flipnote / flipnote3d: author name stored in the note (max 10 characters, default mobipeg).",
+    )
+    parser.add_argument(
+        "--flipnote-key",
+        dest="flipnote_key",
+        default="",
+        help="flipnote3d only: RSA private key file to sign the note with (PKCS#1 or PKCS#8, DER or PEM). Flipnote Studio 3D only opens notes signed with its own key, which is not included; without a key the note is written unsigned.",
+    )
+    parser.add_argument(
+        "--flipnote-dither",
+        dest="flipnote_dither",
+        default="4x4",
+        choices=["none", "2x2", "4x4", "8x8"],
+        help="flipnote3d only: ordered dither matrix used when reducing to the six Flipnote colours (default 4x4; none = nearest colour).",
+    )
+    parser.add_argument(
+        "--flipnote-paper",
+        dest="flipnote_paper",
+        default="white",
+        choices=["white", "black", "red", "yellow", "green", "blue"],
+        help="flipnote3d only: paper colour (default white).",
+    )
+    parser.add_argument(
+        "--flipnote-loop",
+        dest="flipnote_loop",
+        action="store_true",
+        help="flipnote3d only: set the note's loop flag.",
     )
     parser.add_argument(
         "--mobi-qyx",
@@ -1171,6 +1204,12 @@ def main():
         # 8192 Hz mono BGM. The muxer signs the file with RSA so the DSi
         # accepts it; ".ppm" also names the PNM image muxer, so -f is forced.
         mode, dmx, scale, moaud, cvc = "vid", "flipnote_ppm", "256:192", 0, "rawvideo"
+    elif fmt == "flipnote3d":
+        # Nintendo 3DS Flipnote Studio 3D (.kwz): 320x240 frames in the six
+        # Flipnote colours on three layers, optional 16364 Hz mono BGM. The
+        # muxer does the colour reduction and compresses layers the way the
+        # application does; signing needs the application's key (--flipnote-key).
+        mode, dmx, scale, moaud, cvc = "vid", "kwz", "320:240", 0, "rawvideo"
     elif fmt in ("factor5", "f5vid"):
         # GameCube Factor 5 DivX (.vid / f5vid container): DivX-compatible
         # MPEG-4 Part 2 ASP video with optional DSP-ADPCM (adpcm_thp) audio.
@@ -1182,12 +1221,12 @@ def main():
     else:
         print(
             f"unknown format '{fmt}' "
-            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|"
+            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|flipnote3d|"
             f"{'|'.join(AUDIO_FORMATS)})"
         )
         sys.exit(2)
 
-    if scale_ovr and fmt not in ("3ds_camera", "3ds_camera3d", "flipnote"):
+    if scale_ovr and fmt not in ("3ds_camera", "3ds_camera3d", "flipnote", "flipnote3d"):
         scale = scale_ovr.replace("x", ":")
     elif audio == "vorbis":
         scale = "384:288"
@@ -1764,6 +1803,7 @@ def main():
         "3ds_camera": "avi",
         "factor5": "vid",
         "flipnote": "ppm",
+        "flipnote3d": "kwz",
         "smoflex": "moflex",
         "super_moflex": "moflex",
         "smoflex3d": "moflex",
@@ -2082,10 +2122,36 @@ def main():
         # The muxer wants gray 256x192 and inks pixels below 128; dithering
         # through 1-bit first keeps tone instead of hard-thresholding it.
         enc_opts.extend(["-pix_fmt", "gray", "-f", "flipnote_ppm"])
+        if parsed.flipnote_author:
+            enc_opts.extend(["-ppm_author", parsed.flipnote_author])
         if audio == "none":
             enc_opts.append("-an")
         else:
             enc_opts.extend(["-c:a", "pcm_s16le", "-ar", "8192", "-ac", "1"])
+    elif fmt == "flipnote3d":
+        # The muxer takes rgb24 and maps it to the Flipnote colours itself.
+        enc_opts.extend(
+            [
+                "-pix_fmt",
+                "rgb24",
+                "-f",
+                "kwz",
+                "-kwz_dither",
+                parsed.flipnote_dither,
+                "-kwz_paper",
+                parsed.flipnote_paper,
+            ]
+        )
+        if parsed.flipnote_author:
+            enc_opts.extend(["-kwz_author", parsed.flipnote_author])
+        if parsed.flipnote_key:
+            enc_opts.extend(["-kwz_key", parsed.flipnote_key])
+        if parsed.flipnote_loop:
+            enc_opts.extend(["-kwz_loop", "1"])
+        if audio == "none":
+            enc_opts.append("-an")
+        else:
+            enc_opts.extend(["-c:a", "pcm_s16le", "-ar", "16364", "-ac", "1"])
     elif fmt == "nintendo_channel":
         # Match the UK Nintendo Channel 2009 3GP profile: 3gp6 + AVC
         # constrained baseline L2.1 + stereo 32 kHz AAC-LC. libx264 is also
@@ -2131,6 +2197,12 @@ def main():
     fps_filter = ""
     if fmt in ("3ds_camera", "3ds_camera3d"):
         fps_filter = "fps=20"
+    elif fmt == "flipnote3d":
+        # Flipnote Studio 3D only has these playback speeds; take the nearest
+        # one so the video and the BGM stay in step.
+        speeds = (0.2, 0.5, 1, 2, 4, 6, 8, 12, 20, 24, 30)
+        want = float(Fraction(fps_ovr)) if fps_ovr else 12.0
+        fps_filter = f"fps={min(speeds, key=lambda v: abs(v - want)):g}"
     elif fps_ovr:
         fps_filter = f"fps={fps_ovr}"
     elif fmt == "mo":

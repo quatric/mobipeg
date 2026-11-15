@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 quatric - quatricsoftware@gmail.com
 try:
     import sentry_sdk
 
@@ -110,6 +111,7 @@ ENCODE_EXTENSIONS = {
     "3ds_sound": "m4a",
     "factor5": "vid",
     "flipnote": "ppm",
+    "flipnote3d": "kwz",
 }
 
 # How many family cells sit side by side in the expandable grid.
@@ -266,6 +268,7 @@ class EncodeGUI(tk.Tk):
             "DS ActImagine FastVideoDS .fv": "fastvideo",
             "DS MoonShell .dpg": "dpg",
             "DSi Flipnote Studio .ppm": "flipnote",
+            "3DS Flipnote Studio 3D .kwz": "flipnote3d",
             "Nintendo DSP-ADPCM .dsp": "dsp",
             "Wii stream .brstm": "brstm",
             "Wii U stream .bfstm": "bfstm",
@@ -302,6 +305,7 @@ class EncodeGUI(tk.Tk):
             "fastvideo": ["adpcm", "none"],
             "dpg": ["mp2", "none"],
             "flipnote": ["pcm", "none"],
+            "flipnote3d": ["pcm", "none"],
             # Audio-only formats: the choice is which of the container's own
             # codecs to write, so "none" is not on offer.
             "dsp": ["adpcm"],
@@ -517,7 +521,75 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_rvid_nodither_chk.grid(row=18, column=1, sticky="w", padx=5, pady=2)
 
-        # Row 18: Toggle Advanced Options
+        # Row 19: Flipnote options (.ppm author; .kwz author, colours, signing)
+        self.enc_flip_frame = ttk.LabelFrame(
+            self.encode_frame, text="Flipnote Options", padding=8
+        )
+        self.enc_flip_frame.grid(
+            row=19, column=0, columnspan=3, sticky="ew", padx=5, pady=5
+        )
+        self.enc_flip_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(self.enc_flip_frame, text="Author (max 10 characters):").grid(
+            row=0, column=0, sticky="e", padx=5, pady=2
+        )
+        self.enc_flip_author_var = tk.StringVar(value="")
+        ttk.Entry(
+            self.enc_flip_frame, textvariable=self.enc_flip_author_var, width=14
+        ).grid(row=0, column=1, sticky="w", padx=5, pady=2)
+
+        self.enc_flip_dither_label = ttk.Label(self.enc_flip_frame, text="Dither:")
+        self.enc_flip_dither_label.grid(row=1, column=0, sticky="e", padx=5, pady=2)
+        self.enc_flip_dither_var = tk.StringVar(value="4x4")
+        self.enc_flip_dither_cb = ttk.Combobox(
+            self.enc_flip_frame,
+            textvariable=self.enc_flip_dither_var,
+            values=["none", "2x2", "4x4", "8x8"],
+            state="readonly",
+            width=10,
+        )
+        self.enc_flip_dither_cb.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+        self.enc_flip_paper_label = ttk.Label(self.enc_flip_frame, text="Paper colour:")
+        self.enc_flip_paper_label.grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        self.enc_flip_paper_var = tk.StringVar(value="white")
+        self.enc_flip_paper_cb = ttk.Combobox(
+            self.enc_flip_frame,
+            textvariable=self.enc_flip_paper_var,
+            values=["white", "black", "red", "yellow", "green", "blue"],
+            state="readonly",
+            width=10,
+        )
+        self.enc_flip_paper_cb.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+
+        self.enc_flip_key_label = ttk.Label(
+            self.enc_flip_frame, text="Signing key (blank = unsigned):"
+        )
+        self.enc_flip_key_label.grid(row=3, column=0, sticky="e", padx=5, pady=2)
+        self.enc_flip_key_var = tk.StringVar(value="")
+        self.enc_flip_key_entry = ttk.Entry(
+            self.enc_flip_frame, textvariable=self.enc_flip_key_var
+        )
+        self.enc_flip_key_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=2)
+        self.enc_flip_key_btn = ttk.Button(
+            self.enc_flip_frame,
+            text="Browse...",
+            command=lambda: self.browse_file(
+                self.enc_flip_key_var,
+                [("RSA private key", "*.der *.pem *.key"), ("All files", "*.*")],
+            ),
+        )
+        self.enc_flip_key_btn.grid(row=3, column=2, padx=5, pady=2)
+
+        self.enc_flip_loop_var = tk.BooleanVar(value=False)
+        self.enc_flip_loop_chk = ttk.Checkbutton(
+            self.enc_flip_frame,
+            text="Loop playback",
+            variable=self.enc_flip_loop_var,
+        )
+        self.enc_flip_loop_chk.grid(row=4, column=1, sticky="w", padx=5, pady=2)
+
+        # Row 20: Toggle Advanced Options
         self.enc_adv_toggle_var = tk.BooleanVar(value=False)
         self.enc_adv_toggle_chk = ttk.Checkbutton(
             self.encode_frame,
@@ -525,14 +597,14 @@ class EncodeGUI(tk.Tk):
             variable=self.enc_adv_toggle_var,
             command=self.on_toggle_advanced,
         )
-        self.enc_adv_toggle_chk.grid(row=19, column=1, sticky="w", padx=5, pady=4)
+        self.enc_adv_toggle_chk.grid(row=20, column=1, sticky="w", padx=5, pady=4)
 
-        # Row 19: Advanced Options Frame
+        # Row 21: Advanced Options Frame
         self.enc_adv_frame = ttk.LabelFrame(
             self.encode_frame, text="Advanced MobiClip Tuning", padding=8
         )
         self.enc_adv_frame.grid(
-            row=20, column=0, columnspan=3, sticky="ew", padx=5, pady=5
+            row=21, column=0, columnspan=3, sticky="ew", padx=5, pady=5
         )
         self.enc_adv_frame.columnconfigure(1, weight=1)
 
@@ -583,24 +655,24 @@ class EncodeGUI(tk.Tk):
         # every option this tab doesn't have a widget for, and it goes on the
         # ffmpeg command line last, so it overrides the format preset.
         ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(
-            row=21, column=0, sticky="e", padx=5, pady=5
+            row=22, column=0, sticky="e", padx=5, pady=5
         )
         self.enc_ffargs_var = tk.StringVar(value="")
         ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(
-            row=21, column=1, sticky="ew", padx=5, pady=5
+            row=22, column=1, sticky="ew", padx=5, pady=5
         )
         ttk.Label(
             self.encode_frame,
             foreground="grey",
             wraplength=440,
             text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)",
-        ).grid(row=22, column=1, columnspan=2, sticky="w", padx=5)
+        ).grid(row=23, column=1, columnspan=2, sticky="w", padx=5)
 
         # Run Button
         self.enc_run_btn = ttk.Button(
             self.encode_frame, text="▶ Run Encoding", command=self.run_encoding
         )
-        self.enc_run_btn.grid(row=23, column=1, pady=15)
+        self.enc_run_btn.grid(row=24, column=1, pady=15)
 
         # Widgets that only appear for certain formats, keyed by the formats
         # that should show them. Hiding uses grid_remove() (not state=disabled)
@@ -665,6 +737,20 @@ class EncodeGUI(tk.Tk):
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),
             ({"rvid"}, (self.enc_rvid_interlaced_chk,)),
             ({"rvid"}, (self.enc_rvid_nodither_chk,)),
+            ({"flipnote", "flipnote3d"}, (self.enc_flip_frame,)),
+            (
+                {"flipnote3d"},
+                (
+                    self.enc_flip_dither_label,
+                    self.enc_flip_dither_cb,
+                    self.enc_flip_paper_label,
+                    self.enc_flip_paper_cb,
+                    self.enc_flip_key_label,
+                    self.enc_flip_key_entry,
+                    self.enc_flip_key_btn,
+                    self.enc_flip_loop_chk,
+                ),
+            ),
             ({"mo", "moflex", "moflex3d", "mods"}, (self.enc_adv_toggle_chk,)),
         ]
 
@@ -1119,6 +1205,7 @@ class EncodeGUI(tk.Tk):
             "dpg",
             "factor5",
             "flipnote",
+            "flipnote3d",
         ):
             fps = self.enc_fps_var.get().strip()
             if fps:
@@ -1157,6 +1244,18 @@ class EncodeGUI(tk.Tk):
                 cmd.append("--rvid-interlaced")
             if self.enc_rvid_nodither_var.get():
                 cmd.append("--rvid-no-dither")
+        if fmt in ("flipnote", "flipnote3d"):
+            author = self.enc_flip_author_var.get().strip()
+            if author:
+                cmd.extend(["--flipnote-author", author])
+        if fmt == "flipnote3d":
+            cmd.extend(["--flipnote-dither", self.enc_flip_dither_var.get()])
+            cmd.extend(["--flipnote-paper", self.enc_flip_paper_var.get()])
+            key = self.enc_flip_key_var.get().strip()
+            if key:
+                cmd.extend(["--flipnote-key", key])
+            if self.enc_flip_loop_var.get():
+                cmd.append("--flipnote-loop")
 
         self.add_ffargs(cmd, self.enc_ffargs_var)
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 quatric - quatricsoftware@gmail.com
 """Headless smoke test for encode_gui.py.
 
 The GUI is table-driven: formats_map, audio_options and enc_conditional_widgets
@@ -180,6 +181,58 @@ def check_ffargs(gui):
                   "%s tab: blank field still passed --ffmpeg-args" % tab)
 
 
+def check_flipnote(gui):
+    """The Flipnote panel has to show for both Flipnote formats, offer the
+    .kwz-only settings for .kwz alone, and reach encode.py's argv."""
+    app = gui.app
+    label_for = {v: k for k, v in app.formats_map.items()}
+    kwz_only = (app.enc_flip_dither_cb, app.enc_flip_paper_cb,
+                app.enc_flip_key_entry, app.enc_flip_loop_chk)
+    captured = []
+    app.execute_cmd = lambda cmd, btn: captured.append(list(cmd))
+    app.enc_input_var.set(os.path.abspath(__file__))
+    app.enc_ffargs_var.set("")
+
+    for fmt in sorted(set(app.formats_map.values())):
+        app.enc_fmt_var.set(label_for[fmt])
+        app.on_enc_format_change()
+        app.update_idletasks()
+        flip = fmt in ("flipnote", "flipnote3d")
+        check(is_shown(app.enc_flip_frame) == flip,
+              "%s: Flipnote options are %s" % (fmt, "hidden" if flip else "shown"))
+        if flip:
+            for w in kwz_only:
+                check(is_shown(w) == (fmt == "flipnote3d"),
+                      "%s: wrong visibility for a .kwz-only Flipnote setting" % fmt)
+
+    for fmt in ("flipnote", "flipnote3d"):
+        app.enc_fmt_var.set(label_for[fmt])
+        app.on_enc_format_change()
+        app.enc_flip_author_var.set("tester")
+        app.enc_flip_dither_var.set("2x2")
+        app.enc_flip_paper_var.set("black")
+        app.enc_flip_key_var.set("key.der")
+        app.enc_flip_loop_var.set(True)
+        del captured[:]
+        app.run_encoding()
+        if not check(captured, "%s: no command was built" % fmt):
+            continue
+        cmd = captured[-1]
+        check(cmd[cmd.index("--flipnote-author") + 1] == "tester"
+              if "--flipnote-author" in cmd else False,
+              "%s: --flipnote-author missing from %s" % (fmt, cmd))
+        for flag, value in (("--flipnote-dither", "2x2"), ("--flipnote-paper", "black"),
+                            ("--flipnote-key", "key.der"), ("--flipnote-loop", None)):
+            if fmt == "flipnote3d":
+                ok = flag in cmd and (value is None or cmd[cmd.index(flag) + 1] == value)
+                check(ok, "%s: %s missing from %s" % (fmt, flag, cmd))
+            else:
+                check(flag not in cmd, "%s: passed the .kwz-only %s" % (fmt, flag))
+    app.enc_flip_author_var.set("")
+    app.enc_flip_key_var.set("")
+    app.enc_flip_loop_var.set(False)
+
+
 def check_decoder_families(gui):
     exts = " ".join(e for _, e in gui.DECODER_FAMILIES)
     for ext in ("*.dpg", "*.dsp", "*.brstm", "*.bfstm", "*.bcstm",
@@ -215,6 +268,7 @@ def main():
     check_tables(gui, encode)
     check_per_format(gui, dump)
     check_ffargs(gui)
+    check_flipnote(gui)
     check_decoder_families(gui)
 
     gui.app.destroy()
