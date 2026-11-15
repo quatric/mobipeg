@@ -16,6 +16,8 @@
 #include "encode.h"
 #include "mathops.h"
 #include "mpeg4videodata.h"
+#include "thread.h"
+#include "threadprogress.h"
 
 #define FV_VLC_BITS 12
 
@@ -247,27 +249,20 @@ static void fv_reconstruct_intra(uint8_t *dst, const uint8_t *green,
                 }
 }
 
-static uint8_t fv_half_sample(const uint8_t *src, int width, int height,
-                              int hx, int hy)
+/* The average the player takes of two five-bit samples, for the eight
+ * samples in each of a and b at once.  No byte reaches its neighbour: a
+ * sample is at most 31, twice that plus one 63, and two of those 126. */
+static av_always_inline uint64_t fv_half_average(uint64_t a, uint64_t b)
 {
-    const int x = hx >> 1;
-    const int y = hy >> 1;
-    const int x1 = av_clip(x, 0, width - 1);
-    const int y1 = av_clip(y, 0, height - 1);
-    int x2 = x1, y2 = y1;
-    int a, b;
+    const uint64_t low5 = UINT64_C(0x1F1F1F1F1F1F1F1F);
+    const uint64_t ones = UINT64_C(0x0101010101010101);
 
-    if (!(hx & 1) && !(hy & 1))
-        return src[y1 * width + x1];
-    if (hx & 1)
-        x2 = av_clip(x + 1, 0, width - 1);
-    if (hy & 1)
-        y2 = av_clip(y + 1, 0, height - 1);
-    a = src[y1 * width + x1] >> 3;
-    b = src[y2 * width + x2] >> 3;
-    a = a ? 2 * a + 1 : 0;
-    b = b ? 2 * b + 1 : 0;
-    return ((a + b) >> 2) << 3;
+    a = (a >> 3) & low5;
+    b = (b >> 3) & low5;
+    /* 2 * a + 1 where a is not zero */
+    a = 2 * a + (((a + (ones * 0x7F)) >> 7) & ones);
+    b = 2 * b + (((b + (ones * 0x7F)) >> 7) & ones);
+    return (((a + b) >> 2) & low5) << 3;
 }
 
 static void fv_motion_tile(const uint8_t *src, int width, int height,
@@ -275,6 +270,7 @@ static void fv_motion_tile(const uint8_t *src, int width, int height,
 {
     const int fx = hx & 1, fy = hy & 1;
     const int x0 = hx >> 1, y0 = hy >> 1;
+    int xa[8], xb[8];
 
     /* a tile that stays inside the plane needs none of the clipping */
     if (x0 >= 0 && y0 >= 0 && x0 + 7 + fx < width && y0 + 7 + fy < height) {
@@ -287,20 +283,33 @@ static void fv_motion_tile(const uint8_t *src, int width, int height,
             const uint8_t *q = p + fy * width + fx;
 
             for (int y = 0; y < 8; y++)
-                for (int x = 0; x < 8; x++) {
-                    int a = p[y * width + x] >> 3;
-                    int b = q[y * width + x] >> 3;
-                    a = a ? 2 * a + 1 : 0;
-                    b = b ? 2 * b + 1 : 0;
-                    dst[y * 8 + x] = ((a + b) >> 2) << 3;
-                }
+                AV_WN64(dst + y * 8, fv_half_average(AV_RN64(p + y * width),
+                                                     AV_RN64(q + y * width)));
         }
         return;
     }
-    for (int y = 0; y < 8; y++)
-        for (int x = 0; x < 8; x++)
-            dst[y * 8 + x] = fv_half_sample(src, width, height,
-                                             hx + 2 * x, hy + 2 * y);
+    /* past an edge the nearest sample of the plane stands in; the second
+     * sample of a pair is the next one along, clipped the same way */
+    for (int x = 0; x < 8; x++) {
+        xa[x] = av_clip(x0 + x, 0, width - 1);
+        xb[x] = fx ? av_clip(x0 + x + 1, 0, width - 1) : xa[x];
+    }
+    for (int y = 0; y < 8; y++) {
+        const int ya = av_clip(y0 + y, 0, height - 1);
+        const int yb = fy ? av_clip(y0 + y + 1, 0, height - 1) : ya;
+        const uint8_t *const row_a = src + ya * width;
+        const uint8_t *const row_b = src + yb * width;
+        uint8_t a[8], b[8];
+
+        for (int x = 0; x < 8; x++) {
+            a[x] = row_a[xa[x]];
+            b[x] = row_b[xb[x]];
+        }
+        if (!fx && !fy)
+            memcpy(dst + y * 8, a, 8);
+        else
+            AV_WN64(dst + y * 8, fv_half_average(AV_RN64(a), AV_RN64(b)));
+    }
 }
 
 static void fv_reconstruct_residual(uint8_t *dst, int stride, int mbx, int mby,
@@ -578,6 +587,14 @@ typedef struct FVMotionVector {
     int x, y;
 } FVMotionVector;
 
+/* What was decided for one block, kept until the frame is written. */
+typedef struct FVBlock {
+    int coeff[3][64];           /* the planes in coding order: green, red, blue */
+    FVMotionVector vec;         /* the vector later blocks predict theirs from */
+    FVMotionVector delta;       /* its own vector less its prediction */
+    int intra;
+} FVBlock;
+
 /* The encoder follows Gericom's FastVideoDSEncoder decision for decision, so
  * that the same pictures give the same stream: the fixed intra quantizer, a
  * trellis for the residual of predicted blocks, the diamond motion search and
@@ -590,7 +607,14 @@ typedef struct FastVideoEncContext {
     int have_reference;
     int gop_length;
     int width, height;
-    FVMotionVector *vectors[2];
+    /* Blocks are worked out a row per job.  In a key frame no block needs
+     * another; in a predicted frame a block needs the vectors of the one to
+     * its left and of two in the row above, so a row follows the one above
+     * it two blocks behind. */
+    FVBlock *blocks;
+    ThreadProgress *progress;   /* blocks done, by row */
+    int *intra_blocks;          /* by row */
+    int nb_progress;
     uint8_t *vector_data, *dct_data;
     int vector_size, dct_size;
     int warned_size;
@@ -879,27 +903,38 @@ static int fv_quantize_trellis(const FastVideoEncContext *s, int dst[64])
             const int coded = value >= -64 && value < 64;
             int distortion = (unquant - dct_coeff) * (unquant - dct_coeff) - zero_distortion;
 
-            if (!coded)
-                distortion += ESC_LENGTH * LAMBDA;
-            for (int j = survivor_count - 1; j >= 0; j--) {
-                const int run = i - survivor[j];
-                const int score = distortion + score_tab[i - run] +
-                    (coded ? s->bit_length[0][run][value + 64] * LAMBDA : 0);
+            /* The best way to code this value when more coefficients follow
+             * (best) and when none do (last), over the places the run before
+             * it can start.  The comparisons are kept out of the way of the
+             * branch predictor: which start wins is close to random. */
+            {
+                const uint8_t *const bits  = &s->bit_length[0][0][(value + 64) & 127];
+                const uint8_t *const bits1 = &s->bit_length[1][0][(value + 64) & 127];
+                const int lambda = coded ? LAMBDA : 0;
+                int best = best_score, best_run = 0;
+                int last = last_score, run_last = 0;
 
-                if (score < best_score) {
-                    best_score = score;
-                    run_tab[i + 1] = run;
+                if (!coded)
+                    distortion += ESC_LENGTH * LAMBDA;
+                for (int j = survivor_count - 1; j >= 0; j--) {
+                    const int run   = i - survivor[j];
+                    const int base  = distortion + score_tab[survivor[j]];
+                    const int score = base + bits[run * 128] * lambda;
+                    const int score_last = base + bits1[run * 128] * lambda;
+
+                    best_run = score < best ? run : best_run;
+                    best     = score < best ? score : best;
+                    run_last = score_last < last ? run : run_last;
+                    last     = score_last < last ? score_last : last;
+                }
+                if (best < best_score) {
+                    best_score = best;
+                    run_tab[i + 1] = best_run;
                     level_tab[i + 1] = value;
                 }
-            }
-            for (int j = survivor_count - 1; j >= 0; j--) {
-                const int run = i - survivor[j];
-                const int score = distortion + score_tab[i - run] +
-                    (coded ? s->bit_length[1][run][value + 64] * LAMBDA : 0);
-
-                if (score < last_score) {
-                    last_score = score;
-                    last_run = run;
+                if (last < last_score) {
+                    last_score = last;
+                    last_run = run_last;
                     last_level = value;
                     last_i = i + 1;
                 }
@@ -1115,112 +1150,152 @@ static void fv_store_tile(uint8_t *plane, int stride, int x, int y, const uint8_
         memcpy(plane + (y + row) * stride + x, tile + row * 8, 8);
 }
 
-/* Code the picture against the reference; returns the size of the frame in
- * out, with the number of intra blocks in *intra_blocks. */
-static int fv_encode_p_frame(FastVideoEncContext *s, uint8_t *out, int out_size,
-                             int *intra_blocks)
+/* Work out one block of a predicted frame at (x, y): l, a and ar are the
+ * blocks to its left, above and above right, where there are any. */
+static void fv_encode_p_block(const FastVideoEncContext *s, int x, int y,
+                              const FVBlock *l, const FVBlock *a,
+                              const FVBlock *ar, FVBlock *blk)
 {
     static const uint8_t plane_order[3] = { 1, 0, 2 };   /* green, red, blue */
     const float lambda = 0.35f;
     uint8_t *const *ref = s->plane[s->cur ^ 1];
     uint8_t *const *dec = s->plane[s->cur];
+    const FVMotionVector *lv = l ? &l->vec : NULL, *av = a ? &a->vec : NULL;
+    const FVMotionVector *arv = ar ? &ar->vec : NULL;
+    const FVMotionVector last_vec = { fv_median(lv, av, arv, 0), fv_median(lv, av, arv, 1) };
+    FVSearch search = { s, { 0 }, ref, { x << 1, y << 1 },
+                        { last_vec.x + (x << 1), last_vec.y + (y << 1) } };
+    uint8_t pred[3][64], i_tile[3][64], p_tile[3][64];
+    int i_coeff[3][64], p_coeff[3][64];
+    int i_bits = 1, p_bits = 1, diff_i = 0, diff_p = 0, same;
+    float i_cost, p_cost;
+    FVMotionVector vec;
+
+    for (int p = 0; p < 3; p++)
+        search.src[p] = s->src[p] + y * s->width + x;
+    vec = fv_find_motion_vector(&search);
+    for (int p = 0; p < 3; p++)
+        fv_motion_tile(ref[p], s->width, s->height, vec.x, vec.y, pred[p]);
+    vec.x -= x << 1;
+    vec.y -= y << 1;
+    same = vec.x == last_vec.x && vec.y == last_vec.y;
+
+    for (int k = 0; k < 3; k++) {
+        const int p = plane_order[k];
+
+        fv_encode_intra(search.src[p], s->width, i_tile[p],
+                        k ? i_tile[1] : NULL, 8, 0, 0, i_coeff[k]);
+        i_bits += fv_dct_bits(s, i_coeff[k], fv_last_nonzero(i_coeff[k]));
+    }
+
+    if (!same)
+        p_bits += fv_signed_varint_bits(vec.x - last_vec.x) +
+                  fv_signed_varint_bits(vec.y - last_vec.y);
+    for (int k = 0; k < 3; k++) {
+        const int p = plane_order[k];
+
+        p_bits += fv_encode_residual(s, search.src[p], s->width, pred[p],
+                                     p_tile[p], p_coeff[k]);
+    }
+
+    for (int p = 0; p < 3; p++) {
+        diff_i += fv_sad64(search.src[p], s->width, i_tile[p]);
+        diff_p += fv_sad64(search.src[p], s->width, p_tile[p]);
+    }
+    /* single precision, one operation at a time, as the reference
+     * computes it */
+    i_cost  = diff_i * lambda;
+    i_cost += i_bits;
+    p_cost  = diff_p * lambda;
+    p_cost += p_bits;
+
+    blk->intra = i_cost < p_cost;
+    if (blk->intra) {
+        memcpy(blk->coeff, i_coeff, sizeof(blk->coeff));
+        for (int p = 0; p < 3; p++)
+            fv_store_tile(dec[p], s->width, x, y, i_tile[p]);
+        blk->vec = last_vec;
+    } else {
+        memcpy(blk->coeff, p_coeff, sizeof(blk->coeff));
+        for (int p = 0; p < 3; p++)
+            fv_store_tile(dec[p], s->width, x, y, p_tile[p]);
+        blk->vec     = vec;
+        blk->delta.x = vec.x - last_vec.x;
+        blk->delta.y = vec.y - last_vec.y;
+    }
+}
+
+static int fv_encode_p_row(AVCodecContext *avctx, void *arg, int row, int threadnr)
+{
+    FastVideoEncContext *s = avctx->priv_data;
+    const int mb_width = s->width / 8;
+    FVBlock *blocks = s->blocks + row * mb_width;
+    const FVBlock *above = row ? blocks - mb_width : NULL;
+    int intra_blocks = 0;
+
+    for (int mb = 0; mb < mb_width; mb++) {
+        if (row)
+            ff_thread_progress_await(&s->progress[row - 1], FFMIN(mb + 2, mb_width));
+        fv_encode_p_block(s, mb * 8, row * 8, mb ? &blocks[mb - 1] : NULL,
+                          above ? &above[mb] : NULL,
+                          above && mb + 1 < mb_width ? &above[mb + 1] : NULL,
+                          &blocks[mb]);
+        intra_blocks += blocks[mb].intra;
+        ff_thread_progress_report(&s->progress[row], mb + 1);
+    }
+    s->intra_blocks[row] = intra_blocks;
+    return 0;
+}
+
+/* Code the picture against the reference; returns the size of the frame in
+ * out, with the number of intra blocks in *intra_blocks. */
+static int fv_encode_p_frame(AVCodecContext *avctx, uint8_t *out, int out_size,
+                             int *intra_blocks)
+{
+    FastVideoEncContext *s = avctx->priv_data;
     FVPutBitContext vpb = { s->vector_data, s->vector_size, 0, 0, 0 };
     FVPutBitContext dpb = { s->dct_data, s->dct_size, 0, 0, 0 };
-    const int mb_width = s->width / 8;
-    int cur_row = 0, ret = 0;
+    const int mb_count = s->width * s->height / 64;
+    int ret = 0;
+
+    for (int i = 0; i < s->nb_progress; i++)
+        ff_thread_progress_reset(&s->progress[i]);
+    avctx->execute2(avctx, fv_encode_p_row, NULL, NULL, s->height / 8);
 
     *intra_blocks = 0;
+    for (int i = 0; i < s->height / 8; i++)
+        *intra_blocks += s->intra_blocks[i];
+
     ret |= fv_put_bits(&vpb, 1, 1);
-    for (int y = 0; y < s->height; y += 8) {
-        FVMotionVector *row = s->vectors[cur_row], *above = s->vectors[cur_row ^ 1];
+    for (int mb = 0; mb < mb_count; mb++) {
+        const FVBlock *blk = &s->blocks[mb];
 
-        for (int x = 0; x < s->width; x += 8) {
-            const int mb = x >> 3;
-            const FVMotionVector *l  = x ? &row[mb - 1] : NULL;
-            const FVMotionVector *a  = y ? &above[mb] : NULL;
-            const FVMotionVector *ar = y && mb + 1 < mb_width ? &above[mb + 1] : NULL;
-            const FVMotionVector last_vec = { fv_median(l, a, ar, 0), fv_median(l, a, ar, 1) };
-            FVSearch search = { s, { 0 }, ref, { x << 1, y << 1 },
-                                { last_vec.x + (x << 1), last_vec.y + (y << 1) } };
-            uint8_t pred[3][64], i_tile[3][64], p_tile[3][64];
-            int i_coeff[3][64], p_coeff[3][64];
-            int i_bits = 1, p_bits = 1, diff_i = 0, diff_p = 0, same;
-            float i_cost, p_cost;
-            FVMotionVector vec;
-
-            for (int p = 0; p < 3; p++)
-                search.src[p] = s->src[p] + y * s->width + x;
-            vec = fv_find_motion_vector(&search);
-            for (int p = 0; p < 3; p++)
-                fv_motion_tile(ref[p], s->width, s->height, vec.x, vec.y, pred[p]);
-            vec.x -= x << 1;
-            vec.y -= y << 1;
-            same = vec.x == last_vec.x && vec.y == last_vec.y;
-
-            for (int k = 0; k < 3; k++) {
-                const int p = plane_order[k];
-
-                fv_encode_intra(search.src[p], s->width, i_tile[p],
-                                k ? i_tile[1] : NULL, 8, 0, 0, i_coeff[p]);
-                i_bits += fv_dct_bits(s, i_coeff[p], fv_last_nonzero(i_coeff[p]));
-            }
-
-            if (!same)
-                p_bits += fv_signed_varint_bits(vec.x - last_vec.x) +
-                          fv_signed_varint_bits(vec.y - last_vec.y);
-            for (int k = 0; k < 3; k++) {
-                const int p = plane_order[k];
-
-                p_bits += fv_encode_residual(s, search.src[p], s->width, pred[p],
-                                             p_tile[p], p_coeff[p]);
-            }
-
-            for (int p = 0; p < 3; p++) {
-                diff_i += fv_sad64(search.src[p], s->width, i_tile[p]);
-                diff_p += fv_sad64(search.src[p], s->width, p_tile[p]);
-            }
-            /* single precision, one operation at a time, as the reference
-             * computes it */
-            i_cost  = diff_i * lambda;
-            i_cost += i_bits;
-            p_cost  = diff_p * lambda;
-            p_cost += p_bits;
-
-            if (i_cost < p_cost) {
-                ret |= fv_put_bits(&dpb, 1, 1);
+        if (blk->intra) {
+            ret |= fv_put_bits(&dpb, 1, 1);
+            ret |= fv_put_bits(&vpb, 1, 1);
+            for (int k = 0; k < 3; k++)
+                ret |= fv_encode_dct(s, &dpb, blk->coeff[k]);
+        } else {
+            ret |= fv_put_bits(&dpb, 0, 1);
+            if (!blk->delta.x && !blk->delta.y) {
                 ret |= fv_put_bits(&vpb, 1, 1);
-                for (int k = 0; k < 3; k++) {
-                    ret |= fv_encode_dct(s, &dpb, i_coeff[plane_order[k]]);
-                    fv_store_tile(dec[k], s->width, x, y, i_tile[k]);
-                }
-                row[mb] = last_vec;
-                (*intra_blocks)++;
             } else {
-                ret |= fv_put_bits(&dpb, 0, 1);
-                if (same) {
-                    ret |= fv_put_bits(&vpb, 1, 1);
-                } else {
-                    ret |= fv_put_bits(&vpb, 0, 1);
-                    ret |= fv_put_signed_varint(&vpb, vec.x - last_vec.x);
-                    ret |= fv_put_signed_varint(&vpb, vec.y - last_vec.y);
-                }
-                for (int k = 0; k < 3; k++) {
-                    const int p = plane_order[k];
-                    int coded = 0;
-
-                    for (int i = 0; i < 64; i++)
-                        coded |= p_coeff[p][i];
-                    ret |= fv_put_bits(&dpb, !!coded, 1);
-                    if (coded)
-                        ret |= fv_encode_dct(s, &dpb, p_coeff[p]);
-                    fv_store_tile(dec[k], s->width, x, y, p_tile[k]);
-                }
-                row[mb] = vec;
+                ret |= fv_put_bits(&vpb, 0, 1);
+                ret |= fv_put_signed_varint(&vpb, blk->delta.x);
+                ret |= fv_put_signed_varint(&vpb, blk->delta.y);
             }
-            if (ret < 0)
-                return AVERROR_BUFFER_TOO_SMALL;
+            for (int k = 0; k < 3; k++) {
+                int coded = 0;
+
+                for (int i = 0; i < 64; i++)
+                    coded |= blk->coeff[k][i];
+                ret |= fv_put_bits(&dpb, !!coded, 1);
+                if (coded)
+                    ret |= fv_encode_dct(s, &dpb, blk->coeff[k]);
+            }
         }
-        cur_row ^= 1;
+        if (ret < 0)
+            return AVERROR_BUFFER_TOO_SMALL;
     }
     if (fv_flush_put_bits(&vpb) < 0 || fv_flush_put_bits(&dpb) < 0 ||
         vpb.pos + dpb.pos > out_size)
@@ -1230,31 +1305,48 @@ static int fv_encode_p_frame(FastVideoEncContext *s, uint8_t *out, int out_size,
     return vpb.pos + dpb.pos;
 }
 
-static int fv_encode_i_frame(FastVideoEncContext *s, uint8_t *out, int out_size)
+static int fv_encode_i_row(AVCodecContext *avctx, void *arg, int row, int threadnr)
 {
     static const uint8_t plane_order[3] = { 1, 0, 2 };
+    FastVideoEncContext *s = avctx->priv_data;
     uint8_t *const *dec = s->plane[s->cur];
+    FVBlock *blocks = s->blocks + row * (s->width / 8);
+    const int y = row * 8;
+
+    for (int x = 0; x < s->width; x += 8)
+        for (int k = 0; k < 3; k++) {
+            const int p = plane_order[k];
+
+            fv_encode_intra(s->src[p] + y * s->width + x, s->width, dec[p],
+                            k ? dec[1] : NULL, s->width, x, y,
+                            blocks[x >> 3].coeff[k]);
+        }
+    return 0;
+}
+
+static int fv_encode_i_frame(AVCodecContext *avctx, uint8_t *out, int out_size)
+{
+    FastVideoEncContext *s = avctx->priv_data;
     FVPutBitContext pb = { out, out_size, 0, 0, 0 };
+    const int mb_count = s->width * s->height / 64;
     int last_gdc = 0, ret;
+
+    avctx->execute2(avctx, fv_encode_i_row, NULL, NULL, s->height / 8);
 
     if (fv_put_bits(&pb, 0, 1) < 0 || fv_put_bits(&pb, 30, 6) < 0)
         return AVERROR_BUFFER_TOO_SMALL;
-    for (int y = 0; y < s->height; y += 8)
-        for (int x = 0; x < s->width; x += 8)
-            for (int k = 0; k < 3; k++) {
-                const int p = plane_order[k];
-                int coeff[64];
+    for (int mb = 0; mb < mb_count; mb++)
+        for (int k = 0; k < 3; k++) {
+            int *coeff = s->blocks[mb].coeff[k];
 
-                fv_encode_intra(s->src[p] + y * s->width + x, s->width, dec[p],
-                                k ? dec[1] : NULL, s->width, x, y, coeff);
-                if (!k) {
-                    const int dc = coeff[0];
-                    coeff[0] -= last_gdc;
-                    last_gdc  = dc;
-                }
-                if ((ret = fv_encode_dct(s, &pb, coeff)) < 0)
-                    return ret;
+            if (!k) {
+                const int dc = coeff[0];
+                coeff[0] -= last_gdc;
+                last_gdc  = dc;
             }
+            if ((ret = fv_encode_dct(s, &pb, coeff)) < 0)
+                return ret;
+        }
     if ((ret = fv_flush_put_bits(&pb)) < 0)
         return ret;
     return pb.pos;
@@ -1286,10 +1378,19 @@ static av_cold int fastvideo_encode_init(AVCodecContext *avctx)
     s->dct_data    = av_malloc(s->dct_size);
     if (!s->vector_data || !s->dct_data)
         return AVERROR(ENOMEM);
-    for (int i = 0; i < 2; i++) {
-        s->vectors[i] = av_calloc(s->width / 8, sizeof(*s->vectors[i]));
-        if (!s->vectors[i])
-            return AVERROR(ENOMEM);
+    s->blocks       = av_calloc(mb_count, sizeof(*s->blocks));
+    s->intra_blocks = av_calloc(s->height / 8, sizeof(*s->intra_blocks));
+    s->progress     = av_calloc(s->height / 8, sizeof(*s->progress));
+    if (!s->blocks || !s->intra_blocks || !s->progress)
+        return AVERROR(ENOMEM);
+    for (int i = 0; i < s->height / 8; i++) {
+        /* with one thread the rows come in order and nothing has to wait */
+        int ret = ff_thread_progress_init(&s->progress[i],
+                                          (avctx->active_thread_type & FF_THREAD_SLICE) &&
+                                          avctx->thread_count > 1);
+        if (ret < 0)
+            return ret;
+        s->nb_progress++;
     }
     for (int p = 0; p < 3; p++) {
         s->src[p] = av_malloc(plane_size);
@@ -1332,8 +1433,11 @@ static av_cold int fastvideo_encode_close(AVCodecContext *avctx)
         av_freep(&s->plane[0][p]);
         av_freep(&s->plane[1][p]);
     }
-    av_freep(&s->vectors[0]);
-    av_freep(&s->vectors[1]);
+    for (int i = 0; i < s->nb_progress; i++)
+        ff_thread_progress_destroy(&s->progress[i]);
+    av_freep(&s->progress);
+    av_freep(&s->intra_blocks);
+    av_freep(&s->blocks);
     av_freep(&s->vector_data);
     av_freep(&s->dct_data);
     return 0;
@@ -1366,7 +1470,7 @@ static int fastvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         s->gop_length < s->gop) {
         int intra_blocks;
 
-        size = fv_encode_p_frame(s, pkt->data, pkt->size, &intra_blocks);
+        size = fv_encode_p_frame(avctx, pkt->data, pkt->size, &intra_blocks);
         if (size < 0)
             return size;
         if (intra_blocks > intra_limit)
@@ -1375,7 +1479,7 @@ static int fastvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
             key = 0;
     }
     if (size < 0) {
-        size = fv_encode_i_frame(s, pkt->data, pkt->size);
+        size = fv_encode_i_frame(avctx, pkt->data, pkt->size);
         if (size < 0)
             return size;
     }
@@ -1406,7 +1510,8 @@ const FFCodec ff_fastvideo_encoder = {
     CODEC_LONG_NAME("FastVideoDS Video"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_FASTVIDEO,
-    .p.capabilities = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_ENCODER_REORDERED_OPAQUE,
+    .p.capabilities = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_ENCODER_REORDERED_OPAQUE |
+                      AV_CODEC_CAP_SLICE_THREADS,
     .priv_data_size = sizeof(FastVideoEncContext),
     .init           = fastvideo_encode_init,
     FF_CODEC_ENCODE_CB(fastvideo_encode_frame),
