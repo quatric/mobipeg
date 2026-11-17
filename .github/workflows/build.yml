@@ -1294,7 +1294,14 @@ jobs:
               --exclude-module PIL \
               --target-architecture universal2 encode_gui.py
             cd pyinst_dist
-            ditto -c -k --sequesterRsrc --keepParent mobipeg-gui.app ../mobipeg-gui-${{ matrix.target }}.zip
+            # Clear extended attributes (codesign refuses bundles carrying
+            # resource forks or Finder info), then sign the whole bundle --
+            # the bundled ffmpeg/ffprobe/ffplay and VidInjector included --
+            # ad hoc, so it runs on Apple silicon and its seal holds.
+            /usr/bin/xattr -cr mobipeg-gui.app
+            /usr/bin/codesign --force --deep --sign - --timestamp=none mobipeg-gui.app
+            /usr/bin/codesign --verify --deep --strict --verbose=2 mobipeg-gui.app
+            ditto -c -k --keepParent mobipeg-gui.app ../mobipeg-gui-${{ matrix.target }}.zip
           else
             # Native Linux (x86_64, arm64)
             sudo apt-get install python3-tk -y || true
