@@ -600,6 +600,7 @@ OBJS-$(CONFIG_YADIF_VIDEOTOOLBOX_FILTER)     += vf_yadif_videotoolbox.o \
                                                 metal/utils.o \
                                                 yadif_common.o
 OBJS-$(CONFIG_YAEPBLUR_FILTER)               += vf_yaepblur.o
+OBJS-$(CONFIG_YCGCO_FILTER)                  += vf_ycgco.o
 OBJS-$(CONFIG_ZMQ_FILTER)                    += f_zmq.o
 OBJS-$(CONFIG_ZOOMPAN_FILTER)                += vf_zoompan.o
 OBJS-$(CONFIG_ZSCALE_FILTER)                 += vf_zscale.o

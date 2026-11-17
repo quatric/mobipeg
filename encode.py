@@ -198,7 +198,9 @@ def stereo_layout(inp, ifmt):
             ],
             stderr=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         out = (p.stdout or "").lower()
         if p.returncode != 0:
@@ -302,7 +304,9 @@ def _decodes_cleanly(path):
             + input_fmt(path)
             + ["-i", path, "-frames:v", "3", "-f", "null", "-"],
             capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         return p.returncode == 0 and not p.stderr.strip()
@@ -430,7 +434,9 @@ def probe_duration(inp):
                 inp,
             ],
             capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return float(p.stdout.strip())
     except Exception:
@@ -484,7 +490,9 @@ def probe_fps(inp):
                 inp,
             ],
             capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         num, den = p.stdout.strip().split("/")
         den = float(den)
@@ -509,7 +517,9 @@ def probe_audio_rate(inp):
                 inp,
             ],
             capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return int(p.stdout.strip())
     except Exception:
@@ -628,7 +638,14 @@ def package_cia(parsed):
     def vi(*args):
         cmd = [VIDINJECTOR] + [str(a) for a in args]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=workdir)
+            r = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=workdir,
+            )
         except FileNotFoundError as e:
             print(f"Command failed: {cmd[0]}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -1226,7 +1243,12 @@ def main():
         )
         sys.exit(2)
 
-    if scale_ovr and fmt not in ("3ds_camera", "3ds_camera3d", "flipnote", "flipnote3d"):
+    if scale_ovr and fmt not in (
+        "3ds_camera",
+        "3ds_camera3d",
+        "flipnote",
+        "flipnote3d",
+    ):
         scale = scale_ovr.replace("x", ":")
     elif audio == "vorbis":
         scale = "384:288"
@@ -1612,7 +1634,9 @@ def main():
         p = subprocess.run(
             [FFENC, "-hide_banner", "-f", dmx, "-i", container],
             stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         for line in p.stderr.splitlines():
             if "Stream" in line or "Duration" in line:
@@ -1774,7 +1798,9 @@ def main():
                 container,
             ],
             stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         for line in p.stderr.splitlines():
             if "Stream" in line or "Duration" in line:
@@ -2029,7 +2055,9 @@ def main():
             # stream types; the muxer writes it as the left/right sound stream.
             # RocketVideoPlayer refuses anything above 32 kHz.
             enc_opts.extend(["-c:a", "pcm_s16le"])
-            enc_opts.extend(["-ar", str(min(audio_rate, 32000) if audio_rate > 0 else 32000)])
+            enc_opts.extend(
+                ["-ar", str(min(audio_rate, 32000) if audio_rate > 0 else 32000)]
+            )
     elif fmt == "hvqm4":
         # The hvqm4 muxer carries video only -- drop any audio stream
         # regardless of the --audio choice.
@@ -2227,7 +2255,10 @@ def main():
         filters.append("format=monob,format=gray")
 
     if fmt == "mods":
-        ycgco = "format=gbrp,geq=g='(r(X,Y)+2*g(X,Y)+b(X,Y))/4':b='(2*g(X,Y)-r(X,Y)-b(X,Y))/4+128':r='(r(X,Y)-b(X,Y))/2+128',mergeplanes=0x000102:yuv444p,format=yuv420p"
+        # The DS bitstream is YCgCo.  The ycgco filter writes what
+        # geq=g='(r+2g+b)/4':b='(2g-r-b)/4+128':r='(r-b)/2+128' did, sample
+        # for sample, without evaluating an expression per sample.
+        ycgco = "format=gbrp,ycgco,mergeplanes=0x000102:yuv444p,format=yuv420p"
         filters.append(ycgco)
     elif fmt == "3ds_camera":
         # The camera's 480x240 pixels are square. Do not preserve a source
@@ -2246,6 +2277,12 @@ def main():
     # matches retail and doesn't stutter on the game's per-keyframe reset.
     if fmt == "mods" and audio == "codebook":
         kf_probe = os.path.join(OUTDIR or ".", ".kf_probe.mods")
+        # The keyframes come from x264's lookahead, so the probe carries the
+        # options that steer it (quantizer, rate control, scene-cut threshold,
+        # motion search method) and drops the analysis that only shapes the
+        # bits.  The lookahead reads subme only as "above 1", and Mobiclip
+        # clamps it to at least 2, so subq 2 cannot move a keyframe; neither
+        # can partitions or the 8x8 transform, which it does not read.
         probe_cmd = (
             [FFENC, "-nostdin", "-y", "-loglevel", "error"]
             + input_fmt(inp)
@@ -2263,8 +2300,10 @@ def main():
                 "0",
                 "-g",
                 "100000",
-                kf_probe,
             ]
+            + (["-qp", str(vx_quant)] if vx_quant > 0 and not mobi_bitrate else [])
+            + mobi_rc
+            + ["-subq", "2", "-8x8dct", "0", "-partitions", "none", kf_probe]
         )
         if subprocess.run(probe_cmd).returncode == 0:
             kfs = read_mods_keyframes(kf_probe)
@@ -2357,7 +2396,9 @@ def main():
     p = subprocess.run(
         [FFENC, "-hide_banner", "-f", dmx, "-i", container],
         stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace",
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     for line in p.stderr.splitlines():
         if "Stream" in line or "Duration" in line:

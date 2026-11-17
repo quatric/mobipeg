@@ -558,6 +558,7 @@ extern const FFFilter ff_vf_yadif;
 extern const FFFilter ff_vf_yadif_cuda;
 extern const FFFilter ff_vf_yadif_videotoolbox;
 extern const FFFilter ff_vf_yaepblur;
+extern const FFFilter ff_vf_ycgco;
 extern const FFFilter ff_vf_zmq;
 extern const FFFilter ff_vf_zoompan;
 extern const FFFilter ff_vf_zscale;

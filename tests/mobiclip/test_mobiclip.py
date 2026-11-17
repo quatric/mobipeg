@@ -506,11 +506,7 @@ SOURCE_RATE = 32000
 
 # The DS bitstream is YCgCo and the encoder takes the planes as they come, so
 # .mods sources are converted first, exactly as encode.py does.
-YCGCO = (
-    "format=gbrp,geq=g='(r(X,Y)+2*g(X,Y)+b(X,Y))/4'"
-    ":b='(2*g(X,Y)-r(X,Y)-b(X,Y))/4+128':r='(r(X,Y)-b(X,Y))/2+128',"
-    "mergeplanes=0x000102:yuv444p,format=yuv420p"
-)
+YCGCO = "format=gbrp,ycgco,mergeplanes=0x000102:yuv444p,format=yuv420p"
 
 
 def source_inputs(size, channels, ycgco=False):
