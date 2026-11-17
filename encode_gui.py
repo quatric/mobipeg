@@ -13,7 +13,10 @@ try:
                 return None
             # Wrong-architecture helper binary (Errno 86 Bad CPU type): user-environment
             # error, now reported to the user by _handle_binary_error.
-            if issubclass(exc_type, OSError) and getattr(exc_value, "errno", None) == 86:
+            if (
+                issubclass(exc_type, OSError)
+                and getattr(exc_value, "errno", None) == 86
+            ):
                 return None
             if issubclass(exc_type, FileNotFoundError) and "ls" in str(exc_value):
                 return None
@@ -56,6 +59,9 @@ _script_dir = (
     else os.getcwd()
 )
 ENCODE_SCRIPT = os.path.join(_script_dir, "encode.py")
+
+# Shown in the title bar; keep in step with version_info.txt and the release tag.
+MOBIPEG_VERSION = "3.0"
 
 
 # One source of truth for what the decoder accepts: (family, extensions).
@@ -165,7 +171,7 @@ class CollapsibleSection(ttk.Frame):
 class EncodeGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("mobipeg v2.0")
+        self.title(f"mobipeg v{MOBIPEG_VERSION}")
         self.geometry("750x900")
         self.minsize(700, 750)
         self.configure(padx=15, pady=15)
@@ -192,8 +198,15 @@ class EncodeGUI(tk.Tk):
         elif "clam" in style.theme_names():
             style.theme_use("clam")
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        # Tabs above, console below, with a sash between them.  Every tab
+        # asks for more height than a short screen has left once the window
+        # is clamped to it; packed one after the other, whichever came second
+        # was squeezed to nothing, which is how the console used to vanish.
+        self.panes = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        self.panes.pack(fill=tk.BOTH, expand=True)
+
+        self.notebook = ttk.Notebook(self.panes)
+        self.panes.add(self.notebook, weight=1)
 
         # --- ENCODE TAB ---
         self.encode_frame = ttk.Frame(self.notebook, padding=10)
@@ -213,8 +226,10 @@ class EncodeGUI(tk.Tk):
         self.setup_cia_tab()
 
         # --- CONSOLE ---
-        ttk.Label(self, text="Console Output:").pack(anchor="w", pady=(10, 0))
-        console_frame = ttk.Frame(self)
+        console_box = ttk.Frame(self.panes)
+        self.panes.add(console_box, weight=1)
+        ttk.Label(console_box, text="Console Output:").pack(anchor="w", pady=(10, 0))
+        console_frame = ttk.Frame(console_box)
         console_frame.pack(fill=tk.BOTH, expand=True)
 
         # bg is close enough to the window's own dark background that without
@@ -237,6 +252,28 @@ class EncodeGUI(tk.Tk):
         scrollbar = ttk.Scrollbar(console_frame, command=self.console.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.config(yscrollcommand=scrollbar.set)
+
+        self.after_idle(self._place_sash)
+        self.panes.bind("<Configure>", lambda e: self._place_sash(keep_user=True))
+
+    # Height the console keeps however short the window gets: its label and
+    # about five lines of output.
+    CONSOLE_MIN_HEIGHT = 130
+
+    def _place_sash(self, keep_user=False):
+        """Give the tabs the height they ask for, as far as that leaves the
+        console CONSOLE_MIN_HEIGHT.  On a resize (keep_user) a sash the user
+        moved is left alone unless the console has dropped below that."""
+        self.update_idletasks()
+        total = self.panes.winfo_height()
+        if total <= 1:
+            return
+        limit = max(0, total - self.CONSOLE_MIN_HEIGHT)
+        if keep_user:
+            if self.panes.sashpos(0) > limit:
+                self.panes.sashpos(0, limit)
+            return
+        self.panes.sashpos(0, min(self.notebook.winfo_reqheight(), limit))
 
     def setup_encode_tab(self):
         self.encode_frame.columnconfigure(1, weight=1)
