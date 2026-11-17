@@ -39,9 +39,9 @@
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/random_seed.h"
-#include "libavutil/sha.h"
 #include "libavutil/time.h"
 #include "avformat.h"
+#include "flipnote_rsa.h"
 #include "mux.h"
 
 #define PPM_W          256
@@ -101,12 +101,6 @@ static const uint8_t ppm_rsa_d[128] = {
     0xaa, 0x00, 0x83, 0x72, 0xfc, 0x1e, 0x12, 0xc1,
 };
 
-/* DER DigestInfo prefix for SHA-1 */
-static const uint8_t ppm_sha1_prefix[15] = {
-    0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05,
-    0x00, 0x04, 0x14
-};
-
 typedef struct PpmMuxContext {
     const AVClass *class;
     char    *author;
@@ -125,125 +119,6 @@ typedef struct PpmMuxContext {
     unsigned pcm_size, pcm_alloc;
     int      audio_index;
 } PpmMuxContext;
-
-/* ---------- minimal 1024-bit modular arithmetic ---------- */
-
-#define BN_LIMBS 32
-typedef uint32_t bn_t[BN_LIMBS];
-
-static void bn_load(bn_t r, const uint8_t *be)
-{
-    int i;
-    for (i = 0; i < BN_LIMBS; i++)
-        r[BN_LIMBS - 1 - i] = AV_RB32(be + 4 * i);
-}
-
-static void bn_store(uint8_t *be, const bn_t a)
-{
-    int i;
-    for (i = 0; i < BN_LIMBS; i++)
-        AV_WB32(be + 4 * i, a[BN_LIMBS - 1 - i]);
-}
-
-static int bn_ge(const bn_t a, const bn_t b)
-{
-    int i;
-    for (i = BN_LIMBS - 1; i >= 0; i--) {
-        if (a[i] != b[i])
-            return a[i] > b[i];
-    }
-    return 1;
-}
-
-static uint32_t bn_add(bn_t r, const bn_t a, const bn_t b)
-{
-    uint64_t c = 0;
-    int i;
-    for (i = 0; i < BN_LIMBS; i++) {
-        c    += (uint64_t)a[i] + b[i];
-        r[i]  = (uint32_t)c;
-        c   >>= 32;
-    }
-    return (uint32_t)c;
-}
-
-static void bn_sub(bn_t r, const bn_t a, const bn_t b)
-{
-    int64_t c = 0;
-    int i;
-    for (i = 0; i < BN_LIMBS; i++) {
-        c    += (int64_t)a[i] - b[i];
-        r[i]  = (uint32_t)c;
-        c   >>= 32;
-    }
-}
-
-/* r = a + b mod n, with a, b < n */
-static void bn_addmod(bn_t r, const bn_t a, const bn_t b, const bn_t n)
-{
-    uint32_t carry = bn_add(r, a, b);
-    if (carry || bn_ge(r, n))
-        bn_sub(r, r, n);
-}
-
-/* r = a * b mod n (double and add), r must not alias a or b */
-static void bn_mulmod(bn_t r, const bn_t a, const bn_t b, const bn_t n)
-{
-    int i;
-    memset(r, 0, sizeof(bn_t));
-    for (i = BN_LIMBS * 32 - 1; i >= 0; i--) {
-        bn_addmod(r, r, r, n);
-        if ((b[i >> 5] >> (i & 31)) & 1)
-            bn_addmod(r, r, a, n);
-    }
-}
-
-/* r = base ^ e mod n */
-static void bn_modexp(bn_t r, const bn_t base, const bn_t e, const bn_t n)
-{
-    bn_t acc, tmp;
-    int i;
-    memset(acc, 0, sizeof(acc));
-    acc[0] = 1;
-    for (i = BN_LIMBS * 32 - 1; i >= 0; i--) {
-        bn_mulmod(tmp, acc, acc, n);
-        if ((e[i >> 5] >> (i & 31)) & 1)
-            bn_mulmod(acc, tmp, base, n);
-        else
-            memcpy(acc, tmp, sizeof(acc));
-    }
-    memcpy(r, acc, sizeof(bn_t));
-}
-
-/* RSASSA-PKCS1-v1_5 / SHA-1 signature of data, 128 bytes into sig */
-static int ppm_rsa_sign(const uint8_t *data, int size, uint8_t sig[PPM_SIG_LEN])
-{
-    uint8_t em[PPM_SIG_LEN];
-    struct AVSHA *sha = av_sha_alloc();
-    bn_t m, n, d, s;
-    int pad;
-
-    if (!sha)
-        return AVERROR(ENOMEM);
-    av_sha_init(sha, 160);
-    av_sha_update(sha, data, size);
-
-    pad = PPM_SIG_LEN - 3 - sizeof(ppm_sha1_prefix) - 20;
-    em[0] = 0x00;
-    em[1] = 0x01;
-    memset(em + 2, 0xff, pad);
-    em[2 + pad] = 0x00;
-    memcpy(em + 3 + pad, ppm_sha1_prefix, sizeof(ppm_sha1_prefix));
-    av_sha_final(sha, em + 3 + pad + sizeof(ppm_sha1_prefix));
-    av_free(sha);
-
-    bn_load(m, em);
-    bn_load(n, ppm_rsa_n);
-    bn_load(d, ppm_rsa_d);
-    bn_modexp(s, m, d, n);
-    bn_store(sig, s);
-    return 0;
-}
 
 /* ---------- frame encoding ---------- */
 
@@ -636,7 +511,8 @@ static int ppm_write_trailer(AVFormatContext *s)
         memcpy(p + 32, bgm, bgm_len);
     av_free(bgm);
 
-    ret = ppm_rsa_sign(buf, file_size - PPM_TRAILER, buf + file_size - PPM_TRAILER);
+    ret = ff_flipnote_rsa_sign(ppm_rsa_n, ppm_rsa_d, PPM_SIG_LEN, 160, buf,
+                          file_size - PPM_TRAILER, buf + file_size - PPM_TRAILER);
     if (ret >= 0)
         avio_write(s->pb, buf, file_size);
     av_free(buf);

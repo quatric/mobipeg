@@ -252,7 +252,7 @@ OBJS-$(CONFIG_FLAC_MUXER)                += flacenc.o flacenc_header.o \
                                             vorbis/comment/writer.o
 OBJS-$(CONFIG_FLIC_DEMUXER)              += flic.o
 OBJS-$(CONFIG_FLIPNOTE_PPM_DEMUXER)      += ppmflipdec.o
-OBJS-$(CONFIG_FLIPNOTE_PPM_MUXER)        += ppmflipenc.o
+OBJS-$(CONFIG_FLIPNOTE_PPM_MUXER)        += ppmflipenc.o flipnote_rsa.o
 OBJS-$(CONFIG_FLV_DEMUXER)               += flvdec.o
 OBJS-$(CONFIG_LIVE_FLV_DEMUXER)          += flvdec.o
 OBJS-$(CONFIG_FLV_MUXER)                 += flvenc.o
@@ -378,7 +378,7 @@ OBJS-$(CONFIG_KTX_MUXER)                 += ktxenc.o
 OBJS-$(CONFIG_KTX_DEMUXER)               += ktxdec.o
 OBJS-$(CONFIG_KUX_DEMUXER)               += flvdec.o
 OBJS-$(CONFIG_KWZ_DEMUXER)               += kwzdec.o
-OBJS-$(CONFIG_KWZ_MUXER)                 += kwzenc.o
+OBJS-$(CONFIG_KWZ_MUXER)                 += kwzenc.o flipnote_rsa.o
 OBJS-$(CONFIG_KVAG_DEMUXER)              += kvag.o
 OBJS-$(CONFIG_KVAG_MUXER)                += kvag.o rawenc.o
 OBJS-$(CONFIG_LAF_DEMUXER)               += lafdec.o

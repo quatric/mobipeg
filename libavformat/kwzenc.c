@@ -54,6 +54,7 @@
 #include "libavutil/time.h"
 #include "libavcodec/jpegtables.h"
 #include "avformat.h"
+#include "flipnote_rsa.h"
 #include "internal.h"
 #include "mux.h"
 
@@ -141,12 +142,6 @@ static const int16_t kwz_step_table[80] = {
     5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899
 };
 
-/* DigestInfo header of a SHA-256 PKCS#1 v1.5 signature */
-static const uint8_t kwz_sha256_prefix[19] = {
-    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
-    0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
-};
-
 /* SHA-256 of the private key Flipnote Studio 3D signs with, as published in
  * the format documentation */
 static const uint8_t kwz_key_sha256[32] = {
@@ -209,130 +204,17 @@ typedef struct KwzMuxContext {
 
 /* ---------- RSA-2048 signature ---------- */
 
-static int kwz_bn_ge(const uint32_t *a, const uint32_t *b)
-{
-    int i;
-    for (i = KWZ_LIMBS - 1; i >= 0; i--) {
-        if (a[i] != b[i])
-            return a[i] > b[i];
-    }
-    return 1;
-}
-
-static void kwz_bn_sub(uint32_t *r, const uint32_t *a, const uint32_t *b)
-{
-    int64_t c = 0;
-    int i;
-    for (i = 0; i < KWZ_LIMBS; i++) {
-        c    += (int64_t)a[i] - b[i];
-        r[i]  = (uint32_t)c;
-        c   >>= 32;
-    }
-}
-
-/* r = 2 * a mod n, with a < n */
-static void kwz_bn_dbl(uint32_t *r, const uint32_t *a, const uint32_t *n)
-{
-    uint32_t carry = 0;
-    int i;
-    for (i = 0; i < KWZ_LIMBS; i++) {
-        uint32_t v = a[i];
-        r[i]  = (v << 1) | carry;
-        carry = v >> 31;
-    }
-    if (carry || kwz_bn_ge(r, n))
-        kwz_bn_sub(r, r, n);
-}
-
-/* Montgomery product r = a * b / 2^2048 mod n */
-static void kwz_bn_mont(uint32_t *r, const uint32_t *a, const uint32_t *b,
-                        const uint32_t *n, uint32_t n0)
-{
-    uint32_t t[KWZ_LIMBS + 2] = { 0 };
-    int i, j;
-
-    for (i = 0; i < KWZ_LIMBS; i++) {
-        uint64_t c = 0;
-        uint32_t m;
-        for (j = 0; j < KWZ_LIMBS; j++) {
-            c    += (uint64_t)a[j] * b[i] + t[j];
-            t[j]  = (uint32_t)c;
-            c   >>= 32;
-        }
-        c += t[KWZ_LIMBS];
-        t[KWZ_LIMBS]     = (uint32_t)c;
-        t[KWZ_LIMBS + 1] = (uint32_t)(c >> 32);
-
-        m = t[0] * n0;
-        c = ((uint64_t)m * n[0] + t[0]) >> 32;
-        for (j = 1; j < KWZ_LIMBS; j++) {
-            c        += (uint64_t)m * n[j] + t[j];
-            t[j - 1]  = (uint32_t)c;
-            c       >>= 32;
-        }
-        c += t[KWZ_LIMBS];
-        t[KWZ_LIMBS - 1] = (uint32_t)c;
-        t[KWZ_LIMBS]     = t[KWZ_LIMBS + 1] + (uint32_t)(c >> 32);
-    }
-    if (t[KWZ_LIMBS] || kwz_bn_ge(t, n))
-        kwz_bn_sub(t, t, n);
-    memcpy(r, t, KWZ_LIMBS * sizeof(*r));
-}
-
 /* RSASSA-PKCS1-v1_5 / SHA-256 signature of data, 256 bytes into sig */
 static int kwz_rsa_sign(const KwzMuxContext *c, const uint8_t *data, int64_t size,
                         uint8_t sig[KWZ_SIG_LEN])
 {
-    uint8_t em[KWZ_SIG_LEN];
-    uint32_t m[KWZ_LIMBS], one[KWZ_LIMBS] = { 1 }, rr[KWZ_LIMBS] = { 1 };
-    uint32_t x[KWZ_LIMBS], acc[KWZ_LIMBS];
-    const uint32_t *n = c->rsa_n;
-    struct AVSHA *sha = av_sha_alloc();
-    uint32_t n0 = n[0];
-    int pad, i;
+    uint8_t n[KWZ_SIG_LEN], d[KWZ_SIG_LEN];
 
-    if (!sha)
-        return AVERROR(ENOMEM);
-    av_sha_init(sha, 256);
-    while (size > 0) {
-        int chunk = FFMIN(size, 1 << 20);
-        av_sha_update(sha, data, chunk);
-        data += chunk;
-        size -= chunk;
+    for (int i = 0; i < KWZ_LIMBS; i++) {
+        AV_WB32(n + 4 * i, c->rsa_n[KWZ_LIMBS - 1 - i]);
+        AV_WB32(d + 4 * i, c->rsa_d[KWZ_LIMBS - 1 - i]);
     }
-
-    pad = KWZ_SIG_LEN - 3 - sizeof(kwz_sha256_prefix) - 32;
-    em[0] = 0x00;
-    em[1] = 0x01;
-    memset(em + 2, 0xff, pad);
-    em[2 + pad] = 0x00;
-    memcpy(em + 3 + pad, kwz_sha256_prefix, sizeof(kwz_sha256_prefix));
-    av_sha_final(sha, em + 3 + pad + sizeof(kwz_sha256_prefix));
-    av_free(sha);
-
-    for (i = 0; i < KWZ_LIMBS; i++)
-        m[KWZ_LIMBS - 1 - i] = AV_RB32(em + 4 * i);
-
-    /* n0 = -1 / n mod 2^32 */
-    for (i = 0; i < 5; i++)
-        n0 *= 2 - n[0] * n0;
-    n0 = -n0;
-    /* rr = 2^4096 mod n */
-    for (i = 0; i < 2 * 32 * KWZ_LIMBS; i++)
-        kwz_bn_dbl(rr, rr, n);
-
-    kwz_bn_mont(x, m, rr, n, n0);
-    kwz_bn_mont(acc, one, rr, n, n0);
-    for (i = 32 * KWZ_LIMBS - 1; i >= 0; i--) {
-        kwz_bn_mont(acc, acc, acc, n, n0);
-        if ((c->rsa_d[i >> 5] >> (i & 31)) & 1)
-            kwz_bn_mont(acc, acc, x, n, n0);
-    }
-    kwz_bn_mont(acc, acc, one, n, n0);
-
-    for (i = 0; i < KWZ_LIMBS; i++)
-        AV_WB32(sig + 4 * i, acc[KWZ_LIMBS - 1 - i]);
-    return 0;
+    return ff_flipnote_rsa_sign(n, d, KWZ_SIG_LEN, 256, data, size, sig);
 }
 
 /* Read one DER element: returns its tag, sets the value and moves *p past it. */
