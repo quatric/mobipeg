@@ -151,6 +151,7 @@ Requires a `--enable-libx264` build against the
 | `--mobi-skip N` | Macroblock skip error threshold (default 512). `0` keeps every residual (marginally better at low QP); higher freezes near-static blocks to stop dither flicker. |
 | `--mobi-intra-only` | Every frame is an I-frame. |
 | `--mobi-qyx N` | Coarsen the quantizer by N whole qy tiers (QP + 6*N, 0-8). Legacy — plain `--qp` now covers the format's full range, leave at 0. |
+| `--jobs N` | `mo`, `moflex`, `mods`: encode the video as chunks, N at a time, each decoding its own stretch of the source, then join them by stream copy. `0` (default) = one per two CPU cores, `1` = encode in one piece. Chunks are whole keyframe intervals (about 3-6 s, 10-30 s for `.mods`, which gains a keyframe per chunk), so the output matches a one-piece encode frame for frame, within ~0.3% in size. Clips under twice the chunk length, `--multipass 2`, `--ffmpeg-args`, 3D and FastAudio `.mods` always encode in one piece. |
 
 ## RVID-only (`rvid`)
 

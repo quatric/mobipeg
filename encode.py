@@ -529,6 +529,49 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
     return gop, count
 
 
+def default_jobs():
+    """How many chunk encoders to run at once: one per two cores, each on two
+    encoder threads.  A Mobiclip picture is small, so one encoder keeps only
+    four or five cores busy whatever its thread count; on a 10-core machine
+    six two-thread encoders finished a 3-minute .mo in 2.8 s against 4.4 s
+    for one encoder on every core."""
+    return max(2, (os.cpu_count() or 2) // 2)
+
+
+def encode_chunked(chunk_cmd, workdir, ext, n_chunks, jobs):
+    """Encode the video as n_chunks independent pieces, `jobs` at a time.
+
+    chunk_cmd(i, dst) is the command that encodes chunk i (0-based) to dst;
+    each one decodes and filters its own stretch of the source, so the
+    decoding is shared out as well as the encoding and nothing passes
+    through this script.  Returns the path of an ffconcat list of the
+    encoded chunks, in order, or None if any of them failed (the caller then
+    encodes the whole video in one go).  Every chunk starts with a keyframe
+    and carries no state over from the one before, so the chunks join by
+    plain stream copy."""
+    import concurrent.futures
+
+    os.makedirs(workdir, exist_ok=True)
+    dsts = [os.path.join(workdir, f"chunk{i:05d}.{ext}") for i in range(n_chunks)]
+
+    def run_chunk(i):
+        r = subprocess.run(chunk_cmd(i, dsts[i]))
+        return r.returncode == 0 and os.path.isfile(dsts[i]) and os.path.getsize(dsts[i]) > 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        ok = all(pool.map(run_chunk, range(n_chunks)))
+    if not ok:
+        print("warning: chunked encode failed; encoding in one piece")
+        return None
+    listfile = os.path.join(workdir, "chunks.ffconcat")
+    with open(listfile, "w", encoding="utf-8") as f:
+        f.write("ffconcat version 1.0\n")
+        for dst in dsts:
+            path = os.path.abspath(dst).replace("'", "'\\''")
+            f.write(f"file '{path}'\n")
+    return listfile
+
+
 def package_cia(parsed):
     """Package an already-encoded .moflex into a 3DS video CIA.
 
@@ -888,6 +931,12 @@ def main():
         dest="ffmpeg_args",
         default="",
         help="Extra parameters appended verbatim to the ffmpeg command line, just before the output file. Parsed like a shell word list, so quoting works: --ffmpeg-args '-t 5 -af volume=0.5'. Because ffmpeg lets the last occurrence of an option win, these override the format preset. Applies to encode, decode and play; internal analysis passes (the mods keyframe probe and --roundtrip validation) are left alone.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=0,
+        help="MobiClip (.mo, .moflex, .mods): encode the video as this many chunks at once, then join them (0 = one per two CPU cores, 1 = encode in one piece). Each chunk is a whole number of keyframe intervals, so the result matches a one-piece encode in size and quality. Two-pass, --ffmpeg-args, 3D and FastAudio .mods always encode in one piece.",
     )
 
     # --- fmt=cia: package an already-encoded .moflex into a 3DS video CIA. ---
@@ -1840,6 +1889,10 @@ def main():
                     enc_opts.extend(["-sx_ltp", "0"])
                 if audio_rate > 0:
                     enc_opts.extend(["-ar", str(audio_rate)])
+    # enc_opts[vopt_start:vopt_end] is the video encoder's own options, which
+    # a chunked MobiClip encode hands to the chunk encoders; chunk_unit is the
+    # keyframe interval the chunks are cut on.
+    vopt_start, vopt_end, chunk_unit = len(enc_opts), None, 1
     if cvc:
         enc_opts.extend(["-c:v", cvc])
 
@@ -1850,6 +1903,7 @@ def main():
         if audio == "fastaudio":
             enc_opts.extend(["-sc_threshold", "0"])
         enc_opts.extend(mobi_rc)
+        vopt_end = len(enc_opts)
     elif fmt in [
         "mo",
         "moflex",
@@ -1877,6 +1931,8 @@ def main():
             gop, count = kf
             enc_opts.extend(["-g", str(gop)])
             print(f"   keyframes: ~{count} evenly spaced (-g {gop}, scene cuts kept)")
+        chunk_unit = kf[0] if kf else MOBICLIP_KEYINT_MAX
+        vopt_end = len(enc_opts)
 
         if fmt in (
             "moflex",
@@ -2267,7 +2323,86 @@ def main():
             except OSError:
                 pass
     else:
-        run_cmd(base + extra_args + [container]) or sys.exit(1)
+        chunk_list = None
+        jobs = parsed.jobs if parsed.jobs > 0 else default_jobs()
+        if (
+            vopt_end is not None
+            and mode == "vid"
+            and jobs > 1
+            and not extra_args
+            and fmt in ("mo", "moflex", "smoflex", "super_moflex", "mods")
+            # FastAudio .mods keeps a single keyframe; chunks would add more.
+            and not (fmt == "mods" and audio == "fastaudio")
+        ):
+            # .mods has no periodic keyframes, so every chunk adds one: keep
+            # its chunks longer.
+            lo, hi = (10.0, 30.0) if fmt == "mods" else (3.0, 6.0)
+            dur = probe_duration(inp)
+            if fps_ovr:
+                out_fps = Fraction(fps_ovr)
+            elif fmt == "mo":
+                out_fps = Fraction(30000, 1001)
+            else:
+                src_fps = probe_fps(inp)
+                out_fps = Fraction(src_fps).limit_denominator(1001) if src_fps else None
+            target = min(hi, max(lo, dur / jobs)) if dur else 0
+            if dur and out_fps and dur >= 2 * target:
+                chunk_frames = max(1, round(target * out_fps / chunk_unit)) * chunk_unit
+                # The last chunk runs to the end of the video, so it may be up
+                # to twice as long: that way it can never start past the end
+                # of a video a little shorter than its container.
+                n_chunks = max(1, int(dur * out_fps) // chunk_frames)
+                workdir = tempfile.mkdtemp(
+                    prefix=".chunks_", dir=os.path.dirname(os.path.abspath(container))
+                )
+                atexit.register(shutil.rmtree, workdir, True)
+                vopts = enc_opts[vopt_start:vopt_end]
+
+                def chunk_cmd(i, dst):
+                    # An input -ss seeks exactly (ffmpeg decodes from the
+                    # keyframe before it and drops what comes earlier), so
+                    # chunk i starts on output frame i * chunk_frames.
+                    start = Fraction(i * chunk_frames) / out_fps
+                    return (
+                        [FFENC, "-nostdin", "-y", "-v", "error"]
+                        + (["-ss", f"{float(start):.6f}"] if i else [])
+                        + input_fmt(inp)
+                        + ["-i", inp]
+                        + vf
+                        + ["-an", "-sn", "-dn"]
+                        + (["-frames:v", str(chunk_frames)] if i < n_chunks - 1 else [])
+                        + vopts
+                        + ["-threads", "2"]
+                        + (["-mo_audio", "none"] if fmt in ("mo", "mods") else [])
+                        + [dst]
+                    )
+
+                print(f">> encoding video in {n_chunks} chunks, {jobs} at a time")
+                chunk_list = encode_chunked(chunk_cmd, workdir, out_ext, n_chunks, jobs)
+        if chunk_list:
+            # Mux exactly as the one-piece encode would, but take the video
+            # from the joined chunks: the concat input goes after any extra
+            # inputs so their stream indices stay put.
+            k = 1 + extra_inputs.count("-i")
+            fo = enc_opts[:vopt_start] + enc_opts[vopt_end:]
+            for i in range(len(fo) - 1):
+                if fo[i] == "-map" and fo[i + 1] == "0:v":
+                    fo[i + 1] = f"{k}:v"
+            if "-map" not in fo:
+                fo = ["-map", f"{k}:v"] + ([] if "-an" in fo else ["-map", "0:a:0?"]) + fo
+            print(">> joining chunks")
+            run_cmd(
+                [FFENC, "-nostdin", "-y"]
+                + input_fmt(inp)
+                + ["-i", inp]
+                + extra_inputs
+                + ["-f", "concat", "-safe", "0", "-i", chunk_list]
+                + fo
+                + ["-c:v", "copy", container]
+            ) or sys.exit(1)
+            shutil.rmtree(os.path.dirname(chunk_list), True)
+        else:
+            run_cmd(base + extra_args + [container]) or sys.exit(1)
 
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
