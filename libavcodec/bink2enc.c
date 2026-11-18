@@ -41,7 +41,8 @@
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "encode.h"
-#include "bink2encdata.h"
+#include "bink2data.h"
+#include "bink2dsp.h"
 
 /* The analysis must round exactly as the reference does: no fused
  * multiply-adds. */
@@ -154,13 +155,10 @@ static void idct1d(const int *src, int sstep, int *dst, int dstep, int bias, int
     dst[7 * dstep] = (tmp0 - tmp9 + bias) >> shift;
 }
 
+/* Reconstruction uses the reference decoder's exact transform. */
 static void idct_int(int c[64])
 {
-    int tmp[64];
-    for (int i = 0; i < 8; i++)
-        idct1d(c + 8 * i, 1, tmp + i, 8, 0, 0);
-    for (int i = 0; i < 8; i++)
-        idct1d(tmp + 8 * i, 1, c + 8 * i, 1, 0, 6);
+    bink2_idct(c);
 }
 
 /* Forward transform: the numerical inverse of the decoder's 1-D IDCT. */
@@ -745,17 +743,6 @@ static void mc_luma16(const B2Plane *r, int xoff, int yoff, Mv mv, uint8_t out[2
     }
 }
 
-static inline int chroma_interp(int e0, int e1, int mode, int shift)
-{
-    int add = shift;
-    switch (mode) {
-    case 0:  return e0;
-    case 1:  return (e0 * 3 + e1 + add) >> shift;
-    case 2:  return (e0 * 2 + e1 * 2 + add) >> shift;
-    default: return (e0 + e1 * 3 + add) >> shift;
-    }
-}
-
 static void mc_chroma8(const B2Plane *r, int xoff, int yoff, Mv mv, uint8_t out[64])
 {
     ptrdiff_t st = r->stride;
@@ -769,24 +756,24 @@ static void mc_chroma8(const B2Plane *r, int xoff, int yoff, Mv mv, uint8_t out[
         for (int y = 0; y < 8; y++)
             for (int x = 0; x < 8; x++) {
                 const uint8_t *o = base + y * st + x;
-                out[y * 8 + x] = chroma_interp(o[0], o[1], mx, 2);
+                out[y * 8 + x] = bink2_chroma_interp(o[0], o[1], mx, 2);
             }
     } else if (!mx) {
         for (int y = 0; y < 8; y++)
             for (int x = 0; x < 8; x++) {
                 const uint8_t *o = base + y * st + x;
-                out[y * 8 + x] = chroma_interp(o[0], o[st], my, 2);
+                out[y * 8 + x] = bink2_chroma_interp(o[0], o[st], my, 2);
             }
     } else {
         int tmp[9 * 8];
         for (int y = 0; y < 9; y++)
             for (int x = 0; x < 8; x++) {
                 const uint8_t *o = base + y * st + x;
-                tmp[y * 8 + x] = chroma_interp(o[0], o[1], mx, 0);
+                tmp[y * 8 + x] = bink2_chroma_interp(o[0], o[1], mx, 0);
             }
         for (int y = 0; y < 8; y++)
             for (int x = 0; x < 8; x++)
-                out[y * 8 + x] = chroma_interp(tmp[y * 8 + x], tmp[(y + 1) * 8 + x], my, 4);
+                out[y * 8 + x] = bink2_chroma_interp(tmp[y * 8 + x], tmp[(y + 1) * 8 + x], my, 4);
     }
 }
 
@@ -1183,15 +1170,16 @@ static void intra_cost(Bink2EncContext *s, SliceCtx *sc, int bx, int by, int top
     *osse = sse;
 }
 
+/* The reference decoder keeps only the picture rounded up to 16 luma
+ * pixels, so prediction may not reach past that. */
 static int mv_valid_blk(const Bink2EncContext *s, int bx, int by, int blk, Mv mv)
 {
-    const B2Frame *r = &s->ref;
-    int aw = r->p[0].stride, ah = r->p[0].rows;
+    int aw = FFALIGN(s->w, 16), ah = FFALIGN(s->h, 16);
     int dx = mv.x & 1 ? 2 : 0, ax = mv.x & 1 ? 5 : 0;
     int dy = mv.y & 1 ? 2 : 0, ay = mv.y & 1 ? 5 : 0;
     int xoff = bx * 32 + (blk & 1) * 16, yoff = by * 32 + (blk & 2) * 8;
     int sx = xoff + (mv.x >> 1), sy = yoff + (mv.y >> 1);
-    int cw = r->p[1].stride, chh = r->p[1].rows;
+    int cw = aw >> 1, chh = ah >> 1;
     int cx, cy, addx, addy;
 
     if (!(sx - dx >= 0 && sx - dx + ax + 16 <= aw && sy - dy >= 0 && sy - dy + ay + 16 <= ah))
@@ -1347,7 +1335,7 @@ static void plan_residual(Bink2EncContext *s, int bx, int by, const Mv *mvs,
             memcpy(c, plan->y[k].deq, sizeof(c));
         else
             memset(c, 0, sizeof(c));
-        c[0] = a[k] * 8;
+        c[0] = a[k] * 8 + 32;
         idct_int(c);
         for (int y = 0; y < 8; y++)
             for (int x = 0; x < 8; x++) {
@@ -1395,7 +1383,7 @@ static void plan_residual(Bink2EncContext *s, int bx, int by, const Mv *mvs,
                 memcpy(c, out[k].deq, sizeof(c));
             else
                 memset(c, 0, sizeof(c));
-            c[0] = ca[k] * 8;
+            c[0] = ca[k] * 8 + 32;
             idct_int(c);
             for (int y = 0; y < 8; y++)
                 for (int x = 0; x < 8; x++) {
@@ -1525,7 +1513,12 @@ static void decide_inter(Bink2EncContext *s, SliceCtx *sc, int bx, int by, int t
             plan_slot ^= 1;   /* keep this plan; plan into the other slot next */
         }
     }
-    {
+    /* The reference decoder never stores the part of the last macroblock row
+     * and column past the picture rounded up to 16 pixels, and takes the DCs
+     * of inter blocks there from whatever memory it finds. An intra block
+     * there predicts from those DCs and can then shade its visible
+     * neighbours through the DC smoothing, so keep such macroblocks inter. */
+    if (bx * 32 + 32 <= FFALIGN(s->w, 16) && by * 32 + 32 <= FFALIGN(s->h, 16)) {
         size_t bits;
         double sse;
         intra_cost(s, sc, bx, by, top, left, cbp_y, cbp_v, cbp_u, &bits, &sse);
@@ -1591,7 +1584,7 @@ static void encode_residual(Bink2EncContext *s, BW *bw, int bx, int by,
             memcpy(c, plan->y[k].deq, sizeof(c));
         else
             memset(c, 0, sizeof(c));
-        c[0] = a[k] * 8;
+        c[0] = a[k] * 8 + 32;
         idct_int(c);
         for (int y = 0; y < 8; y++)
             for (int x = 0; x < 8; x++) {
@@ -1635,7 +1628,7 @@ static void encode_residual(Bink2EncContext *s, BW *bw, int bx, int by,
                     memcpy(c, blocks[k].deq, sizeof(c));
                 else
                     memset(c, 0, sizeof(c));
-                c[0] = ca[k] * 8;
+                c[0] = ca[k] * 8 + 32;
                 idct_int(c);
                 for (int y = 0; y < 8; y++)
                     for (int x = 0; x < 8; x++)

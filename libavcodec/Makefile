@@ -297,6 +297,7 @@ OBJS-$(CONFIG_BETHSOFTVID_DECODER)     += bethsoftvideo.o
 OBJS-$(CONFIG_BFI_DECODER)             += bfi.o
 OBJS-$(CONFIG_BINK_DECODER)            += bink.o binkdsp.o
 OBJS-$(CONFIG_BINK_ENCODER)            += binkvideoenc.o
+OBJS-$(CONFIG_BINK2_DECODER)           += bink2dec.o
 OBJS-$(CONFIG_BINK2_ENCODER)           += bink2enc.o
 OBJS-$(CONFIG_BINKAUDIO_DCT_DECODER)   += binkaudio.o
 OBJS-$(CONFIG_BINKAUDIO_DCT_ENCODER)   += binkaudioenc.o

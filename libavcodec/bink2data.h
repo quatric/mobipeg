@@ -1,5 +1,5 @@
 /*
- * Bink 2 (KB2j) video encoder tables
+ * Bink 2 video tables
  * Copyright (C) 2026 quatric <quatricsoftware@gmail.com>
  *
  * Ported from bink2enc, Copyright (C) 2026 Simon Berda and contributors.
@@ -19,8 +19,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef AVCODEC_BINK2ENCDATA_H
-#define AVCODEC_BINK2ENCDATA_H
+#ifndef AVCODEC_BINK2DATA_H
+#define AVCODEC_BINK2DATA_H
 
 #include <stdint.h>
 
@@ -182,4 +182,4 @@ static const uint8_t mv_codes[] = {0x01, 0x06, 0x0C, 0x1C, 0x18, 0x38, 0x58, 0x7
 
 static const uint8_t mv_bits[] = {1, 3, 5, 5, 7, 7, 7, 7, 7, 7, 7, 7, 5, 5, 3, 4};
 
-#endif /* AVCODEC_BINK2ENCDATA_H */
+#endif /* AVCODEC_BINK2DATA_H */

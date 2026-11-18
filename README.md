@@ -16,7 +16,7 @@ such as audio, video, subtitles and related metadata.
 | Format | Container | Platform | Encode | Decode |
 |--------|-----------|----------|--------|--------|
 | Bink 1 (BIKi) | `.bik` | PC games (RAD Game Tools) | ✅ | ✅ |
-| Bink 2 (KB2j) | `.bk2` | PC and console games (RAD Game Tools) | ✅ | ❌ |
+| Bink 2 (KB2j) | `.bk2` | PC and console games (RAD Game Tools) | ✅ | ✅ |
 | BPK1 | `.bpk`, `.bpk1`, `.apd` | Nintendo 3DS Swapdoodle / Swapnote | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
 | Factor 5 DivX | `.vid` | GameCube (Factor 5) | ✅ | ✅ |
@@ -357,9 +357,11 @@ video, `-quality:a` the audio. `decode` reads `.bik` files.
 
 `bink2` writes Bink 2 movies (revision `KB2j`). The video encoder is
 [bink2enc](https://github.com/SBerda/bink2enc) by Simon Berda, ported from
-Rust into FFmpeg as `-c:v bink2video`; its output is byte for byte what
-bink2enc writes for the same picture and settings. bink2enc is AGPL-3.0, so
-the encoder needs an FFmpeg built with `--enable-gpl --enable-version3` (see
+Rust into FFmpeg as `-c:v bink2video`. Its picture reconstruction was then
+changed to follow RAD's own decoder exactly (transform, motion compensation,
+DC smoothing and deblocking), so the files decode pixel for pixel the same in
+RAD's `bink2w32.dll` as in FFmpeg. bink2enc is AGPL-3.0, so the encoder needs
+an FFmpeg built with `--enable-gpl --enable-version3` (see
 [Building](#building)), and binaries that include it are AGPL-licensed.
 
 - Video keeps the source size and frame rate, converted to full-range YUV.
@@ -372,10 +374,18 @@ the encoder needs an FFmpeg built with `--enable-gpl --enable-version3` (see
   is coded as a skipped frame.
 - Audio is the same Bink DCT audio as `bink`, mono by default.
 
-FFmpeg has no Bink 2 decoder, so `decode` cannot read `.bk2` files; FFmpeg
-only probes and remuxes them. The files have not been tried in RAD's own
-player. The slices are encoded in parallel: a 1280x720 clip encodes at about
-100 frames a second.
+The Bink 2 decoder (`bink2video`, revisions `KB2a` to `KB2n`) started as a
+port of the one in [NihAV](https://nihav.org) by Kostya Shishkov and was then
+matched against RAD's `bink2w32.dll` under Wine: `KB2n` files from RAD's
+current Bink 2 encoder decode the same as in RAD's player. Older revisions
+follow NihAV and have not been compared with RAD. The one difference left is in the
+part of the last macroblock row or column past the picture rounded up to 16
+pixels, which RAD's decoder never stores and reads back from uninitialised
+memory; FFmpeg takes it as zero, and the encoder never codes an intra
+macroblock there in an inter frame, so its own files are not affected. The
+decoder needs the same `--enable-gpl --enable-version3` build, and `decode`
+reads `.bk2` files. The slices are encoded in parallel: a 1280x720 clip
+encodes at about 100 frames a second.
 
 ```sh
 python3 encode.py bink2 bink input.mp4

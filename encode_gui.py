@@ -80,7 +80,7 @@ DECODER_FAMILIES = [
     ("Swapdoodle / Swapnote", "*.bpk *.bpk1 *.apd"),
     ("Flipnote", "*.ppm *.kwz"),
     ("DS DPG video", "*.dpg"),
-    ("Bink", "*.bik"),
+    ("Bink", "*.bik *.bk2"),
     ("Nintendo DSP-ADPCM", "*.dsp"),
     ("Nintendo streams", "*.brstm *.bfstm *.bcstm"),
     ("Wii BNS / AST", "*.bns *.ast"),

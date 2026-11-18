@@ -72,10 +72,12 @@ There are a handful of files under other licensing terms, namely:
   You must also indicate any changes including additions and deletions to
   those three files in the documentation.
 * `tests/reference.pnm` is under the expat license.
-* `libavcodec/bink2enc.c` and `libavcodec/bink2encdata.h`, the Bink 2 encoder
-  ported from bink2enc, are under the GNU Affero General Public License,
-  version 3 or later. configure builds them only with `--enable-gpl` and
-  `--enable-version3`, and a build that includes them is covered by the AGPL.
+* `libavcodec/bink2enc.c`, `libavcodec/bink2dec.c`, `libavcodec/bink2dsp.h`
+  and `libavcodec/bink2data.h`, the Bink 2 encoder ported from bink2enc and
+  the Bink 2 decoder ported from NihAV, are under the GNU Affero General
+  Public License, version 3 or later. configure builds them only with
+  `--enable-gpl` and `--enable-version3`, and a build that includes them is
+  covered by the AGPL.
 
 
 ## External libraries

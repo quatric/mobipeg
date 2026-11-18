@@ -187,8 +187,8 @@ another (up to 65535 Hz).
 | `--hq` | Quantiser 6. |
 
 The encoder is a port of bink2enc and is AGPL-3.0, so FFmpeg must be built with
-`--enable-gpl --enable-version3` for it. FFmpeg cannot decode Bink 2, so
-`decode` does not read `.bk2` files.
+`--enable-gpl --enable-version3` for it, as is the Bink 2 decoder (ported
+from NihAV) that lets `decode` read `.bk2` files.
 
 ## RVID-only (`rvid`)
 
