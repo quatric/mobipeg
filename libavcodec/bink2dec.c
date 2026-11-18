@@ -243,6 +243,73 @@ static void put_mb4(uint8_t *dst, ptrdiff_t stride, IBlocks blk, int add)
     }
 }
 
+/* Edge taps inside an inter residual: none between two blocks with many
+ * coefficients, none between two DC-only blocks whose DCs are close, and
+ * otherwise by each side's coefficient class. */
+static int residual_edge_taps(uint16_t a, uint16_t b)
+{
+    int ca = a >> 13 & 3, cb = b >> 13 & 3;
+    if ((a | b) < 0x2000)
+        return 0;
+    if ((a & b) >= 0x6000 && (unsigned)((a ^ 0x1000) - (b ^ 0x1000) + 0x20) < 0x41)
+        return 0;
+    return (ca >= 2 ? 3 : ca) | (cb >= 2 ? 3 : cb) << 2;
+}
+
+static void residual_filter_edge(int *s, ptrdiff_t step, ptrdiff_t next, int taps)
+{
+    for (int i = 0; i < 8; i++, s += next) {
+        int d = B2W16(s[0] - s[-step]);
+        int d1 = B2W16(d + 4) >> 3, d2 = B2W16(d + 2) >> 2;
+        if (taps & 2) s[-2 * step] = B2W16(s[-2 * step] + d1);
+        if (taps & 1) s[-step]     = B2W16(s[-step] + d2);
+        if (taps & 4) s[0]         = B2W16(s[0] - d2);
+        if (taps & 8) s[step]      = B2W16(s[step] - d1);
+    }
+}
+
+/* Add an inter residual of nq 16x16 quarters (blocks and their residual
+ * classes, cls, in decoding order) to the prediction at dst. Unless the
+ * frame turns it off (0x40000, or 0x4000 / 0x8000 for one direction), the
+ * reference decoder first smooths the edges between the residual's 8x8
+ * blocks, classed by their number of coefficients like intra blocks. */
+static void put_residual(uint8_t *dst, ptrdiff_t stride, IBlocks *blk, int nq,
+                         const uint16_t *cls, uint32_t flags)
+{
+    int res[32 * 32];
+    uint16_t grid[4][4];
+    int n = nq == 4 ? 4 : 2;     /* 8x8 blocks across */
+
+    for (int i = 0; i < nq * 4; i++) {
+        int q = i >> 2, b = i & 3;
+        int x8 = (q & 1) * 2 + (b & 1), y8 = (q >> 1) * 2 + (b >> 1);
+        bink2_idct(blk[q][b]);
+        grid[y8][x8] = cls[i];
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+                res[(y8 * 8 + y) * 32 + x8 * 8 + x] = blk[q][b][y * 8 + x];
+    }
+    if (!(flags & 0x40000)) {
+        if (!(flags & 0x4000))
+            for (int y8 = 0; y8 < n; y8++)
+                for (int x8 = 1; x8 < n; x8++) {
+                    int taps = residual_edge_taps(grid[y8][x8 - 1], grid[y8][x8]);
+                    if (taps)
+                        residual_filter_edge(res + y8 * 8 * 32 + x8 * 8, 1, 32, taps);
+                }
+        if (!(flags & 0x8000))
+            for (int x8 = 0; x8 < n; x8++)
+                for (int y8 = 1; y8 < n; y8++) {
+                    int taps = residual_edge_taps(grid[y8 - 1][x8], grid[y8][x8]);
+                    if (taps)
+                        residual_filter_edge(res + y8 * 8 * 32 + x8 * 8, 32, 1, taps);
+                }
+    }
+    for (int y = 0; y < n * 8; y++)
+        for (int x = 0; x < n * 8; x++)
+            dst[y * stride + x] = av_clip_uint8(dst[y * stride + x] + res[y * 32 + x]);
+}
+
 static void put_mb4_old(uint8_t *dst, ptrdiff_t stride, FBlocks blk, int add)
 {
     for (int b = 0; b < 4; b++) {
@@ -687,7 +754,8 @@ static int decode_chroma_intra(GetBitContext *gb, uint32_t prev_cbp, int q, IBlo
 }
 
 static int decode_luma_inter(GetBitContext *gb, uint32_t prev_cbp, int q, IBlocks dst[4],
-                             uint32_t edge_state, DCInfo *dc, uint32_t *ocbp, uint16_t info[16])
+                             uint32_t edge_state, DCInfo *dc, uint32_t *ocbp, uint16_t info[16],
+                             uint16_t cls[16])
 {
     uint32_t cbp = decode_cbp_luma(gb, prev_cbp, edge_state);
     int lim = edge_state & 0x40000 ? 0x7FF : 0x3FF, ret;
@@ -700,6 +768,7 @@ static int decode_luma_inter(GetBitContext *gb, uint32_t prev_cbp, int q, IBlock
         for (int j = 0; j < 4; j++) {
             dst[i][j][0] = dc->dcs[i * 4 + j] * 8 + 32;
             info[i * 4 + j] = bink2_block_info(dc->dcs[i * 4 + j], nc[j], 0);
+            cls[i * 4 + j]  = bink2_block_info(dc->dcs[i * 4 + j], nc[j], 1) & 0x7FFF;
         }
     }
     *ocbp = cbp;
@@ -707,7 +776,8 @@ static int decode_luma_inter(GetBitContext *gb, uint32_t prev_cbp, int q, IBlock
 }
 
 static int decode_chroma_inter(GetBitContext *gb, uint32_t prev_cbp, int q, IBlocks dst,
-                               uint32_t edge_state, DCInfo *dc, uint32_t *ocbp, uint16_t info[4])
+                               uint32_t edge_state, DCInfo *dc, uint32_t *ocbp, uint16_t info[4],
+                               uint16_t cls[4])
 {
     uint32_t cbp = decode_cbp_chroma(gb, prev_cbp);
     int lim = edge_state & 0x40000 ? 0x7FF : 0x3FF, ret;
@@ -719,6 +789,7 @@ static int decode_chroma_inter(GetBitContext *gb, uint32_t prev_cbp, int q, IBlo
     for (int i = 0; i < 4; i++) {
         dst[i][0] = dc->dcs[i] * 8 + 32;
         info[i] = bink2_block_info(dc->dcs[i], nc[i], 0);
+        cls[i]  = bink2_block_info(dc->dcs[i], nc[i], 1) & 0x7FFF;
     }
     *ocbp = cbp;
     return 0;
@@ -1166,11 +1237,32 @@ static int decode_flags(GetBitContext *gb, uint8_t *dst, int max, int nbits)
     return 0;
 }
 
+/* The reference decoder keeps a motion vector as the position it reads
+ * from, in half pixels, and clamps that to where a 16x16 block can be
+ * read: whole-pixel positions to the picture rounded up to 16, half-pixel
+ * ones to leave room for the filter taps, more tightly in frames without
+ * 0x20000. A half-pixel position clamped to an even value is read as a
+ * whole pixel. */
+static int clamp_mv(int pos, int size, int tight)
+{
+    if (!(pos & 1))
+        return av_clip(pos, 0, 2 * size - 32);
+    if (!tight)
+        return av_clip(pos, 5, 2 * size - 37);
+    if (pos < 4 || pos > 2 * size - 39)
+        return av_clip(pos, 4, 2 * size - 42);
+    return pos;
+}
+
 static int mc_block(Bink2Context *c, int bx, int by, MV mv, int blk_no, int do_alpha)
 {
     int r = c->cur ^ 1, ret;
     int xoff = bx * 32 + (blk_no & 1) * 16, yoff = by * 32 + (blk_no & 2) * 8;
+    int tight = !(c->frame_flags & 0x20000);
     Plane ref;
+
+    mv.x = clamp_mv(2 * xoff + mv.x, c->w16, tight) - 2 * xoff;
+    mv.y = clamp_mv(2 * yoff + mv.y, c->h16, tight) - 2 * yoff;
 
     for (int p = 0; p < (do_alpha ? 4 : 3); p++) {
         int chroma = p == 1 || p == 2;
@@ -1189,12 +1281,17 @@ static int mc_block(Bink2Context *c, int bx, int by, MV mv, int blk_no, int do_a
 }
 
 /* The reference decoder only stores the picture rounded up to 16 luma
- * pixels; the rest of the last macroblock row and column is never written,
- * and the DCs it later takes from the picture there read blank memory.
- * Model that memory as zero. */
+ * pixels. In frames with 0x40000 it reconstructs in place, so the rest of
+ * the last macroblock row and column is never written, and the DCs it later
+ * takes from the picture there read blank memory: model that as zero.
+ * Other frames are reconstructed a whole macroblock at a time, and those
+ * DCs see the decoded pixels. */
 static void clear_hidden(Bink2Context *c, int bx, int by, int do_alpha)
 {
     int w16 = c->w16, h16 = c->h16;
+
+    if (!(c->frame_flags & 0x40000))
+        return;
 
     for (int p = 0; p < (do_alpha ? 4 : 3); p++) {
         int sh = p == 1 || p == 2, n = 32 >> sh;
@@ -1518,17 +1615,18 @@ static int decode_slice(AVCodecContext *avctx, void *arg, int jobnr, int threadn
                     break;
                 if (is_new) {
                     IBlocks y[4] = { { { 0 } } }, u = { { 0 } }, v = { { 0 } };
-                    uint16_t iy[16], iu[4], iv[4];
+                    uint16_t iy[16], iu[4], iv[4], ry[16], ru[4], rv[4];
+                    int chroma_coded;
                     int q = get_new_quant(gb, pred_quant(sc, bx * 2 + 1, is_top));
                     if (q < 0)
                         return q;
                     sc->quants[sc->qpos + bx * 2 + 1] = q;
-                    if ((ret = decode_luma_inter(gb, cbp_y_p, q, y, edge_state_y, &sc->y, &cbp_y_p, iy)) < 0)
+                    if ((ret = decode_luma_inter(gb, cbp_y_p, q, y, edge_state_y, &sc->y, &cbp_y_p, iy, ry)) < 0)
                         return ret;
                     set_info_luma(c, 0, bx, by, iy);
-                    if (get_bits1(gb)) {
-                        if ((ret = decode_chroma_inter(gb, cbp_v_p, q, v, edge_state_y, &sc->v, &cbp_v_p, iv)) < 0 ||
-                            (ret = decode_chroma_inter(gb, cbp_u_p, q, u, edge_state_y, &sc->u, &cbp_u_p, iu)) < 0)
+                    if ((chroma_coded = get_bits1(gb))) {
+                        if ((ret = decode_chroma_inter(gb, cbp_v_p, q, v, edge_state_y, &sc->v, &cbp_v_p, iv, rv)) < 0 ||
+                            (ret = decode_chroma_inter(gb, cbp_u_p, q, u, edge_state_y, &sc->u, &cbp_u_p, iu, ru)) < 0)
                             return ret;
                         set_info_chroma(c, 1, bx, by, iu);
                         set_info_chroma(c, 2, bx, by, iv);
@@ -1537,15 +1635,19 @@ static int decode_slice(AVCodecContext *avctx, void *arg, int jobnr, int threadn
                     }
                     if (do_alpha) {
                         IBlocks a[4] = { { { 0 } } };
-                        uint16_t ia[16];
-                        if ((ret = decode_luma_inter(gb, cbp_a_p, q, a, edge_state_y, &sc->a, &cbp_a_p, ia)) < 0)
+                        uint16_t ia[16], ra[16];
+                        if ((ret = decode_luma_inter(gb, cbp_a_p, q, a, edge_state_y, &sc->a, &cbp_a_p, ia, ra)) < 0)
                             return ret;
                         set_info_luma(c, 3, bx, by, ia);
-                        put_luma(c, 3, bx, by, a, 1);
+                        put_residual(c->planes[c->cur][3] + by * 32 * c->stride[3] + bx * 32,
+                                     c->stride[3], a, 4, ra, frame_flags);
                     }
-                    put_luma(c, 0, bx, by, y, 1);
-                    put_mb4(chroma_dst(c, 1, bx, by), c->stride[1], u, 1);
-                    put_mb4(chroma_dst(c, 2, bx, by), c->stride[2], v, 1);
+                    put_residual(c->planes[c->cur][0] + by * 32 * c->stride[0] + bx * 32,
+                                 c->stride[0], y, 4, ry, frame_flags);
+                    if (chroma_coded) {
+                        put_residual(chroma_dst(c, 1, bx, by), c->stride[1], &u, 1, ru, frame_flags);
+                        put_residual(chroma_dst(c, 2, bx, by), c->stride[2], &v, 1, rv, frame_flags);
+                    }
                 } else {
                     FBlocks y[4] = { { { 0 } } }, u = { { 0 } }, v = { { 0 } };
                     if ((ret = decode_luma_old(gb, cbp_y_p, y, edge_state_y, &sc->y, bx, &q_y_p, 0, &cbp_y_p)) < 0 ||

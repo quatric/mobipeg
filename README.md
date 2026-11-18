@@ -377,11 +377,13 @@ an FFmpeg built with `--enable-gpl --enable-version3` (see
 The Bink 2 decoder (`bink2video`, revisions `KB2a` to `KB2n`) started as a
 port of the one in [NihAV](https://nihav.org) by Kostya Shishkov and was then
 matched against RAD's `bink2w32.dll` under Wine: `KB2n` files from RAD's
-current Bink 2 encoder decode the same as in RAD's player. Older revisions
-are close but not exact: on sample files of `KB2f`, `KB2g` and `KB2i` the
-first 60 frames come within 41 to 50 dB of RAD. Frames without flag
-0x40000, which RAD's current encoder always sets, go through extra in-loop
-filtering in RAD's decoder that FFmpeg does not do yet. The one difference left is in the
+current Bink 2 encoder decode the same as in RAD's player, and so do sample
+files of the older `KB2g` and `KB2i` revisions. Their frames leave out flag
+0x40000, under which RAD's decoder also smooths the edges inside each inter
+residual, clamps motion vectors more tightly near the picture edge, and
+takes picture DCs from whole decoded macroblocks; FFmpeg does the same. The
+old bitstream of `KB2f` and earlier (frames without 0x2000) still differs
+slightly from RAD. The one difference left is in the
 part of the last macroblock row or column past the picture rounded up to 16
 pixels, which RAD's decoder never stores and reads back from uninitialised
 memory; FFmpeg takes it as zero, and the encoder never codes an intra
