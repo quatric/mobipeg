@@ -1640,19 +1640,19 @@ static int bink2_decode_frame(AVCodecContext *avctx, AVFrame *frame,
         }
 
     /* The reference decoder's in-loop post-processing of the newer
-     * bitstream: smooth DC-only intra blocks, then deblock if the frame
-     * carries edge flags. */
+     * bitstream: smooth DC-only intra blocks, then deblock every edge
+     * that the frame does not turn off, by direction (0x4000, 0x8000) or,
+     * when it carries edge flags (0x10000), by row and column. */
     if (c->frame_flags & 0x2000) {
         int nplanes = c->do_alpha ? 4 : 3;
         for (int p = 0; p < nplanes; p++)
             bink2_smooth_dc_plane(c->planes[c->cur][p], c->stride[p], c->info[p],
                                   c->info_w[p], c->info_h[p], (c->frame_flags & 0xFF) * 8);
         /* the reference keeps the picture rounded up to 16 luma pixels */
-        if (c->frame_flags & 0x10000)
-            for (int p = 0; p < nplanes; p++) {
-                int chroma = p == 1 || p == 2, w16 = FFALIGN(w, 16), h16 = FFALIGN(h, 16);
-                deblock_plane(c, p, chroma ? 2 : 1, chroma ? w16 >> 1 : w16, chroma ? h16 >> 1 : h16);
-            }
+        for (int p = 0; p < nplanes; p++) {
+            int chroma = p == 1 || p == 2, w16 = FFALIGN(w, 16), h16 = FFALIGN(h, 16);
+            deblock_plane(c, p, chroma ? 2 : 1, chroma ? w16 >> 1 : w16, chroma ? h16 >> 1 : h16);
+        }
     }
     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
         goto fail;

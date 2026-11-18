@@ -378,7 +378,10 @@ The Bink 2 decoder (`bink2video`, revisions `KB2a` to `KB2n`) started as a
 port of the one in [NihAV](https://nihav.org) by Kostya Shishkov and was then
 matched against RAD's `bink2w32.dll` under Wine: `KB2n` files from RAD's
 current Bink 2 encoder decode the same as in RAD's player. Older revisions
-follow NihAV and have not been compared with RAD. The one difference left is in the
+are close but not exact: on sample files of `KB2f`, `KB2g` and `KB2i` the
+first 60 frames come within 41 to 50 dB of RAD. Frames without flag
+0x40000, which RAD's current encoder always sets, go through extra in-loop
+filtering in RAD's decoder that FFmpeg does not do yet. The one difference left is in the
 part of the last macroblock row or column past the picture rounded up to 16
 pixels, which RAD's decoder never stores and reads back from uninitialised
 memory; FFmpeg takes it as zero, and the encoder never codes an intra
