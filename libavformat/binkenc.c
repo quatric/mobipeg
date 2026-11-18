@@ -1,8 +1,9 @@
 /*
  * Bink 1 (BIKi) muxer
- * Copyright (C) 2026 Justin Marshall
+ * Copyright (C) 2026 quatric <quatricsoftware@gmail.com>
  *
- * Container layout follows the binkenc encoder of LibBink.
+ * Based on the binkenc encoder of LibBink,
+ * Copyright (C) 2026 Justin Marshall, also LGPL 2.1 or later.
  *
  * This file is part of FFmpeg.
  *
@@ -241,8 +242,11 @@ static int flush_video(AVFormatContext *s, int eof)
 
     while (done < bink->nb_vq) {
         int last = eof && done == bink->nb_vq - 1;
-        if (bink->audio_idx >= 0 && !eof &&
-            bink->audio_end < samples_at_frame(bink, bink->nb_frames + 1))
+        /* The newest frame waits for its successor or the end, so that the
+         * last frame takes in all the audio left over. */
+        if (!eof && (done == bink->nb_vq - 1 ||
+                     (bink->audio_idx >= 0 &&
+                      bink->audio_end < samples_at_frame(bink, bink->nb_frames + 1))))
             break;
         if ((ret = write_frame(s, bink->vq[done], last)) < 0)
             break;

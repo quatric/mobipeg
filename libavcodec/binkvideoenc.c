@@ -1,8 +1,9 @@
 /*
  * Bink 1 (BIKi) video encoder
- * Copyright (C) 2026 Justin Marshall
+ * Copyright (C) 2026 quatric <quatricsoftware@gmail.com>
  *
- * Ported from the binkenc encoder of LibBink.
+ * Based on the binkenc encoder of LibBink,
+ * Copyright (C) 2026 Justin Marshall, also LGPL 2.1 or later.
  *
  * This file is part of FFmpeg.
  *
