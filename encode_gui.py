@@ -101,6 +101,10 @@ AUDIO_ONLY_FORMATS = {
     "3ds_sound",
 }
 
+# Formats Highest Quality is not offered for: their encoder's own default
+# is already the sensible quality, and HQ's QP 12 would bloat the files.
+NO_HQ_FORMATS = {"mivf"}
+
 # Output container extension per format, mirroring encode.py's out_ext map
 # (and AUDIO_FORMAT_EXTENSIONS for the audio-only formats) -- used only to
 # preview the default output filename before a run, not to pick the muxer.
@@ -783,8 +787,10 @@ class EncodeGUI(tk.Tk):
                 set(self.formats_map.values()) - AUDIO_ONLY_FORMATS,
                 (self.enc_fps_label, self.enc_fps_entry),
             ),
+            # MIVF's encoder has its own sensible default (QP 34); Highest
+            # Quality's QP 12 would make files several times larger.
             (
-                set(self.formats_map.values()) - AUDIO_ONLY_FORMATS,
+                set(self.formats_map.values()) - AUDIO_ONLY_FORMATS - NO_HQ_FORMATS,
                 (self.enc_hq_chk,),
             ),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
@@ -983,6 +989,20 @@ class EncodeGUI(tk.Tk):
 
     def on_enc_format_change(self, event=None):
         fmt = self.formats_map.get(self.enc_fmt_var.get())
+
+        # Highest Quality does not apply to these formats: leave their
+        # quantizer at the format default while one is selected, and put
+        # Highest Quality back on when moving to a format it applies to.
+        prev = getattr(self, "_enc_prev_fmt", None)
+        if fmt in NO_HQ_FORMATS and prev not in NO_HQ_FORMATS:
+            self._hq_before_no_hq = self.enc_hq_var.get()
+            if self._hq_before_no_hq:
+                self.enc_quant_var.set("0")
+        elif fmt not in NO_HQ_FORMATS and prev in NO_HQ_FORMATS:
+            if getattr(self, "_hq_before_no_hq", False):
+                self.enc_hq_var.set(True)
+                self.on_toggle_hq()
+        self._enc_prev_fmt = fmt
 
         self.enc_input2_label.config(text="Right Eye (3D):")
 
@@ -1224,7 +1244,7 @@ class EncodeGUI(tk.Tk):
                 cmd.extend(["--keyframes", kf])
         if self.enc_roundtrip_var.get():
             cmd.append("--roundtrip")
-        if self.enc_hq_var.get():
+        if self.enc_hq_var.get() and fmt not in NO_HQ_FORMATS:
             cmd.append("--hq")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
             cmd.append("--fast-audio")
