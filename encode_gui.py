@@ -552,6 +552,15 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_hq_chk.grid(row=15, column=1, sticky="w", padx=5, pady=2)
 
+        # MIVF only, where Highest Quality is hidden, so it takes that row.
+        self.enc_m2y2_var = tk.BooleanVar(value=False)
+        self.enc_m2y2_chk = ttk.Checkbutton(
+            self.encode_frame,
+            text="M2Y2: range-code the video (same pictures, ~25-30% smaller)",
+            variable=self.enc_m2y2_var,
+        )
+        self.enc_m2y2_chk.grid(row=15, column=1, sticky="w", padx=5, pady=2)
+
         self.enc_rvid_nocompress_var = tk.BooleanVar(value=False)
         self.enc_rvid_nocompress_chk = ttk.Checkbutton(
             self.encode_frame,
@@ -795,6 +804,7 @@ class EncodeGUI(tk.Tk):
             ),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
+            ({"mivf"}, (self.enc_m2y2_chk,)),
             ({"rvid"}, (self.enc_rvid_nocompress_chk,)),
             ({"rvid"}, (self.enc_rvid_interlaced_chk,)),
             ({"rvid"}, (self.enc_rvid_nodither_chk,)),
@@ -1246,6 +1256,8 @@ class EncodeGUI(tk.Tk):
             cmd.append("--roundtrip")
         if self.enc_hq_var.get() and fmt not in NO_HQ_FORMATS:
             cmd.append("--hq")
+        if self.enc_m2y2_var.get() and fmt == "mivf":
+            cmd.append("--m2y2")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
             cmd.append("--fast-audio")
         if fmt in (
