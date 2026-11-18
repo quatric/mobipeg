@@ -650,6 +650,8 @@ extern const FFInputFormat  ff_vapoursynth_demuxer;
 extern const FFInputFormat  ff_mo_demuxer;
 extern const FFOutputFormat ff_mo_muxer;
 extern const FFOutputFormat ff_mods_muxer;
+extern const FFInputFormat  ff_mivf_demuxer;
+extern const FFOutputFormat ff_mivf_muxer;
 extern const FFOutputFormat ff_moflex_muxer;
 
 #include "libavformat/muxer_list.c"

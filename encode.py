@@ -515,6 +515,28 @@ def topos_picture_filter(scale):
     )
 
 
+def mivf_picture_filter(scale):
+    """MIVF picture: the Topos centre-crop and spline scale, but into BT.601
+    limited range, which is what the player's Y2R conversion assumes."""
+    w, h = scale.split(":")
+    return (
+        f"crop='min(iw,ih*{w}/{h}/sar)':'min(ih,iw*sar*{h}/{w})',"
+        f"scale={w}:{h}:flags=spline+accurate_rnd+full_chroma_int"
+        f":out_color_matrix=bt601:out_range=tv,format=yuv420p,setsar=1"
+    )
+
+
+def mivf_audio_rate(fps, want=0):
+    """A sample rate that splits into whole MIVF frames: each page carries
+    exactly rate / fps samples. 29.97 fps needs a multiple of 30000 Hz."""
+    rates = ([want] if want else []) + [44100, 48000, 32000, 30000, 24000, 22050]
+    for r in rates:
+        spf = Fraction(r) / fps if fps else None
+        if spf is not None and spf.denominator == 1 and spf <= 0xFFFF:
+            return r
+    return None
+
+
 def _rate_kbps(rate):
     """'2000k' / '2M' / '2000000' -> kbit/s as an int."""
     r = rate.strip().lower()
@@ -689,12 +711,15 @@ def even_gop(inp, out_fps, n_keyframes, limit=None):
     return gop, count
 
 
-def default_jobs():
+def default_jobs(fmt=""):
     """How many chunk encoders to run at once: one per two cores, each on two
     encoder threads.  A Mobiclip picture is small, so one encoder keeps only
     four or five cores busy whatever its thread count; on a 10-core machine
     six two-thread encoders finished a 3-minute .mo in 2.8 s against 4.4 s
     for one encoder on every core."""
+    if fmt == "mivf":
+        # The M2Y1 encoder runs on one thread: one chunk per core.
+        return max(2, os.cpu_count() or 2)
     return max(2, (os.cpu_count() or 2) // 2)
 
 
@@ -870,6 +895,10 @@ def chunk_shape(fmt):
         # .mods has no periodic keyframes, so every chunk adds one: keep its
         # chunks longer.
         return 10.0, 30.0, None
+    if fmt == "mivf":
+        # Cut on the 240-frame keyframe interval, as MIVF's own encoder
+        # does, so the chunks add no keyframes.
+        return 3.0, 10.0, 240
     if fmt in TOPOS_FORMATS:
         if fmt.endswith("_mpeg2"):
             # Cut on its 30-frame GOPs, so the chunks add no keyframes.
@@ -1008,7 +1037,7 @@ def main():
         "fmt",
         nargs="?",
         default="mo",
-        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, topos, topos3d, topos_mpeg2, topos3d_mpeg2, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
+        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, topos, topos3d, topos_mpeg2, topos3d_mpeg2, mivf, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
     )
     parser.add_argument(
         "audio",
@@ -1245,7 +1274,13 @@ def main():
         "--jobs",
         type=int,
         default=0,
-        help="MobiClip (.mo, .moflex, .mods): encode the video as this many chunks at once, then join them (0 = one per two CPU cores, 1 = encode in one piece). Each chunk is a whole number of keyframe intervals, so the result matches a one-piece encode in size and quality. Two-pass, --ffmpeg-args, 3D and FastAudio .mods always encode in one piece.",
+        help="MobiClip (.mo, .moflex, .mods), Topos and MIVF: encode the video as this many chunks at once, then join them (0 = one per two CPU cores, one per core for MIVF; 1 = encode in one piece). Each chunk is a whole number of keyframe intervals, so the result matches a one-piece encode in size and quality. Two-pass, --ffmpeg-args, 3D and FastAudio .mods always encode in one piece.",
+    )
+
+    parser.add_argument(
+        "--m2y2",
+        action="store_true",
+        help="mivf: range-code the video (M2Y2), the same pictures in a smaller file",
     )
 
     # --- fmt=cia: package an already-encoded .moflex into a 3DS video CIA. ---
@@ -1503,6 +1538,10 @@ def main():
         mode = "vid3d" if fmt.startswith("topos3d") else "vid"
         cvc = "mpeg2video" if fmt.endswith("_mpeg2") else "libx264"
         dmx, scale, moaud = "matroska", "400:240", 0
+    elif fmt == "mivf":
+        # MIVF, the 3DS homebrew movie player: M2Y1 video at 400x240 with
+        # IA4M (mono ADPCM) or PC16 sound packed per frame by the muxer.
+        mode, dmx, scale, moaud, cvc = "vid", "mivf", "400:240", 0, "m2y1"
     elif fmt == "3ds_camera":
         # 3DS Camera imports 2D AVI/MJPEG clips at 480x240 / 20 fps with
         # 16 kHz mono IMA-ADPCM. Stereoscopic camera clips have two video
@@ -1562,7 +1601,7 @@ def main():
     else:
         print(
             f"unknown format '{fmt}' "
-            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|topos|topos3d|topos_mpeg2|topos3d_mpeg2|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|flipnote3d|"
+            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|topos|topos3d|topos_mpeg2|topos3d_mpeg2|mivf|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|flipnote3d|"
             f"{'|'.join(AUDIO_FORMATS)})"
         )
         sys.exit(2)
@@ -1934,7 +1973,7 @@ def main():
             + [container]
         )
         chunk_list = None
-        jobs = parsed.jobs if parsed.jobs > 0 else default_jobs()
+        jobs = parsed.jobs if parsed.jobs > 0 else default_jobs(fmt)
         if topos and jobs > 1 and not extra_args:
             lo, hi, unit = chunk_shape(fmt)
             out_fps = output_fps(inp, fmt, fps_ovr)
@@ -2594,6 +2633,35 @@ def main():
             enc_opts.append("-an")
         else:
             enc_opts.extend(["-c:a", "aac", "-b:a", "50k", "-ar", "32000", "-ac", "2"])
+    elif fmt == "mivf":
+        # One page per frame, so constant frame rate.
+        enc_opts.extend(["-fps_mode", "cfr"])
+        if vx_quant > 0:
+            enc_opts.extend(["-qp", str(vx_quant)])
+        if parsed.m2y2:
+            enc_opts.extend(["-m2y2", "1"])
+        vopt_end = len(enc_opts)
+        chunk_unit = 240  # the encoder's keyframe interval
+        if audio == "none":
+            enc_opts.append("-an")
+        elif audio in ("ia4m", "adpcm", "pc16"):
+            fps = output_fps(inp, fmt, fps_ovr)
+            rate = mivf_audio_rate(fps, audio_rate)
+            if not rate:
+                print(
+                    f"error: no sample rate splits evenly into {fps} fps MIVF frames; pass --fps"
+                )
+                sys.exit(2)
+            enc_opts.extend(
+                ["-map", "0:v", "-map", "0:a:0?", "-c:a", "pcm_s16le", "-ar", str(rate)]
+                + ["-ac", "2" if audio == "pc16" else "1", "-sn", "-dn"]
+                + ["-mivf_audio", "pc16" if audio == "pc16" else "ia4m"]
+            )
+        else:
+            print(
+                f"error: mivf takes ia4m (mono ADPCM), pc16 (PCM) or none, not '{audio}'"
+            )
+            sys.exit(2)
     elif fmt in TOPOS_FORMATS:
         tv, ta = topos_codec_opts(fmt, audio, mobi_bitrate, vx_quant)
         enc_opts.extend(tv)
@@ -2640,6 +2708,8 @@ def main():
     filters = []
     if fmt in TOPOS_FORMATS:
         filters.append(topos_picture_filter(scale))
+    elif fmt == "mivf":
+        filters.append(mivf_picture_filter(scale))
     elif scale:
         filters.append(f"scale={scale}")
     if fps_filter:
@@ -2699,7 +2769,7 @@ def main():
                 pass
     else:
         chunk_list = None
-        jobs = parsed.jobs if parsed.jobs > 0 else default_jobs()
+        jobs = parsed.jobs if parsed.jobs > 0 else default_jobs(fmt)
         shape = chunk_shape(fmt)
         if (
             vopt_end is not None

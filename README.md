@@ -30,6 +30,7 @@ such as audio, video, subtitles and related metadata.
 | HVQM4 | `.h4m` | GameCube / Wii (Hudson Soft) | ✅ | ✅ |
 | Nintendo Channel | `.3gp` | Wii | ✅ | ✅ |
 | Nintendo 3DS Camera (2D / 3D) | `.avi` | Nintendo 3DS | ✅ | ✅ |
+| MIVF (M2Y1 / M2Y2) | `.mivf` | Nintendo 3DS homebrew | ✅ | ✅ |
 | MO | `.mo` | Nintendo Wii | ✅ | ✅ |
 | MOC2 / MOC3 | `.mo` | Nintendo Wii (early MobiClip) | — | ✅ (`fla2`/`fla3` are Em-Flash (Flash 3-5) movies, rendered by the `emflash` decoder: shapes, text, buttons, sprites, masks and ActionScript 1; `-autoclick 2` presses on-screen buttons so games get past their menus, `-fla_frames N` sets the length, `-video_width`/`-video_height` render at any size; `-fla_data 1 -c copy -f data out.swf` writes the movie as an SWF file, `-fla_raw 1` the bare payload) |
 | MODS | `.mods` | Nintendo DS | ✅ | ✅ |
@@ -286,6 +287,37 @@ python3 encode.py topos3d aac left.mp4 right.mp4
 python3 encode.py topos3d aac movie_sbs.mkv --stereo sbs
 python3 encode.py topos3d_mpeg2 mp2 movie_sbs.mkv --stereo sbs
 ```
+
+### MIVF 3DS movie player
+
+[MIVF](https://github.com/Oldhimaster1/MIVF) is a 3DS homebrew movie player
+with its own container and codecs. `mivf` writes its files natively:
+
+- M2Y1 video at 400x240, keeping the source frame rate. The encoder
+  (`-c:v m2y1`) is a port of the project's own native encoder and writes the
+  same bytes. `--quantizer` sets its QP (default 34, 1-51). `--m2y2` range-codes
+  the frames as M2Y2, which gives the same pictures in a file about 25-30%
+  smaller.
+- Sound as `ia4m` (mono IMA ADPCM, the default) or `pc16` (16-bit PCM,
+  stereo), or `none`. Each frame carries exactly rate / fps samples, so the
+  rate is picked to divide evenly: 44.1 kHz for 25 and 30 fps, 48 kHz for
+  24000/1001, and 30 kHz for 29.97 fps (`--audio-rate` picks another one
+  that fits).
+- A seek index at the end of the file, which the player reads instead of
+  scanning.
+
+Pictures are centre-cropped to the screen's 5:3 shape and scaled into
+BT.601, which is the matrix the player converts with. The video is encoded
+in parallel chunks of whole 240-frame keyframe intervals, one per CPU core,
+so the file is byte-for-byte the one a single encoder would write. A
+3-minute clip took 6.2 s on 10 cores, against 21.6 s in one piece.
+
+```sh
+python3 encode.py mivf ia4m input.mp4
+python3 encode.py mivf pc16 input.mp4 --m2y2 --quantizer 30
+```
+
+`decode` reads `.mivf` files, including M2Y2 video.
 
 ### Splitting stereoscopic MOFLEX video
 

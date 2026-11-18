@@ -303,6 +303,7 @@ class EncodeGUI(tk.Tk):
             "3DS Topos player H.264 .mkv (3D)": "topos3d",
             "3DS Topos player MPEG-2 .mkv (2D)": "topos_mpeg2",
             "3DS Topos player MPEG-2 .mkv (3D)": "topos3d_mpeg2",
+            "3DS MIVF player .mivf": "mivf",
             "Nintendo 3DS Camera 2D .avi": "3ds_camera",
             "Nintendo 3DS Camera 3D .avi": "3ds_camera3d",
             "Nintendo 3DS Sound AAC .m4a": "3ds_sound",
@@ -343,6 +344,7 @@ class EncodeGUI(tk.Tk):
             "topos3d": ["aac", "mp2", "none"],
             "topos_mpeg2": ["mp2", "aac", "none"],
             "topos3d_mpeg2": ["mp2", "aac", "none"],
+            "mivf": ["ia4m", "pc16", "none"],
             "3ds_camera": ["adpcm", "none"],
             "3ds_camera3d": ["adpcm", "none"],
             "3ds_sound": ["aac"],
@@ -751,6 +753,7 @@ class EncodeGUI(tk.Tk):
                     "factor5",
                     "topos",
                     "topos3d",
+                    "mivf",
                 },
                 (self.enc_quant_label, self.enc_quant_entry),
             ),
@@ -1238,6 +1241,7 @@ class EncodeGUI(tk.Tk):
             "factor5",
             "topos",
             "topos3d",
+            "mivf",
         ):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
@@ -1263,6 +1267,7 @@ class EncodeGUI(tk.Tk):
             "topos3d",
             "topos_mpeg2",
             "topos3d_mpeg2",
+            "mivf",
         ):
             fps = self.enc_fps_var.get().strip()
             if fps:

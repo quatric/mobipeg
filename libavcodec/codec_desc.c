@@ -2105,6 +2105,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .long_name = NULL_IF_CONFIG_SMALL("Em-Flash (Pixter Multimedia Flash movie)"),
     },
     {
+        .id        = AV_CODEC_ID_M2Y1,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "m2y1",
+        .long_name = NULL_IF_CONFIG_SMALL("MIVF M2Y1 video"),
+        .props     = AV_CODEC_PROP_LOSSY,
+    },
+    {
         .id        = AV_CODEC_ID_PCM_S16LE,
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "pcm_s16le",
@@ -2848,6 +2855,13 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .type      = AVMEDIA_TYPE_AUDIO,
         .name      = "adpcm_ima_fvds",
         .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA FastVideoDS"),
+        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
+    },
+    {
+        .id        = AV_CODEC_ID_ADPCM_IMA_MIVF,
+        .type      = AVMEDIA_TYPE_AUDIO,
+        .name      = "adpcm_ima_mivf",
+        .long_name = NULL_IF_CONFIG_SMALL("ADPCM IMA MIVF (IA4M)"),
         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSY,
     },
 
