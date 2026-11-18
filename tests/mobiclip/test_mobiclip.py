@@ -544,6 +544,13 @@ SYNTHETIC = {
         2,
         ["-mo_audio", "codebook", "-c:a", "vx_audio", "-ltp", "0"],
     ),
+    # Codebook audio encoded by the muxer itself from PCM, as encode.py does.
+    "mods_sx_pcm": (
+        "mods",
+        "256x192",
+        2,
+        ["-mo_audio", "codebook", "-c:a", "pcm_s16le", "-sx_ltp", "0"],
+    ),
     "mods_noaudio": ("mods", "256x192", 0, ["-mo_audio", "none"]),
     "moflex_fastaudio": (
         "moflex",

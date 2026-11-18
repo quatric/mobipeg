@@ -3264,8 +3264,16 @@ Which MobiClip audio codec to write. @code{mobiclip_mo} accepts
 @code{fastaudio}, @code{adpcm}, @code{pcm}, @code{vorbis} and @code{none};
 @code{moflex} accepts @code{fastaudio}, @code{adpcm} and @code{pcm};
 @code{mods} accepts @code{fastaudio}, @code{adpcm}, @code{pcm}, @code{none}
-and @code{codebook} (the SX codebook codec, paired with @code{-c:a
-vx_audio}).
+and @code{codebook} (the SX codebook codec). For @code{codebook} the audio
+stream is either @code{-c:a vx_audio}, or @code{-c:a pcm_s16le}, in which
+case the muxer runs the @code{vx_audio} encoder itself once the video is
+written, starting an intra audio frame at every video keyframe so the file
+seeks cleanly.
+
+@item sx_ltp @var{bool}
+@code{mods} with @code{codebook} audio from PCM only. Whether the muxer's
+codebook encoder searches long-term-prediction lags: slower, better quality.
+Default is enabled.
 
 @item mo_block @var{bytes}
 @code{moflex} only. Fixed block size, zero-padded, from @code{512} to

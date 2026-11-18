@@ -45,6 +45,8 @@
 #include "mo.h"
 #include "mo_audioenc.h"
 #include "libavcodec/avcodec.h"
+#include "libavutil/bprint.h"
+#include "libavutil/channel_layout.h"
 #include "libavutil/dict.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
@@ -148,6 +150,13 @@ typedef struct MODSMuxContext {
     int       sx_cbk_size;
     int       sx_periods;   /* buffered 128-sample audio periods in abuf */
     int       sx_rate;
+    /* The audio can instead arrive as pcm_s16le, and the trailer runs the
+     * vx_audio encoder itself (mods_sx_encode_audio): by then every video
+     * frame is in, so it knows which ones are keyframes. */
+    int       sx_internal;
+    int       sx_ltp;       /* -sx_ltp: the encoder's long-term-prediction search */
+    int16_t  *sx_pcm;       /* interleaved */
+    int64_t   sx_pcm_n, sx_pcm_cap;   /* in sample-frames */
 } MODSMuxContext;
 
 /* Standard IMA-ADPCM tables (the DS uses the canonical IMA codec). */
@@ -629,21 +638,24 @@ static int mods_write_header(AVFormatContext *s)
     st = s->streams[m->video_index];
 
     /* -mo_audio selection: fastaudio=0 adpcm=1 pcm=2 none=3 codebook=4.
-     * codebook = retail SX = the ActImagine VX audio codec; the audio stream
-     * must be pre-encoded with -c:a vx_audio (which trains the
-     * per-channel codebooks over the whole stream and reports them via
-     * packet side data). */
+     * codebook = retail SX = the ActImagine VX audio codec.  The audio stream
+     * is either pcm_s16le, which the trailer encodes with vx_audio itself and
+     * an intra aframe at every video keyframe, or already encoded with
+     * -c:a vx_audio (which trains the per-channel codebooks over the whole
+     * stream and reports them via packet side data). */
     if (m->audio_codec == 4) {
         AVCodecParameters *ap;
-        if (m->audio_index < 0 ||
-            s->streams[m->audio_index]->codecpar->codec_id != AV_CODEC_ID_VX_AUDIO) {
+        enum AVCodecID id = m->audio_index < 0 ? AV_CODEC_ID_NONE :
+                            s->streams[m->audio_index]->codecpar->codec_id;
+        if (id != AV_CODEC_ID_PCM_S16LE && id != AV_CODEC_ID_VX_AUDIO) {
             av_log(s, AV_LOG_ERROR,
-                   "mods: -mo_audio codebook requires the audio stream to be "
-                   "encoded with -c:a vx_audio\n");
+                   "mods: -mo_audio codebook needs the audio as pcm_s16le "
+                   "(the muxer encodes it) or encoded with -c:a vx_audio\n");
             return AVERROR(EINVAL);
         }
         ap = s->streams[m->audio_index]->codecpar;
         m->sx_mode  = 1;
+        m->sx_internal = id == AV_CODEC_ID_PCM_S16LE;
         m->channels = ap->ch_layout.nb_channels;
         m->sx_rate  = ap->sample_rate ? ap->sample_rate : 32000;
         if (m->channels < 1 || m->channels > 2)
@@ -786,35 +798,59 @@ static int sx_queue_video(MODSMuxContext *m, const uint8_t *data, int size)
     return 0;
 }
 
+/* Take one period's packet from the vx_audio encoder: the trained codebooks
+ * come as side data of the first, and the period itself goes into abuf. */
+static int mods_sx_take_packet(MODSMuxContext *m, const AVPacket *pkt)
+{
+    size_t sd_size;
+    const uint8_t *sd = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, &sd_size);
+
+    if (sd && (int)sd_size >= m->channels * SX_CODEBOOK_SIZE_1CH && !m->sx_cbk) {
+        m->sx_cbk = av_memdup(sd, sd_size);
+        if (!m->sx_cbk)
+            return AVERROR(ENOMEM);
+        m->sx_cbk_size = (int)sd_size;
+    }
+    if (pkt->size > 0) {
+        if (m->abuf_size + pkt->size > m->abuf_cap) {
+            int nc = m->abuf_cap ? m->abuf_cap * 2 : 65536;
+            uint8_t *nb;
+            while (nc < m->abuf_size + pkt->size) nc *= 2;
+            nb = av_realloc(m->abuf, nc);
+            if (!nb)
+                return AVERROR(ENOMEM);
+            m->abuf = nb; m->abuf_cap = nc;
+        }
+        memcpy(m->abuf + m->abuf_size, pkt->data, pkt->size);
+        m->abuf_size += pkt->size;
+        m->sx_periods++;
+    }
+    return 0;
+}
+
 static int mods_write_packet(AVFormatContext *s, AVPacket *pkt)
 {
     MODSMuxContext *m = s->priv_data;
 
-    if (m->sx_mode && pkt->stream_index == m->audio_index) {
-        size_t sd_size;
-        const uint8_t *sd = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA,
-                                                    &sd_size);
-        if (sd && (int)sd_size >= m->channels * SX_CODEBOOK_SIZE_1CH && !m->sx_cbk) {
-            m->sx_cbk = av_memdup(sd, sd_size);
-            if (!m->sx_cbk)
-                return AVERROR(ENOMEM);
-            m->sx_cbk_size = (int)sd_size;
-        }
-        if (pkt->size > 0) {
-            if (m->abuf_size + pkt->size > m->abuf_cap) {
-                int nc = m->abuf_cap ? m->abuf_cap * 2 : 65536;
-                while (nc < m->abuf_size + pkt->size) nc *= 2;
-                uint8_t *nb = av_realloc(m->abuf, nc);
-                if (!nb)
+    if (m->sx_internal && pkt->stream_index == m->audio_index) {
+        int nb = pkt->size / (m->channels * (int)sizeof(int16_t));
+        if (nb > 0) {
+            if (m->sx_pcm_n + nb > m->sx_pcm_cap) {
+                int64_t nc = FFMAX(m->sx_pcm_n + nb, m->sx_pcm_cap ? 2 * m->sx_pcm_cap : 1 << 16);
+                int16_t *nbuf = av_realloc_array(m->sx_pcm, nc, m->channels * sizeof(int16_t));
+                if (!nbuf)
                     return AVERROR(ENOMEM);
-                m->abuf = nb; m->abuf_cap = nc;
+                m->sx_pcm = nbuf; m->sx_pcm_cap = nc;
             }
-            memcpy(m->abuf + m->abuf_size, pkt->data, pkt->size);
-            m->abuf_size += pkt->size;
-            m->sx_periods++;
+            memcpy(m->sx_pcm + m->sx_pcm_n * m->channels, pkt->data,
+                   (size_t)nb * m->channels * sizeof(int16_t));
+            m->sx_pcm_n += nb;
         }
         return 0;
     }
+
+    if (m->sx_mode && pkt->stream_index == m->audio_index)
+        return mods_sx_take_packet(m, pkt);
 
     if (m->ds_adpcm && pkt->stream_index == m->audio_index) {
         /* Buffer raw interleaved S16 PCM; encoded to DS IMA at frame flush. */
@@ -1065,11 +1101,105 @@ static int mods_sx_write_frames(AVFormatContext *s)
     return 0;
 }
 
+/* Encode the buffered PCM with vx_audio.  The DS re-primes its audio decoder
+ * at every video keyframe, so the stream needs an intra aframe in the period
+ * each keyframe's chunk starts with: floor(k * spf / 128), as
+ * mods_sx_write_frames() lays the chunks out.  (encode.py used to find the
+ * keyframes with a separate encode of the whole video beforehand.) */
+static int mods_sx_encode_audio(AVFormatContext *s)
+{
+    MODSMuxContext *m = s->priv_data;
+    const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_VX_AUDIO);
+    AVCodecContext *enc = NULL;
+    AVFrame *frame = NULL;
+    AVPacket *pkt = NULL;
+    AVDictionary *opts = NULL;
+    AVBPrint periods;
+    int ret;
+
+    if (!m->sx_pcm_n)
+        return 0;
+    if (!codec) {
+        av_log(s, AV_LOG_ERROR, "mods: no vx_audio encoder for -mo_audio codebook\n");
+        return AVERROR_ENCODER_NOT_FOUND;
+    }
+
+    av_bprint_init(&periods, 0, AV_BPRINT_SIZE_UNLIMITED);
+    for (int k = 0; k < m->sxv_n; k++)
+        if (m->sxv_kf[k] || !k)
+            av_bprintf(&periods, "%s%d", k ? "," : "", (int)((double)k * m->spf / 128.0));
+    if (!av_bprint_is_complete(&periods)) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    enc   = avcodec_alloc_context3(codec);
+    frame = av_frame_alloc();
+    pkt   = av_packet_alloc();
+    if (!enc || !frame || !pkt) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+    enc->sample_fmt  = AV_SAMPLE_FMT_S16;
+    enc->sample_rate = m->sx_rate;
+    enc->time_base   = (AVRational){ 1, m->sx_rate };
+    enc->thread_type = FF_THREAD_SLICE;
+    enc->thread_count = 0;
+    av_channel_layout_default(&enc->ch_layout, m->channels);
+    av_dict_set(&opts, "intra_periods", periods.str, 0);
+    av_dict_set_int(&opts, "ltp", m->sx_ltp, 0);
+    if ((ret = avcodec_open2(enc, codec, &opts)) < 0)
+        goto end;
+
+    /* frame_size samples at a time, the last frame short, then the flush,
+     * which is when vx_audio trains and encodes */
+    for (int64_t pos = 0; ret != AVERROR_EOF; ) {
+        const int n = (int)FFMIN(enc->frame_size, m->sx_pcm_n - pos);
+        if (n > 0) {
+            av_frame_unref(frame);
+            frame->format      = AV_SAMPLE_FMT_S16;
+            frame->sample_rate = m->sx_rate;
+            frame->nb_samples  = n;
+            frame->pts         = pos;
+            if ((ret = av_channel_layout_copy(&frame->ch_layout, &enc->ch_layout)) < 0 ||
+                (ret = av_frame_get_buffer(frame, 0)) < 0)
+                goto end;
+            memcpy(frame->data[0], m->sx_pcm + pos * m->channels,
+                   (size_t)n * m->channels * sizeof(int16_t));
+            pos += n;
+        }
+        if ((ret = avcodec_send_frame(enc, n > 0 ? frame : NULL)) < 0)
+            goto end;
+        while ((ret = avcodec_receive_packet(enc, pkt)) >= 0) {
+            ret = mods_sx_take_packet(m, pkt);
+            av_packet_unref(pkt);
+            if (ret < 0)
+                goto end;
+        }
+        if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+            goto end;
+    }
+    ret = 0;
+end:
+    av_bprint_finalize(&periods, NULL);
+    av_dict_free(&opts);
+    av_packet_free(&pkt);
+    av_frame_free(&frame);
+    avcodec_free_context(&enc);
+    return ret;
+}
+
 static int mods_write_trailer(AVFormatContext *s)
 {
     MODSMuxContext *m = s->priv_data;
     AVIOContext *pb = s->pb;
     int64_t kf_off;
+
+    if (m->sx_internal) {
+        int ret = mods_sx_encode_audio(s);
+        if (ret < 0)
+            return ret;
+    }
 
     if (m->sx_mode) {
         int ret = mods_sx_write_frames(s);
@@ -1121,6 +1251,7 @@ static void mods_deinit(AVFormatContext *s)
     av_freep(&m->sxv_size);
     av_freep(&m->sxv_kf);
     av_freep(&m->sx_cbk);
+    av_freep(&m->sx_pcm);
     if (m->venc_split_dec)
         avcodec_free_context(&m->venc_split_dec);
     if (m->venc_split_frame)
@@ -1139,7 +1270,8 @@ static const AVOption mods_options[] = {
     { "adpcm",     "IMA-ADPCM",        0, AV_OPT_TYPE_CONST, {.i64 = 1}, 0, 0, ENC, "mo_audio" },
     { "pcm",       "PCM16",            0, AV_OPT_TYPE_CONST, {.i64 = 2}, 0, 0, ENC, "mo_audio" },
     { "none",      "No audio",         0, AV_OPT_TYPE_CONST, {.i64 = 3}, 0, 0, ENC, "mo_audio" },
-    { "codebook",  "FastAudio-codebook/SX (use -c:a vx_audio)", 0, AV_OPT_TYPE_CONST, {.i64 = 4}, 0, 0, ENC, "mo_audio" },
+    { "codebook",  "FastAudio-codebook/SX (vx_audio, encoded by the muxer from pcm_s16le, or pre-encoded with -c:a vx_audio)", 0, AV_OPT_TYPE_CONST, {.i64 = 4}, 0, 0, ENC, "mo_audio" },
+    { "sx_ltp", "codebook audio encoded by the muxer: search long-term-prediction lags (slower, better quality)", OFFSET(sx_ltp), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, ENC },
     { NULL },
 };
 

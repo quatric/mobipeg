@@ -101,10 +101,10 @@ special to pass, just point it at the file.
 | `--keyframes N` | encode | Evenly-spaced keyframes across the clip. `0` (default) = auto, as few as practical within the encoder's ~90-frame gap limit. Scene cuts still insert extra keyframes on top. |
 | `--audio-rate HZ` | encode | Resample audio. TiVo defaults to 48000; other formats keep the source rate. |
 | `--roundtrip` | encode | Decode the just-written output and diff it, to catch encoder round-trip bugs. |
-| `--fast-audio` | encode | Skip the `vx_audio` LTP lag search (~90x faster, ~2 dB worse). Only affects `vx` and `mods` codebook (SX) audio. |
+| `--fast-audio` | encode | Skip the `vx_audio` LTP lag search (~90x faster, ~2 dB worse). Only affects `vx` and `mods` codebook (SX) audio. For `mods` the muxer runs the codebook encoder itself, in the same pass as the video, starting an intra audio frame at every video keyframe (`-sx_ltp 0` is what this flag passes). |
 | `--outdir DIR` | encode | Output directory (created if missing). **Set this or `OUTDIR`** — the built-in default is a path on the original dev machine and won't exist elsewhere. |
 | `-o`, `--output FILE` | decode | Output filename. Default: input's basename + `.mp4` (stereo input appends `_left`/`_right`). |
-| `--ffmpeg-args '...'` | all | Extra args appended verbatim just before the output file, shell-word-parsed. Since ffmpeg lets the last occurrence of a flag win, this overrides the format preset: `--ffmpeg-args '-t 5 -af volume=0.5'`. Internal analysis passes (mods keyframe probe, `--roundtrip` validation) don't see it. |
+| `--ffmpeg-args '...'` | all | Extra args appended verbatim just before the output file, shell-word-parsed. Since ffmpeg lets the last occurrence of a flag win, this overrides the format preset: `--ffmpeg-args '-t 5 -af volume=0.5'`. The `--roundtrip` validation pass doesn't see it. |
 
 ## Stereoscopic (`decode`/`play`)
 

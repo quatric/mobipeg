@@ -8,7 +8,6 @@ import argparse
 import math
 import shlex
 import shutil
-import struct
 import tempfile
 import atexit
 from fractions import Fraction
@@ -499,46 +498,6 @@ def probe_fps(inp):
         return float(num) / den if den else None
     except Exception:
         return None
-
-
-def probe_audio_rate(inp):
-    """Return the source audio sample rate (Hz) as an int, or None."""
-    try:
-        p = subprocess.run(
-            [FFPROBE, "-v", "error"]
-            + input_fmt(inp)
-            + [
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=sample_rate",
-                "-of",
-                "default=nk=1:nw=1",
-                inp,
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        return int(p.stdout.strip())
-    except Exception:
-        return None
-
-
-def read_mods_keyframes(path):
-    """Parse a .mods file's keyframe table -> sorted list of keyframe frame indices."""
-    try:
-        with open(path, "rb") as f:
-            b = f.read()
-        kf_off = struct.unpack_from("<I", b, 0x28)[0]
-        kf_cnt = struct.unpack_from("<I", b, 0x2C)[0]
-        frames = [
-            struct.unpack_from("<II", b, kf_off + 8 * i)[0] for i in range(kf_cnt)
-        ]
-        return sorted(set(frames))
-    except Exception:
-        return []
 
 
 def even_gop(inp, out_fps, n_keyframes, limit=None):
@@ -1870,12 +1829,15 @@ def main():
                     enc_opts.extend(["-map", "0:v", "-map", "0:a?"])
                 else:
                     enc_opts.extend(["-map", "0:v", "-map", "0:a:0?"])
-            # SX/codebook audio is produced by its own encoder (trains a per-file
-            # codebook over the whole stream), not the muxer's built-in packing.
+            # SX/codebook audio: the mods muxer runs the vx_audio encoder over
+            # the PCM itself, in its trailer.  It trains a codebook over the
+            # whole stream anyway, and by then the muxer has seen every video
+            # frame, so it knows which periods follow a keyframe and need an
+            # intra aframe (the DS re-primes its audio decoder there).
             if audio == "codebook":
-                enc_opts.extend(["-c:a", "vx_audio"])
+                enc_opts.extend(["-c:a", "pcm_s16le"])
                 if fast_audio:
-                    enc_opts.extend(["-ltp", "0"])
+                    enc_opts.extend(["-sx_ltp", "0"])
                 if audio_rate > 0:
                     enc_opts.extend(["-ar", str(audio_rate)])
     if cvc:
@@ -2268,56 +2230,6 @@ def main():
     vf = []
     if filters:
         vf = ["-vf", ",".join(filters)]
-
-    # mods SX/codebook: the DS re-primes its audio decoder at every video
-    # keyframe (retail writes an intra aframe there).  Do a fast video-only pass
-    # to learn the keyframe frame indices, map each to the audio period position
-    # the muxer will give it (cursor = floor(frame * sample_rate / fps / 128)),
-    # and tell vx_audio to emit an intra aframe at those periods so the stream
-    # matches retail and doesn't stutter on the game's per-keyframe reset.
-    if fmt == "mods" and audio == "codebook":
-        kf_probe = os.path.join(OUTDIR or ".", ".kf_probe.mods")
-        # The keyframes come from x264's lookahead, so the probe carries the
-        # options that steer it (quantizer, rate control, scene-cut threshold,
-        # motion search method) and drops the analysis that only shapes the
-        # bits.  The lookahead reads subme only as "above 1", and Mobiclip
-        # clamps it to at least 2, so subq 2 cannot move a keyframe; neither
-        # can partitions or the 8x8 transform, which it does not read.
-        probe_cmd = (
-            [FFENC, "-nostdin", "-y", "-loglevel", "error"]
-            + input_fmt(inp)
-            + ["-i", inp]
-            + vf
-            + [
-                "-an",
-                "-mo_audio",
-                "none",
-                "-c:v",
-                cvc,
-                "-mobiclip",
-                "2",
-                "-moflex",
-                "0",
-                "-g",
-                "100000",
-            ]
-            + (["-qp", str(vx_quant)] if vx_quant > 0 and not mobi_bitrate else [])
-            + mobi_rc
-            + ["-subq", "2", "-8x8dct", "0", "-partitions", "none", kf_probe]
-        )
-        if subprocess.run(probe_cmd).returncode == 0:
-            kfs = read_mods_keyframes(kf_probe)
-            sr = audio_rate if audio_rate > 0 else probe_audio_rate(inp)
-            src_fps = probe_fps(inp)
-            if kfs and sr and src_fps:
-                spf = sr / src_fps
-                periods = sorted({int(kf * spf / 128.0) for kf in kfs})
-                enc_opts.extend(["-intra_periods", ",".join(str(p) for p in periods)])
-                print(f"   mods/sx: {len(periods)} keyframe audio-reset points")
-        try:
-            os.remove(kf_probe)
-        except OSError:
-            pass
 
     fps_disp = f", {fps_filter}" if fps_filter else ""
     scale_disp = scale if scale else "source"
