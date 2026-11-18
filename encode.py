@@ -2647,6 +2647,12 @@ def main():
         elif audio in ("ia4m", "adpcm", "pc16"):
             fps = output_fps(inp, fmt, fps_ovr)
             rate = mivf_audio_rate(fps, audio_rate)
+            if audio_rate > 0 and rate != audio_rate:
+                print(
+                    f"error: {audio_rate} Hz does not split into whole {fps} fps MIVF "
+                    f"frames; {mivf_audio_rate(fps)} Hz does"
+                )
+                sys.exit(2)
             if not rate:
                 print(
                     f"error: no sample rate splits evenly into {fps} fps MIVF frames; pass --fps"

@@ -768,6 +768,7 @@ class EncodeGUI(tk.Tk):
                     "wii_photo",
                     "3ds_camera",
                     "factor5",
+                    "mivf",
                 }
                 | AUDIO_ONLY_FORMATS,
                 (self.enc_arate_label, self.enc_arate_entry),
@@ -1273,7 +1274,7 @@ class EncodeGUI(tk.Tk):
             if fps:
                 cmd.extend(["--fps", fps])
         if fmt in (
-            {"vx", "mods", "ty", "thp", "rvid", "dpg", "wii_photo", "factor5"}
+            {"vx", "mods", "ty", "thp", "rvid", "dpg", "wii_photo", "factor5", "mivf"}
             | AUDIO_ONLY_FORMATS
         ):
             arate = self.enc_audio_rate_var.get().strip()
