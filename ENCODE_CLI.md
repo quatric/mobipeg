@@ -49,6 +49,8 @@ to `encode`.
 | `nintendo_channel` | 378x284 | Wii Nintendo Channel, `libx264` (needs `--enable-libx264`) |
 | `3ds_camera` | 480x240 | 3DS Camera AVI, 2D Motion JPEG |
 | `3ds_camera3d` | 480x240 | 3DS Camera AVI, native stereo (two inputs) |
+| `topos`, `topos_mpeg2` | 400x240 | Topos 3DS homebrew player `.mkv`: H.264 High@3.1 (New 3DS) or MPEG-2 Main 2 Mbit/s (Old 3DS) |
+| `topos3d`, `topos3d_mpeg2` | 400x240 per eye | The same as 800x240 side-by-side 3D (two inputs, or one packed source) |
 
 Audio-only outputs (no `input2`, `--scale`/`--keyframes`/etc. don't apply):
 
@@ -81,6 +83,8 @@ special to pass, just point it at the file.
 | `wii_photo` | `pcm`, `none` |
 | `wii_photo_m4a`, `3ds_sound` | `aac` |
 | `nintendo_channel` | `aac`, `none` |
+| `topos`, `topos3d` | `aac` (default), `mp2`, `none` |
+| `topos_mpeg2`, `topos3d_mpeg2` | `mp2` (default), `aac`, `none` |
 | `3ds_camera`, `3ds_camera3d` | `adpcm`, `none` |
 | `thp` | `adpcm`, `none` |
 | `rvid` | `pcm`, `none` |
@@ -113,8 +117,10 @@ special to pass, just point it at the file.
 | `--stereo {auto,none,frameseq,frameseq-r,tb,tb-r,sbs,sbs-r}` | Force the stereo layout instead of reading it from the file — needed when a 3D source carries no layout descriptor. `-r` variants store the right eye first. `none` treats input as 2D. |
 | `--eyes {both,left,right,packed}` | decode: `both` (default) writes one file per eye; `left`/`right` writes just that eye; `packed` keeps the interleaved stream untouched. play: `both` shows eyes side by side; `left`/`right` plays one eye full-window; `packed` plays as stored. |
 
-`moflex3d` and `3ds_camera3d` take a second input file (right eye) directly on
-the command line instead of using `--eyes`:
+`moflex3d`, `topos3d`, `topos3d_mpeg2` and `3ds_camera3d` take a second input
+file (right eye) directly on the command line instead of using `--eyes`; the
+first three also accept one packed source, using `--stereo` or its detected
+layout:
 
 ```sh
 python3 encode.py moflex3d adpcm left.mp4 right.mp4

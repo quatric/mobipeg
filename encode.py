@@ -442,6 +442,165 @@ def probe_duration(inp):
         return None
 
 
+def probe_dar(inp):
+    """Return the first video stream's display aspect ratio, or None."""
+    try:
+        p = subprocess.run(
+            [FFPROBE, "-v", "error"]
+            + input_fmt(inp)
+            + [
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,sample_aspect_ratio",
+                "-of",
+                "default=nk=1:nw=1",
+                inp,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        w, h, sar = p.stdout.split()[:3]
+        n, _, d = sar.partition(":")
+        ratio = (
+            Fraction(int(n), int(d))
+            if n.isdigit() and d.isdigit() and int(n) and int(d)
+            else 1
+        )
+        return float(Fraction(int(w), int(h)) * ratio)
+    except Exception:
+        return None
+
+
+def half_packed_sar(inp, kind):
+    """setsar expression that undoes half-resolution stereo packing, or "".
+
+    stereo3d keeps the packed frame's pixel shape when it picks out an eye,
+    which is right for full-resolution packing (3840x1080 SBS) but squashes
+    the common half-resolution kind (1920x1080 SBS, two 960x1080 eyes meant
+    to be shown 16:9). An eye narrower than 6:5 is taken to be half-width
+    SBS, one wider than 5:2 half-height TB."""
+    dar = probe_dar(inp)
+    if not dar:
+        return ""
+    if kind == "sbs" and dar / 2 < 1.2:
+        return "setsar=sar*2,"
+    if kind == "tb" and dar * 2 > 2.5:
+        return "setsar=sar/2,"
+    return ""
+
+
+TOPOS_FORMATS = ("topos", "topos3d", "topos_mpeg2", "topos3d_mpeg2")
+# Frame colour tags. The encoder's -color_* options lose to the frame's own,
+# and the stack filters drop them, so they are set again after stacking.
+TOPOS_COLOR = (
+    "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+)
+
+
+def topos_picture_filter(scale):
+    """Topos's own picture recipe for one screen (or one eye) of WxH.
+
+    Centre-crop to the screen's shape by display aspect, then scale with a
+    spline kernel into BT.709 limited range with square pixels: the player
+    shows 400x240 per eye with nearest-neighbour sampling, so the pixels it
+    gets are the pixels the viewer sees."""
+    w, h = scale.split(":")
+    return (
+        f"crop='min(iw,ih*{w}/{h}/sar)':'min(ih,iw*sar*{h}/{w})',"
+        f"scale={w}:{h}:flags=spline+accurate_rnd+full_chroma_int"
+        f":out_color_matrix=bt709:out_range=tv,format=yuv420p,setsar=1,{TOPOS_COLOR}"
+    )
+
+
+def _rate_kbps(rate):
+    """'2000k' / '2M' / '2000000' -> kbit/s as an int."""
+    r = rate.strip().lower()
+    mult = {"k": 1, "m": 1000}.get(r[-1:], None)
+    return int(float(r[:-1]) * mult) if mult else int(float(r) / 1000)
+
+
+def topos_codec_opts(fmt, audio, bitrate, quant):
+    """Encoder, colour and audio options for a Topos .mkv (after -c:v).
+
+    H.264 follows the player author's New 3DS settings (High@3.1 for the MVD
+    hardware decoder); MPEG-2 the Old 3DS ones (Main, CBR 2 Mbit/s, no
+    B-frames, a keyframe a second for the software decoder). --bitrate
+    replaces the rate on either; --quantizer replaces H.264's CRF."""
+    if fmt.endswith("_mpeg2"):
+        kbps = _rate_kbps(bitrate) if bitrate else 2000
+        opts = [
+            "-b:v",
+            f"{kbps}k",
+            "-maxrate",
+            f"{kbps}k",
+            "-bufsize",
+            f"{2 * kbps}k",
+            "-g",
+            "30",
+            "-bf",
+            "0",
+            "-profile:v",
+            "main",
+            "-level:v",
+            "main",
+        ]
+        default_audio = "mp2"
+    else:
+        opts = ["-preset", "slow"]
+        if bitrate:
+            kbps = _rate_kbps(bitrate)
+            opts += [
+                "-b:v",
+                f"{kbps}k",
+                "-maxrate",
+                f"{2 * kbps}k",
+                "-bufsize",
+                f"{4 * kbps}k",
+            ]
+        else:
+            opts += ["-crf", str(quant if quant > 0 else 14)]
+        opts += [
+            "-profile:v",
+            "high",
+            "-level:v",
+            "3.1",
+            "-x264-params",
+            "aq-mode=3:aq-strength=1.0:qcomp=0.65:ref=4:bframes=4:no-fast-pskip=1",
+        ]
+        default_audio = "aac"
+    opts += [
+        "-pix_fmt",
+        "yuv420p",
+        "-fps_mode",
+        "cfr",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-colorspace",
+        "bt709",
+        "-color_range",
+        "tv",
+        "-sn",
+        "-dn",
+    ]
+    if audio in ("adpcm", "default", ""):
+        audio = default_audio
+    if audio == "none":
+        opts.append("-an")
+    elif audio == "aac":
+        opts += ["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]
+    elif audio == "mp2":
+        opts += ["-c:a", "mp2", "-b:a", "96k", "-ac", "2", "-ar", "48000"]
+    else:
+        print(f"error: {fmt} takes aac, mp2 or none for its audio, not '{audio}'")
+        sys.exit(2)
+    return opts
+
+
 def resolve_output_stem(output, default_name, outdir):
     """Return the output path (without extension) to encode to.
 
@@ -556,7 +715,11 @@ def encode_chunked(chunk_cmd, workdir, ext, n_chunks, jobs):
 
     def run_chunk(i):
         r = subprocess.run(chunk_cmd(i, dsts[i]))
-        return r.returncode == 0 and os.path.isfile(dsts[i]) and os.path.getsize(dsts[i]) > 0
+        return (
+            r.returncode == 0
+            and os.path.isfile(dsts[i])
+            and os.path.getsize(dsts[i]) > 0
+        )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         ok = all(pool.map(run_chunk, range(n_chunks)))
@@ -699,7 +862,7 @@ def main():
         "fmt",
         nargs="?",
         default="mo",
-        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
+        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, topos, topos3d, topos_mpeg2, topos3d_mpeg2, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
     )
     parser.add_argument(
         "audio",
@@ -714,7 +877,7 @@ def main():
         "input2",
         nargs="?",
         default="",
-        help="Second input file (right eye for moflex3d / 3ds_camera3d). moflex3d: omit this to auto-split a single packed stereoscopic source (e.g. a BD3D MKV with StereoMode set) using --stereo or its detected layout.",
+        help="Second input file (right eye for moflex3d / topos3d / 3ds_camera3d). moflex3d and topos3d: omit this to auto-split a single packed stereoscopic source (e.g. a BD3D MKV with StereoMode set) using --stereo or its detected layout.",
     )
 
     parser.add_argument("--scale", default="", help="Override scale (e.g. 320x240)")
@@ -1187,6 +1350,13 @@ def main():
         # The archived UK Nintendo Channel clips are 3gp6, AVC constrained
         # baseline L2.1, 378x284 at 25 fps, with 32 kHz AAC-LC audio.
         mode, dmx, scale, moaud, cvc = "vid", "3gp", "378:284", 0, "libx264"
+    elif fmt in TOPOS_FORMATS:
+        # Topos, a 3DS homebrew player: Matroska with H.264 High@3.1 (the New
+        # 3DS decodes it in hardware) or MPEG-2 (software decode, for the Old
+        # 3DS). It plays 800x240 side-by-side frames as 3D and 400x240 as 2D.
+        mode = "vid3d" if fmt.startswith("topos3d") else "vid"
+        cvc = "mpeg2video" if fmt.endswith("_mpeg2") else "libx264"
+        dmx, scale, moaud = "matroska", "400:240", 0
     elif fmt == "3ds_camera":
         # 3DS Camera imports 2D AVI/MJPEG clips at 480x240 / 20 fps with
         # 16 kHz mono IMA-ADPCM. Stereoscopic camera clips have two video
@@ -1246,10 +1416,13 @@ def main():
     else:
         print(
             f"unknown format '{fmt}' "
-            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|flipnote3d|"
+            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|topos|topos3d|topos_mpeg2|topos3d_mpeg2|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|flipnote3d|"
             f"{'|'.join(AUDIO_FORMATS)})"
         )
         sys.exit(2)
+
+    if fmt in TOPOS_FORMATS and mobi_passes == 2:
+        parser.error(f"--multipass 2 is MobiClip-only; {fmt} encodes in one pass")
 
     if scale_ovr and fmt not in (
         "3ds_camera",
@@ -1541,50 +1714,77 @@ def main():
                 sys.exit(2)
 
         layout = layout_arg
-        stem = resolve_output_stem(parsed.output, f"roundtrip_moflex3d_{audio}", OUTDIR)
-        container = f"{stem}.moflex"
+        topos = fmt in TOPOS_FORMATS
+        stem = resolve_output_stem(
+            parsed.output, f"roundtrip_{fmt if topos else 'moflex3d'}_{audio}", OUTDIR
+        )
+        container = f"{stem}.{'mkv' if topos else 'moflex'}"
         watch = f"{stem}.mp4"
 
         eyew, eyeh = scale.split(":")
+        tail = f",{TOPOS_COLOR}" if topos else ""
+        if topos:
+            # Topos tells 3D from 2D by size alone (240 lines, 640+ wide),
+            # so each eye only needs its own crop and scale.
+            eye = topos_picture_filter(scale)
+            if fps_ovr:
+                eye += f",fps={fps_ovr}"
+            desc = f"{eyew}x{eyeh} per eye, side-by-side, audio={audio}"
+        else:
+            eye = f"scale={eyew}:{eyeh}"
+            desc = (
+                f"{eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio}"
+            )
 
         if dual_file:
-            print(
-                f">> encoding 3D  L={inp}  R={inp2}  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})"
+            print(f">> encoding 3D  L={inp}  R={inp2}  ->  {container}  ({desc})")
+            filter_str = (
+                f"[0:v:0]{eye}[l];[1:v:0]{eye}[r];[l][r]hstack=inputs=2{tail}[v]"
             )
-            filter_str = f"[0:v:0]scale={eyew}:{eyeh}[l];[1:v:0]scale={eyew}:{eyeh}[r];[l][r]hstack=inputs=2[v]"
             in_args = input_fmt(inp) + ["-i", inp] + input_fmt(inp2) + ["-i", inp2]
         else:
             left_mode, right_mode = eye_filters(kind, inverted)
             print(
-                f">> encoding 3D  {inp}  ({kind}{', eyes swapped' if inverted else ''})  ->  {container}  ({eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio})"
+                f">> encoding 3D  {inp}  ({kind}{', eyes swapped' if inverted else ''})  ->  {container}  ({desc})"
             )
+            # Topos crops each eye by its displayed shape, so half-resolution
+            # packing has to get its pixel shape back first.
+            unhalf = half_packed_sar(inp, kind) if topos else ""
             filter_str = (
                 f"[0:v:0]split=2[sl][sr];"
-                f"[sl]stereo3d={left_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[l];"
-                f"[sr]stereo3d={right_mode},sidedata=delete:type=STEREO3D,scale={eyew}:{eyeh}[r];"
-                f"[l][r]hstack=inputs=2[v]"
+                f"[sl]stereo3d={left_mode},sidedata=delete:type=STEREO3D,{unhalf}{eye}[l];"
+                f"[sr]stereo3d={right_mode},sidedata=delete:type=STEREO3D,{unhalf}{eye}[r];"
+                f"[l][r]hstack=inputs=2{tail}[v]"
             )
             in_args = input_fmt(inp) + ["-i", inp]
 
-        kf_opts = []
-        kf = even_gop(inp, probe_fps(inp), n_keyframes, limit=MOBICLIP_KEYINT_MAX)
-        if kf:
-            gop, count = kf
-            kf_opts = ["-g", str(gop)]
-            print(f"   keyframes: ~{count} evenly spaced (-g {gop}, scene cuts kept)")
-        # No audio: don't map an audio stream and skip -mo_audio (the moflex
-        # muxer has no "none" value — an absent audio stream is enough).
-        if audio == "none":
-            aud_opts = ["-an"]
+        if topos:
+            aud_opts = [] if audio == "none" else ["-map", "0:a:0?"]
+            codec_opts = ["-c:v", cvc] + topos_codec_opts(
+                fmt, audio, mobi_bitrate, vx_quant
+            )
         else:
-            aud_opts = ["-map", "0:a:0?", "-mo_audio", audio]
+            kf_opts = []
+            kf = even_gop(inp, probe_fps(inp), n_keyframes, limit=MOBICLIP_KEYINT_MAX)
+            if kf:
+                gop, count = kf
+                kf_opts = ["-g", str(gop)]
+                print(
+                    f"   keyframes: ~{count} evenly spaced (-g {gop}, scene cuts kept)"
+                )
+            # No audio: don't map an audio stream and skip -mo_audio (the moflex
+            # muxer has no "none" value — an absent audio stream is enough).
+            if audio == "none":
+                aud_opts = ["-an"]
+            else:
+                aud_opts = ["-map", "0:a:0?", "-mo_audio", audio]
+            codec_opts = ["-c:v", cvc, "-mo_layout", str(layout)] + kf_opts
         cmd = (
             [FFENC, "-nostdin", "-y"]
             + in_args
             + ["-filter_complex", filter_str, "-map", "[v]"]
             + aud_opts
-            + ["-c:v", cvc, "-mo_layout", str(layout)]
-            + kf_opts
+            + codec_opts
             + extra_args
             + [container]
         )
@@ -1834,6 +2034,8 @@ def main():
         "gba_hydrogen": "mmstr",
         "wii_photo": "avi",
         "nintendo_channel": "3gp",
+        "topos": "mkv",
+        "topos_mpeg2": "mkv",
         "3ds_camera": "avi",
         "factor5": "vid",
         "flipnote": "ppm",
@@ -2226,6 +2428,8 @@ def main():
             enc_opts.append("-an")
         else:
             enc_opts.extend(["-c:a", "aac", "-b:a", "50k", "-ar", "32000", "-ac", "2"])
+    elif fmt in TOPOS_FORMATS:
+        enc_opts.extend(topos_codec_opts(fmt, audio, mobi_bitrate, vx_quant))
     elif fmt == "3ds_camera":
         enc_opts.extend(
             ["-qscale:v", str(vx_quant if vx_quant > 0 else 3), "-pix_fmt", "yuvj420p"]
@@ -2265,7 +2469,9 @@ def main():
         fps_filter = "fps=30000/1001"
 
     filters = []
-    if scale:
+    if fmt in TOPOS_FORMATS:
+        filters.append(topos_picture_filter(scale))
+    elif scale:
         filters.append(f"scale={scale}")
     if fps_filter:
         filters.append(fps_filter)
@@ -2389,7 +2595,11 @@ def main():
                 if fo[i] == "-map" and fo[i + 1] == "0:v":
                     fo[i + 1] = f"{k}:v"
             if "-map" not in fo:
-                fo = ["-map", f"{k}:v"] + ([] if "-an" in fo else ["-map", "0:a:0?"]) + fo
+                fo = (
+                    ["-map", f"{k}:v"]
+                    + ([] if "-an" in fo else ["-map", "0:a:0?"])
+                    + fo
+                )
             print(">> joining chunks")
             run_cmd(
                 [FFENC, "-nostdin", "-y"]

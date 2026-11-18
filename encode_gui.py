@@ -111,6 +111,10 @@ ENCODE_EXTENSIONS = {
     "gba_hydrogen": "mmstr",
     "wii_photo": "avi",
     "nintendo_channel": "3gp",
+    "topos": "mkv",
+    "topos3d": "mkv",
+    "topos_mpeg2": "mkv",
+    "topos3d_mpeg2": "mkv",
     "3ds_camera": "avi",
     "3ds_camera3d": "avi",
     "wii_photo_m4a": "m4a",
@@ -295,6 +299,10 @@ class EncodeGUI(tk.Tk):
             "Wii Photo Channel Motion-JPEG .avi": "wii_photo",
             "Wii Photo Channel AAC .m4a": "wii_photo_m4a",
             "Wii Nintendo Channel .3gp": "nintendo_channel",
+            "3DS Topos player H.264 .mkv (2D)": "topos",
+            "3DS Topos player H.264 .mkv (3D)": "topos3d",
+            "3DS Topos player MPEG-2 .mkv (2D)": "topos_mpeg2",
+            "3DS Topos player MPEG-2 .mkv (3D)": "topos3d_mpeg2",
             "Nintendo 3DS Camera 2D .avi": "3ds_camera",
             "Nintendo 3DS Camera 3D .avi": "3ds_camera3d",
             "Nintendo 3DS Sound AAC .m4a": "3ds_sound",
@@ -331,6 +339,10 @@ class EncodeGUI(tk.Tk):
             "wii_photo": ["pcm", "none"],
             "wii_photo_m4a": ["aac"],
             "nintendo_channel": ["aac", "none"],
+            "topos": ["aac", "mp2", "none"],
+            "topos3d": ["aac", "mp2", "none"],
+            "topos_mpeg2": ["mp2", "aac", "none"],
+            "topos3d_mpeg2": ["mp2", "aac", "none"],
             "3ds_camera": ["adpcm", "none"],
             "3ds_camera3d": ["adpcm", "none"],
             "3ds_sound": ["aac"],
@@ -716,7 +728,7 @@ class EncodeGUI(tk.Tk):
         # so rows collapse instead of sitting there greyed out.
         self.enc_conditional_widgets = [
             (
-                {"moflex3d", "3ds_camera3d"},
+                {"moflex3d", "topos3d", "topos3d_mpeg2", "3ds_camera3d"},
                 (self.enc_input2_label, self.enc_input2_entry, self.enc_input2_btn),
             ),
             ({"moflex3d"}, (self.enc_layout_label, self.enc_layout_entry)),
@@ -737,6 +749,8 @@ class EncodeGUI(tk.Tk):
                     "3ds_camera",
                     "3ds_camera3d",
                     "factor5",
+                    "topos",
+                    "topos3d",
                 },
                 (self.enc_quant_label, self.enc_quant_entry),
             ),
@@ -1184,7 +1198,7 @@ class EncodeGUI(tk.Tk):
         )
         cmd.extend([fmt, audio, inp1])
 
-        if fmt in ("moflex3d", "3ds_camera3d"):
+        if fmt in ("moflex3d", "topos3d", "topos3d_mpeg2", "3ds_camera3d"):
             if inp2:
                 cmd.append(inp2)
             if fmt == "moflex3d":
@@ -1222,6 +1236,8 @@ class EncodeGUI(tk.Tk):
             "3ds_camera",
             "3ds_camera3d",
             "factor5",
+            "topos",
+            "topos3d",
         ):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
@@ -1243,6 +1259,10 @@ class EncodeGUI(tk.Tk):
             "factor5",
             "flipnote",
             "flipnote3d",
+            "topos",
+            "topos3d",
+            "topos_mpeg2",
+            "topos3d_mpeg2",
         ):
             fps = self.enc_fps_var.get().strip()
             if fps:

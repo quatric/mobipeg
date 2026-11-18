@@ -38,6 +38,7 @@ such as audio, video, subtitles and related metadata.
 | Super MOFLEX | `.moflex` | Nintendo 3DS | ✅ | ✅ |
 | RVID | `.rvid` | RocketVideo (DS) | ✅ | ✅ |
 | THP | `.thp` | GameCube / Wii | ✅ | ✅ |
+| Topos player (2D / SBS 3D) | `.mkv` | Nintendo 3DS homebrew | ✅ | ✅ |
 | Wii Photo Channel | `.avi` | Wii | ✅ | ✅ |
 | TiVo TyStream | `.ty` / `.ty+` / `.tmf` | TiVo (Series 1–3) | ✅ | ✅ |
 | VX | `.vx` | Nintendo DS | ✅ | ✅ |
@@ -253,6 +254,37 @@ Copy either file to a DCIM camera folder and name it in the Camera's
 ```sh
 python3 encode.py 3ds_camera adpcm input.mp4
 python3 encode.py 3ds_camera3d adpcm left.mp4 right.mp4
+```
+
+### Topos 3DS video player
+
+[Topos](https://github.com/mockmodular/topos_3ds-video-player) is a 3DS
+homebrew player for Matroska files. It plays 800x240 side-by-side frames as 3D
+and 400x240 frames as 2D. Four presets follow the player author's encoding
+settings:
+
+| `fmt` | Video | Audio (default) | For |
+|---|---|---|---|
+| `topos` | H.264 High@3.1, 400x240 | AAC 128k | New 3DS, decoded in hardware |
+| `topos3d` | H.264 High@3.1, 800x240 SBS | AAC 128k | New 3DS, decoded in hardware |
+| `topos_mpeg2` | MPEG-2 Main, 2 Mbit/s CBR, 400x240 | MP2 96k | Old 3DS, software decode |
+| `topos3d_mpeg2` | MPEG-2 Main, 2 Mbit/s CBR, 800x240 SBS | MP2 96k | Old 3DS (the player's author reports 3D does not keep up there yet) |
+
+Each eye is centre-cropped to the screen's 5:3 shape by its display aspect, so
+nothing is stretched, then scaled with a spline kernel into BT.709. The frame
+rate stays the source's unless `--fps` is given. The 3D presets take a left and
+a right input file, or a single packed stereoscopic source like `moflex3d`;
+half-resolution side-by-side (1920x1080 holding two 960x1080 eyes) and
+top-bottom sources are recognised by their shape and get their aspect back
+before cropping. `--quantizer` sets the H.264 CRF (default 14) and
+`--bitrate` replaces the rate on either codec. Audio is 48 kHz stereo `aac`,
+`mp2` or `none`.
+
+```sh
+python3 encode.py topos aac input.mp4
+python3 encode.py topos3d aac left.mp4 right.mp4
+python3 encode.py topos3d aac movie_sbs.mkv --stereo sbs
+python3 encode.py topos3d_mpeg2 mp2 movie_sbs.mkv --stereo sbs
 ```
 
 ### Splitting stereoscopic MOFLEX video
