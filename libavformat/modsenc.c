@@ -637,6 +637,19 @@ static int mods_write_header(AVFormatContext *s)
 
     st = s->streams[m->video_index];
 
+    /* On a stream copy avg_frame_rate is often unset; fall back to the
+     * frame rate implied by the stream (r_frame_rate, then a one-tick-per-
+     * frame time base such as the one our demuxer exports).  The header and
+     * the audio pacing both need it: pacing at the 30 fps default instead
+     * left a copied 25 fps video with audio for only 25 s of every 30. */
+    fps = st->avg_frame_rate;
+    if (fps.num <= 0 || fps.den <= 0)
+        fps = st->r_frame_rate;
+    if ((fps.num <= 0 || fps.den <= 0) &&
+        st->time_base.num > 0 && st->time_base.den > 0 &&
+        av_cmp_q(st->time_base, (AVRational){1, 240}) >= 0)
+        fps = av_inv_q(st->time_base);
+
     /* -mo_audio selection: fastaudio=0 adpcm=1 pcm=2 none=3 codebook=4.
      * codebook = retail SX = the ActImagine VX audio codec.  The audio stream
      * is either pcm_s16le, which the trailer encodes with vx_audio itself and
@@ -670,9 +683,8 @@ static int mods_write_header(AVFormatContext *s)
         retail_codec = MODS_ACODEC_CODEBOOK;
         /* pacing for the trailer's per-frame block distribution */
         {
-            AVRational vfr = st->avg_frame_rate;
-            double fps_val = (vfr.num > 0 && vfr.den > 0)
-                           ? (double)vfr.num / vfr.den : 30.0;
+            double fps_val = (fps.num > 0 && fps.den > 0)
+                           ? (double)fps.num / fps.den : 30.0;
             m->spf = (double)m->sx_rate / fps_val;
         }
     } else {
@@ -710,9 +722,8 @@ static int mods_write_header(AVFormatContext *s)
         /* All three codecs use 256-sample blocks; pace ~rate/fps samples/frame. */
         m->block_samples = 256;
         {
-            AVRational vfr = st->avg_frame_rate;
-            double fps_val = (vfr.num > 0 && vfr.den > 0)
-                           ? (double)vfr.num / vfr.den : 30.0;
+            double fps_val = (fps.num > 0 && fps.den > 0)
+                           ? (double)fps.num / fps.den : 30.0;
             int rate = ap->sample_rate ? ap->sample_rate : 32000;
             m->spf = (double)rate / fps_val;
         }
@@ -725,17 +736,6 @@ static int mods_write_header(AVFormatContext *s)
     avio_wl32(pb, st->codecpar->width);     /* 0x0C */
     avio_wl32(pb, st->codecpar->height);    /* 0x10 */
 
-    /* On a stream copy avg_frame_rate is often unset; fall back to the
-     * frame rate implied by the stream (r_frame_rate, then a one-tick-per-
-     * frame time base such as the one our demuxer exports) before the
-     * 30 fps default. */
-    fps = st->avg_frame_rate;
-    if (fps.num <= 0 || fps.den <= 0)
-        fps = st->r_frame_rate;
-    if ((fps.num <= 0 || fps.den <= 0) &&
-        st->time_base.num > 0 && st->time_base.den > 0 &&
-        av_cmp_q(st->time_base, (AVRational){1, 240}) >= 0)
-        fps = av_inv_q(st->time_base);
     if (fps.num > 0 && fps.den > 0)
         avio_wl32(pb, (uint32_t)((uint64_t)fps.num * 0x1000000ULL / fps.den));
     else
