@@ -523,7 +523,9 @@ def _rate_kbps(rate):
 
 
 def topos_codec_opts(fmt, audio, bitrate, quant):
-    """Encoder, colour and audio options for a Topos .mkv (after -c:v).
+    """(video, audio) options for a Topos .mkv: the video encoder's own
+    options (after -c:v) with its colour tags, then the audio and stream
+    selection ones.
 
     H.264 follows the player author's New 3DS settings (High@3.1 for the MVD
     hardware decoder); MPEG-2 the Old 3DS ones (Main, CBR 2 Mbit/s, no
@@ -584,21 +586,20 @@ def topos_codec_opts(fmt, audio, bitrate, quant):
         "bt709",
         "-color_range",
         "tv",
-        "-sn",
-        "-dn",
     ]
+    aopts = ["-sn", "-dn"]
     if audio in ("adpcm", "default", ""):
         audio = default_audio
     if audio == "none":
-        opts.append("-an")
+        aopts.append("-an")
     elif audio == "aac":
-        opts += ["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]
+        aopts += ["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]
     elif audio == "mp2":
-        opts += ["-c:a", "mp2", "-b:a", "96k", "-ac", "2", "-ar", "48000"]
+        aopts += ["-c:a", "mp2", "-b:a", "96k", "-ac", "2", "-ar", "48000"]
     else:
         print(f"error: {fmt} takes aac, mp2 or none for its audio, not '{audio}'")
         sys.exit(2)
-    return opts
+    return opts, aopts
 
 
 def resolve_output_stem(output, default_name, outdir):
@@ -733,6 +734,151 @@ def encode_chunked(chunk_cmd, workdir, ext, n_chunks, jobs):
             path = os.path.abspath(dst).replace("'", "'\\''")
             f.write(f"file '{path}'\n")
     return listfile
+
+
+def plan_chunks(inp, jobs, out_fps, lo, hi, unit):
+    """(n_chunks, chunk_frames) for a chunked encode, or None to encode in
+    one piece.  Chunks run lo..hi seconds, as near dur / jobs as that
+    allows, and are a whole number of `unit` frames (the keyframe interval
+    the chunks are cut on)."""
+    dur = probe_duration(inp)
+    if not dur or not out_fps:
+        return None
+    target = min(hi, max(lo, dur / jobs))
+    if dur < 2 * target:
+        return None
+    chunk_frames = max(1, round(target * out_fps / unit)) * unit
+    # The last chunk runs to the end of the video, so it may be up to twice
+    # as long: that way it can never start past the end of a video a little
+    # shorter than its container.
+    return max(1, int(dur * out_fps) // chunk_frames), chunk_frames
+
+
+def chunked_video(
+    inputs,
+    filter_args,
+    vopts,
+    plan,
+    out_fps,
+    container,
+    ext,
+    jobs,
+    tail=(),
+    audio_opts=None,
+):
+    """Encode the video of `inputs` in the chunks `plan` describes.
+
+    filter_args is the -vf or -filter_complex/-map part of the one-piece
+    command and vopts the video encoder's options; every input is seeked to
+    the chunk's start, so a two-input 3D encode stays in step.  Given
+    audio_opts, the first input's first audio track is encoded with them
+    alongside the chunks, into CHUNK_AUDIO next to the list, so the join
+    only has to copy streams.  Returns the ffconcat list from
+    encode_chunked, or None."""
+    n_chunks, chunk_frames = plan
+    workdir = tempfile.mkdtemp(
+        prefix=".chunks_", dir=os.path.dirname(os.path.abspath(container))
+    )
+    atexit.register(shutil.rmtree, workdir, True)
+    audio_job = None
+    if audio_opts is not None and probe_has_audio(inputs[0]):
+        audio_job = subprocess.Popen(
+            [FFENC, "-nostdin", "-y", "-v", "error"]
+            + input_fmt(inputs[0])
+            + ["-i", inputs[0], "-map", "0:a:0", "-vn", "-sn", "-dn"]
+            + audio_opts
+            + [os.path.join(workdir, CHUNK_AUDIO)]
+        )
+
+    def chunk_cmd(i, dst):
+        # An input -ss seeks exactly (ffmpeg decodes from the keyframe
+        # before it and drops what comes earlier), so chunk i starts on
+        # output frame i * chunk_frames.
+        start = Fraction(i * chunk_frames) / out_fps
+        seek = ["-ss", f"{float(start):.6f}"] if i else []
+        ins = []
+        for path in inputs:
+            ins += seek + input_fmt(path) + ["-i", path]
+        return (
+            [FFENC, "-nostdin", "-y", "-v", "error"]
+            + ins
+            + filter_args
+            + ["-an", "-sn", "-dn"]
+            + (["-frames:v", str(chunk_frames)] if i < n_chunks - 1 else [])
+            + vopts
+            + ["-threads", "2"]
+            + list(tail)
+            + [dst]
+        )
+
+    print(f">> encoding video in {n_chunks} chunks, {jobs} at a time")
+    chunk_list = encode_chunked(chunk_cmd, workdir, ext, n_chunks, jobs)
+    if audio_job and audio_job.wait() != 0:
+        print("warning: audio encode failed; encoding in one piece")
+        return None
+    return chunk_list
+
+
+# The audio chunked_video encodes next to its chunks when asked to.
+CHUNK_AUDIO = "audio.mka"
+
+
+def probe_has_audio(inp):
+    """True if inp has an audio stream."""
+    p = subprocess.run(
+        [FFPROBE, "-v", "error"]
+        + input_fmt(inp)
+        + ["-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0"]
+        + [inp],
+        capture_output=True,
+        text=True,
+    )
+    return bool(p.stdout.strip())
+
+
+def join_chunks_copy(chunk_list, container, run_cmd):
+    """Mux the chunks' video and any CHUNK_AUDIO beside them into container,
+    copying both; neither is encoded again."""
+    audio = os.path.join(os.path.dirname(chunk_list), CHUNK_AUDIO)
+    has_audio = os.path.isfile(audio)
+    print(">> joining chunks")
+    ok = run_cmd(
+        [FFENC, "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", chunk_list]
+        + (["-i", audio, "-map", "0:v", "-map", "1:a"] if has_audio else [])
+        + ["-c", "copy", container]
+    )
+    shutil.rmtree(os.path.dirname(chunk_list), True)
+    return ok
+
+
+def output_fps(inp, fmt, fps_ovr):
+    """The frame rate an encode of inp comes out at, or None if unknown."""
+    if fps_ovr:
+        return Fraction(fps_ovr)
+    if fmt == "mo":
+        return Fraction(30000, 1001)
+    src_fps = probe_fps(inp)
+    return Fraction(src_fps).limit_denominator(1001) if src_fps else None
+
+
+def chunk_shape(fmt):
+    """(lo, hi) chunk seconds and the keyframe unit chunks are cut on, for
+    the formats whose video can be encoded in chunks; None for the rest."""
+    if fmt in ("mo", "moflex", "smoflex", "super_moflex"):
+        return 3.0, 6.0, None
+    if fmt == "mods":
+        # .mods has no periodic keyframes, so every chunk adds one: keep its
+        # chunks longer.
+        return 10.0, 30.0, None
+    if fmt in TOPOS_FORMATS:
+        if fmt.endswith("_mpeg2"):
+            # Cut on its 30-frame GOPs, so the chunks add no keyframes.
+            return 3.0, 6.0, 30
+        # H.264's own keyframes are 250 frames apart; longer chunks keep the
+        # extra ones few, and one encoder already keeps four or five cores
+        # busy, so the gain is in running one chunk per job, not many.
+        return 5.0, 60.0, None
+    return None
 
 
 def package_cia(parsed):
@@ -1759,10 +1905,9 @@ def main():
             in_args = input_fmt(inp) + ["-i", inp]
 
         if topos:
-            aud_opts = [] if audio == "none" else ["-map", "0:a:0?"]
-            codec_opts = ["-c:v", cvc] + topos_codec_opts(
-                fmt, audio, mobi_bitrate, vx_quant
-            )
+            tv, ta = topos_codec_opts(fmt, audio, mobi_bitrate, vx_quant)
+            aud_opts = ([] if audio == "none" else ["-map", "0:a:0?"]) + ta
+            codec_opts = ["-c:v", cvc] + tv
         else:
             kf_opts = []
             kf = even_gop(inp, probe_fps(inp), n_keyframes, limit=MOBICLIP_KEYINT_MAX)
@@ -1788,7 +1933,28 @@ def main():
             + extra_args
             + [container]
         )
-        run_cmd(cmd) or sys.exit(1)
+        chunk_list = None
+        jobs = parsed.jobs if parsed.jobs > 0 else default_jobs()
+        if topos and jobs > 1 and not extra_args:
+            lo, hi, unit = chunk_shape(fmt)
+            out_fps = output_fps(inp, fmt, fps_ovr)
+            plan = plan_chunks(inp, jobs, out_fps, lo, hi, unit or 1)
+            if plan:
+                chunk_list = chunked_video(
+                    [inp, inp2] if dual_file else [inp],
+                    ["-filter_complex", filter_str, "-map", "[v]"],
+                    codec_opts,
+                    plan,
+                    out_fps,
+                    container,
+                    "mkv",
+                    jobs,
+                    audio_opts=None if audio == "none" else ta,
+                )
+        if chunk_list:
+            join_chunks_copy(chunk_list, container, run_cmd) or sys.exit(1)
+        else:
+            run_cmd(cmd) or sys.exit(1)
 
         if roundtrip:
             print(f">> decoding  {container}  ->  {watch}  (single SBS video, mpeg4)")
@@ -2429,7 +2595,10 @@ def main():
         else:
             enc_opts.extend(["-c:a", "aac", "-b:a", "50k", "-ar", "32000", "-ac", "2"])
     elif fmt in TOPOS_FORMATS:
-        enc_opts.extend(topos_codec_opts(fmt, audio, mobi_bitrate, vx_quant))
+        tv, ta = topos_codec_opts(fmt, audio, mobi_bitrate, vx_quant)
+        enc_opts.extend(tv)
+        vopt_end = len(enc_opts)
+        enc_opts.extend(ta)
     elif fmt == "3ds_camera":
         enc_opts.extend(
             ["-qscale:v", str(vx_quant if vx_quant > 0 else 3), "-pix_fmt", "yuvj420p"]
@@ -2531,61 +2700,39 @@ def main():
     else:
         chunk_list = None
         jobs = parsed.jobs if parsed.jobs > 0 else default_jobs()
+        shape = chunk_shape(fmt)
         if (
             vopt_end is not None
+            and shape
             and mode == "vid"
             and jobs > 1
             and not extra_args
-            and fmt in ("mo", "moflex", "smoflex", "super_moflex", "mods")
             # FastAudio .mods keeps a single keyframe; chunks would add more.
             and not (fmt == "mods" and audio == "fastaudio")
         ):
-            # .mods has no periodic keyframes, so every chunk adds one: keep
-            # its chunks longer.
-            lo, hi = (10.0, 30.0) if fmt == "mods" else (3.0, 6.0)
-            dur = probe_duration(inp)
-            if fps_ovr:
-                out_fps = Fraction(fps_ovr)
-            elif fmt == "mo":
-                out_fps = Fraction(30000, 1001)
-            else:
-                src_fps = probe_fps(inp)
-                out_fps = Fraction(src_fps).limit_denominator(1001) if src_fps else None
-            target = min(hi, max(lo, dur / jobs)) if dur else 0
-            if dur and out_fps and dur >= 2 * target:
-                chunk_frames = max(1, round(target * out_fps / chunk_unit)) * chunk_unit
-                # The last chunk runs to the end of the video, so it may be up
-                # to twice as long: that way it can never start past the end
-                # of a video a little shorter than its container.
-                n_chunks = max(1, int(dur * out_fps) // chunk_frames)
-                workdir = tempfile.mkdtemp(
-                    prefix=".chunks_", dir=os.path.dirname(os.path.abspath(container))
+            lo, hi, unit = shape
+            out_fps = output_fps(inp, fmt, fps_ovr)
+            plan = plan_chunks(inp, jobs, out_fps, lo, hi, unit or chunk_unit)
+            if plan:
+                chunk_list = chunked_video(
+                    [inp],
+                    vf,
+                    enc_opts[vopt_start:vopt_end],
+                    plan,
+                    out_fps,
+                    container,
+                    out_ext,
+                    jobs,
+                    ["-mo_audio", "none"] if fmt in ("mo", "mods") else [],
+                    (
+                        enc_opts[vopt_end:]
+                        if fmt in TOPOS_FORMATS and audio != "none"
+                        else None
+                    ),
                 )
-                atexit.register(shutil.rmtree, workdir, True)
-                vopts = enc_opts[vopt_start:vopt_end]
-
-                def chunk_cmd(i, dst):
-                    # An input -ss seeks exactly (ffmpeg decodes from the
-                    # keyframe before it and drops what comes earlier), so
-                    # chunk i starts on output frame i * chunk_frames.
-                    start = Fraction(i * chunk_frames) / out_fps
-                    return (
-                        [FFENC, "-nostdin", "-y", "-v", "error"]
-                        + (["-ss", f"{float(start):.6f}"] if i else [])
-                        + input_fmt(inp)
-                        + ["-i", inp]
-                        + vf
-                        + ["-an", "-sn", "-dn"]
-                        + (["-frames:v", str(chunk_frames)] if i < n_chunks - 1 else [])
-                        + vopts
-                        + ["-threads", "2"]
-                        + (["-mo_audio", "none"] if fmt in ("mo", "mods") else [])
-                        + [dst]
-                    )
-
-                print(f">> encoding video in {n_chunks} chunks, {jobs} at a time")
-                chunk_list = encode_chunked(chunk_cmd, workdir, out_ext, n_chunks, jobs)
-        if chunk_list:
+        if chunk_list and fmt in TOPOS_FORMATS:
+            join_chunks_copy(chunk_list, container, run_cmd) or sys.exit(1)
+        elif chunk_list:
             # Mux exactly as the one-piece encode would, but take the video
             # from the joined chunks: the concat input goes after any extra
             # inputs so their stream indices stay put.
