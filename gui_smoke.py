@@ -56,32 +56,43 @@ def widget_row(w):
 
 def check_tables(gui, encode):
     """The GUI's tables against encode.py's."""
-    check(set(gui.AUDIO_ONLY_FORMATS) == set(encode.AUDIO_FORMATS),
-          "AUDIO_ONLY_FORMATS %s != encode.AUDIO_FORMATS %s"
-          % (sorted(gui.AUDIO_ONLY_FORMATS), sorted(encode.AUDIO_FORMATS)))
+    check(
+        set(gui.AUDIO_ONLY_FORMATS) == set(encode.AUDIO_FORMATS),
+        "AUDIO_ONLY_FORMATS %s != encode.AUDIO_FORMATS %s"
+        % (sorted(gui.AUDIO_ONLY_FORMATS), sorted(encode.AUDIO_FORMATS)),
+    )
 
     for label, fmt in gui.app.formats_map.items():
-        check(fmt in gui.app.audio_options,
-              "format %r (%s) has no audio_options entry" % (fmt, label))
-        check(gui.app.audio_options.get(fmt),
-              "format %r offers an empty audio codec list" % fmt)
+        check(
+            fmt in gui.app.audio_options,
+            "format %r (%s) has no audio_options entry" % (fmt, label),
+        )
+        check(
+            gui.app.audio_options.get(fmt),
+            "format %r offers an empty audio codec list" % fmt,
+        )
 
     # For the audio-only formats the dropdown choices are keys into encode.py's
     # codec table. Offering anything else means encode.py silently substitutes.
     for fmt in gui.AUDIO_ONLY_FORMATS:
         codecs = encode.AUDIO_FORMAT_CODECS.get(fmt)
-        if not check(codecs is not None,
-                     "%r is audio-only but encode.py has no codec table for it"
-                     % fmt):
+        if not check(
+            codecs is not None,
+            "%r is audio-only but encode.py has no codec table for it" % fmt,
+        ):
             continue
         for choice in gui.app.audio_options.get(fmt, []):
-            check(choice in codecs,
-                  "GUI offers %r=%r, which encode.py would substitute (has %s)"
-                  % (fmt, choice, sorted(codecs)))
+            check(
+                choice in codecs,
+                "GUI offers %r=%r, which encode.py would substitute (has %s)"
+                % (fmt, choice, sorted(codecs)),
+            )
 
     for fmt in encode.AUDIO_FORMATS:
-        check(fmt in gui.app.formats_map.values(),
-              "encode.py supports %r but the GUI does not offer it" % fmt)
+        check(
+            fmt in gui.app.formats_map.values(),
+            "encode.py supports %r but the GUI does not offer it" % fmt,
+        )
 
 
 def check_per_format(gui, dump=False):
@@ -106,24 +117,31 @@ def check_per_format(gui, dump=False):
 
         expected = app.audio_options[fmt]
         actual = list(app.enc_audio_cb.cget("values"))
-        check(actual == list(expected),
-              "%s: audio dropdown is %s, expected %s" % (fmt, actual, expected))
-        check(app.enc_audio_var.get() in expected,
-              "%s: selected audio %r is not among %s"
-              % (fmt, app.enc_audio_var.get(), expected))
+        check(
+            actual == list(expected),
+            "%s: audio dropdown is %s, expected %s" % (fmt, actual, expected),
+        )
+        check(
+            app.enc_audio_var.get() in expected,
+            "%s: selected audio %r is not among %s"
+            % (fmt, app.enc_audio_var.get(), expected),
+        )
 
         audio_only = fmt in gui.AUDIO_ONLY_FORMATS
         for name, label, entry in video_only:
+            # A few video formats deliberately leave Highest Quality out.
+            no_field = audio_only or (
+                name == "highest-quality" and fmt in gui.NO_HQ_FORMATS
+            )
             for w in (label, entry):
                 mapped = is_shown(w)
-                if audio_only:
-                    check(not mapped,
-                          "%s is audio-only but still shows the %s field"
-                          % (fmt, name))
+                if no_field:
+                    check(not mapped, "%s should not show the %s field" % (fmt, name))
                 else:
-                    check(mapped,
-                          "%s is a video format but hides the %s field"
-                          % (fmt, name))
+                    check(
+                        mapped,
+                        "%s is a video format but hides the %s field" % (fmt, name),
+                    )
 
         if dump:
             print("\n--- %s (%s)" % (fmt, label_for[fmt]))
@@ -140,8 +158,10 @@ def check_per_format(gui, dump=False):
                     pass
                 rows.append((pos[0], pos[1], pos[2], text or child.winfo_class()))
             for row, col, mapped, text in sorted(rows):
-                print("    row %2d col %d %s %s"
-                      % (row, col, "vis " if mapped else "HID", text))
+                print(
+                    "    row %2d col %d %s %s"
+                    % (row, col, "vis " if mapped else "HID", text)
+                )
 
 
 def check_ffargs(gui):
@@ -155,10 +175,16 @@ def check_ffargs(gui):
     probe = os.path.abspath(__file__)
 
     for tab, setup, run in (
-        ("encode", lambda v: (app.enc_input_var.set(probe),
-                              app.enc_ffargs_var.set(v)), lambda: app.run_encoding()),
-        ("decode", lambda v: (app.dec_input_var.set(probe),
-                              app.dec_ffargs_var.set(v)), lambda: app.run_decoding()),
+        (
+            "encode",
+            lambda v: (app.enc_input_var.set(probe), app.enc_ffargs_var.set(v)),
+            lambda: app.run_encoding(),
+        ),
+        (
+            "decode",
+            lambda v: (app.dec_input_var.set(probe), app.dec_ffargs_var.set(v)),
+            lambda: app.run_decoding(),
+        ),
     ):
         setup("-t 5 -af volume=0.5")
         del captured[:]
@@ -166,19 +192,24 @@ def check_ffargs(gui):
         if not check(captured, "%s tab: no command was built" % tab):
             continue
         cmd = captured[-1]
-        if check("--ffmpeg-args" in cmd,
-                 "%s tab: --ffmpeg-args missing from %s" % (tab, cmd)):
+        if check(
+            "--ffmpeg-args" in cmd, "%s tab: --ffmpeg-args missing from %s" % (tab, cmd)
+        ):
             value = cmd[cmd.index("--ffmpeg-args") + 1]
-            check(value == "-t 5 -af volume=0.5",
-                  "%s tab: --ffmpeg-args carried %r" % (tab, value))
+            check(
+                value == "-t 5 -af volume=0.5",
+                "%s tab: --ffmpeg-args carried %r" % (tab, value),
+            )
 
         # Blank must not pass an empty argument through.
         setup("")
         del captured[:]
         run()
         if captured:
-            check("--ffmpeg-args" not in captured[-1],
-                  "%s tab: blank field still passed --ffmpeg-args" % tab)
+            check(
+                "--ffmpeg-args" not in captured[-1],
+                "%s tab: blank field still passed --ffmpeg-args" % tab,
+            )
 
 
 def check_flipnote(gui):
@@ -186,8 +217,12 @@ def check_flipnote(gui):
     .kwz-only settings for .kwz alone, and reach encode.py's argv."""
     app = gui.app
     label_for = {v: k for k, v in app.formats_map.items()}
-    kwz_only = (app.enc_flip_dither_cb, app.enc_flip_paper_cb,
-                app.enc_flip_key_entry, app.enc_flip_loop_chk)
+    kwz_only = (
+        app.enc_flip_dither_cb,
+        app.enc_flip_paper_cb,
+        app.enc_flip_key_entry,
+        app.enc_flip_loop_chk,
+    )
     captured = []
     app.execute_cmd = lambda cmd, btn: captured.append(list(cmd))
     app.enc_input_var.set(os.path.abspath(__file__))
@@ -198,12 +233,16 @@ def check_flipnote(gui):
         app.on_enc_format_change()
         app.update_idletasks()
         flip = fmt in ("flipnote", "flipnote3d")
-        check(is_shown(app.enc_flip_frame) == flip,
-              "%s: Flipnote options are %s" % (fmt, "hidden" if flip else "shown"))
+        check(
+            is_shown(app.enc_flip_frame) == flip,
+            "%s: Flipnote options are %s" % (fmt, "hidden" if flip else "shown"),
+        )
         if flip:
             for w in kwz_only:
-                check(is_shown(w) == (fmt == "flipnote3d"),
-                      "%s: wrong visibility for a .kwz-only Flipnote setting" % fmt)
+                check(
+                    is_shown(w) == (fmt == "flipnote3d"),
+                    "%s: wrong visibility for a .kwz-only Flipnote setting" % fmt,
+                )
 
     for fmt in ("flipnote", "flipnote3d"):
         app.enc_fmt_var.set(label_for[fmt])
@@ -218,13 +257,24 @@ def check_flipnote(gui):
         if not check(captured, "%s: no command was built" % fmt):
             continue
         cmd = captured[-1]
-        check(cmd[cmd.index("--flipnote-author") + 1] == "tester"
-              if "--flipnote-author" in cmd else False,
-              "%s: --flipnote-author missing from %s" % (fmt, cmd))
-        for flag, value in (("--flipnote-dither", "2x2"), ("--flipnote-paper", "black"),
-                            ("--flipnote-key", "key.der"), ("--flipnote-loop", None)):
+        check(
+            (
+                cmd[cmd.index("--flipnote-author") + 1] == "tester"
+                if "--flipnote-author" in cmd
+                else False
+            ),
+            "%s: --flipnote-author missing from %s" % (fmt, cmd),
+        )
+        for flag, value in (
+            ("--flipnote-dither", "2x2"),
+            ("--flipnote-paper", "black"),
+            ("--flipnote-key", "key.der"),
+            ("--flipnote-loop", None),
+        ):
             if fmt == "flipnote3d":
-                ok = flag in cmd and (value is None or cmd[cmd.index(flag) + 1] == value)
+                ok = flag in cmd and (
+                    value is None or cmd[cmd.index(flag) + 1] == value
+                )
                 check(ok, "%s: %s missing from %s" % (fmt, flag, cmd))
             else:
                 check(flag not in cmd, "%s: passed the .kwz-only %s" % (fmt, flag))
@@ -235,11 +285,21 @@ def check_flipnote(gui):
 
 def check_decoder_families(gui):
     exts = " ".join(e for _, e in gui.DECODER_FAMILIES)
-    for ext in ("*.dpg", "*.dsp", "*.brstm", "*.bfstm", "*.bcstm",
-                "*.bns", "*.ast", "*.btsnd"):
+    for ext in (
+        "*.dpg",
+        "*.dsp",
+        "*.brstm",
+        "*.bfstm",
+        "*.bcstm",
+        "*.bns",
+        "*.ast",
+        "*.btsnd",
+    ):
         check(ext in exts, "%s is missing from DECODER_FAMILIES" % ext)
-    check(gui.DECODE_FILETYPES[0][0] == "All supported",
-          "the decode file dialog lost its 'All supported' entry")
+    check(
+        gui.DECODE_FILETYPES[0][0] == "All supported",
+        "the decode file dialog lost its 'All supported' entry",
+    )
 
 
 def main():
@@ -250,17 +310,21 @@ def main():
     try:
         import encode_gui as gui
     except ImportError as e:
-        print("cannot import encode_gui (%s).\n"
-              "This needs tkinter and a display; on a headless machine run\n"
-              "    xvfb-run -a python3 gui_smoke.py" % e)
+        print(
+            "cannot import encode_gui (%s).\n"
+            "This needs tkinter and a display; on a headless machine run\n"
+            "    xvfb-run -a python3 gui_smoke.py" % e
+        )
         return 2
     import encode
 
     try:
         gui.app = gui.EncodeGUI()
     except Exception as e:
-        print("could not create the GUI: %s\n"
-              "On a headless machine run it under xvfb-run." % e)
+        print(
+            "could not create the GUI: %s\n"
+            "On a headless machine run it under xvfb-run." % e
+        )
         return 2
     gui.app.withdraw()
     gui.app.update_idletasks()
