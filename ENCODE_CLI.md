@@ -51,6 +51,7 @@ to `encode`.
 | `3ds_camera3d` | 480x240 | 3DS Camera AVI, native stereo (two inputs) |
 | `topos`, `topos_mpeg2` | 400x240 | Topos 3DS homebrew player `.mkv`: H.264 High@3.1 (New 3DS) or MPEG-2 Main 2 Mbit/s (Old 3DS) |
 | `mivf` | 400x240 | MIVF 3DS homebrew player `.mivf`: M2Y1 video (`--m2y2` for range-coded M2Y2), seek index |
+| `bink` | source | Bink 1 `.bik` (PC games): Bink video, Bink DCT audio |
 | `topos3d`, `topos3d_mpeg2` | 400x240 per eye | The same as 800x240 side-by-side 3D (two inputs, or one packed source) |
 
 Audio-only outputs (no `input2`, `--scale`/`--keyframes`/etc. don't apply):
@@ -87,6 +88,7 @@ special to pass, just point it at the file.
 | `topos`, `topos3d` | `aac` (default), `mp2`, `none` |
 | `topos_mpeg2`, `topos3d_mpeg2` | `mp2` (default), `aac`, `none` |
 | `mivf` | `ia4m` (mono ADPCM, default; `adpcm` means the same), `pc16` (16-bit PCM, stereo), `none` |
+| `bink` | `bink` (mono, default; `adpcm` means the same), `bink_stereo`, `none` |
 | `3ds_camera`, `3ds_camera3d` | `adpcm`, `none` |
 | `thp` | `adpcm`, `none` |
 | `rvid` | `pcm`, `none` |
@@ -160,6 +162,19 @@ Requires a `--enable-libx264` build against the
 | `--mobi-intra-only` | Every frame is an I-frame. |
 | `--mobi-qyx N` | Coarsen the quantizer by N whole qy tiers (QP + 6*N, 0-8). Legacy — plain `--qp` now covers the format's full range, leave at 0. |
 | `--jobs N` | `mo`, `moflex`, `mods`, `mivf`, and the four `topos` formats: encode the video as chunks, N at a time, each decoding its own stretch of the source, then join them by stream copy. `0` (default) = one per two CPU cores, `1` = encode in one piece. MobiClip chunks are whole keyframe intervals (about 3-6 s, 10-30 s for `.mods`, which gains a keyframe per chunk), so the output matches a one-piece encode frame for frame, within ~0.3% in size. Topos MPEG-2 chunks are whole 30-frame GOPs; Topos H.264 chunks run 5-60 s, about one per job, since x264 already keeps several cores busy on its own (a 3-minute clip went from 5.2 s to 3.8 s in 2D, 11.1 s to 8.1 s in 3D, on 4 performance + 6 efficiency cores). Topos audio is encoded at the same time as the video chunks. MIVF chunks are whole 240-frame keyframe intervals, one per CPU core by default (its encoder is single-threaded), and give a byte-identical file. Clips under twice the chunk length, `--multipass 2`, `--ffmpeg-args`, MOFLEX 3D and FastAudio `.mods` always encode in one piece. |
+
+## Bink-only (`bink`)
+
+| Flag | Meaning |
+|---|---|
+| `--bink-quality N` | Video quality 0-10, 10 is highest (default 3). |
+| `--quantizer N` | Bink DCT quantiser 1-15 instead of `--bink-quality` (lower is finer). |
+| `--bink-audio-quality N` | Audio quality 0-10, 10 is highest (default 6, about 140 kbit/s mono at 44.1 kHz). |
+| `--hq` | Video quality 8. |
+
+LibBink plays mono audio only, so `bink` audio is mono unless `bink_stereo` is
+asked for. The source sample rate is kept up to 48 kHz; `--audio-rate` picks
+another (up to 65535 Hz).
 
 ## RVID-only (`rvid`)
 

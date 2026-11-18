@@ -848,6 +848,37 @@ def chunked_video(
 CHUNK_AUDIO = "audio.mka"
 
 
+def probe_audio_rate(inp):
+    """Return the first audio stream's sample rate, or 0 if it can't be read."""
+    try:
+        p = subprocess.run(
+            [FFPROBE, "-v", "error"]
+            + input_fmt(inp)
+            + [
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=sample_rate",
+                "-of",
+                "default=nk=1:nw=1",
+            ]
+            + [inp],
+            capture_output=True,
+            text=True,
+        )
+        return int(p.stdout.split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def bink_audio_rate(inp, want=0):
+    """Bink stores the rate in 16 bits; keep the source rate when it fits."""
+    if want > 0:
+        return want
+    rate = probe_audio_rate(inp)
+    return rate if 0 < rate <= 48000 else 48000
+
+
 def probe_has_audio(inp):
     """True if inp has an audio stream."""
     p = subprocess.run(
@@ -1037,7 +1068,7 @@ def main():
         "fmt",
         nargs="?",
         default="mo",
-        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, topos, topos3d, topos_mpeg2, topos3d_mpeg2, mivf, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
+        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, topos, topos3d, topos_mpeg2, topos3d_mpeg2, mivf, bink, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
     )
     parser.add_argument(
         "audio",
@@ -1282,6 +1313,24 @@ def main():
         action="store_true",
         help="mivf: range-code the video (M2Y2), the same pictures in a smaller file",
     )
+    parser.add_argument(
+        "--bink-quality",
+        dest="bink_quality",
+        type=int,
+        default=-1,
+        choices=range(-1, 11),
+        metavar="0-10",
+        help="bink: video quality, 10 is highest (default 3). --quantizer 1-15 sets the DCT quantiser directly instead",
+    )
+    parser.add_argument(
+        "--bink-audio-quality",
+        dest="bink_audio_quality",
+        type=int,
+        default=-1,
+        choices=range(-1, 11),
+        metavar="0-10",
+        help="bink: audio quality, 10 is highest (default 6, about 140 kbit/s mono at 44.1 kHz)",
+    )
 
     # --- fmt=cia: package an already-encoded .moflex into a 3DS video CIA. ---
     # A separate, explicit step from encoding on purpose — you build the
@@ -1461,7 +1510,11 @@ def main():
     # QP 12 is the lowest quantizer the decoder accepts, subme 9 is the highest
     # refinement this encoder can actually act on (10-11 only add trellis, which
     # is forced off), and skip 0 stops near-static blocks being frozen.
-    if parsed.highest_quality:
+    if parsed.highest_quality and parsed.fmt == "bink":
+        # Bink's quantiser 12 is coarse, not fine: ask for its quality 8 instead.
+        if parsed.bink_quality < 0 and parsed.quantizer == 0:
+            parsed.bink_quality = 8
+    elif parsed.highest_quality:
         if parsed.quantizer == 0 and not parsed.bitrate:
             parsed.quantizer = 12
         if parsed.mobi_subme == 0:
@@ -1542,6 +1595,10 @@ def main():
         # MIVF, the 3DS homebrew movie player: M2Y1 video at 400x240 with
         # IA4M (mono ADPCM) or PC16 sound packed per frame by the muxer.
         mode, dmx, scale, moaud, cvc = "vid", "mivf", "400:240", 0, "m2y1"
+    elif fmt == "bink":
+        # Bink 1 (BIKi), the RAD Game Tools movie format PC games play:
+        # Bink video and Bink DCT audio. Keeps the source size by default.
+        mode, dmx, scale, moaud, cvc = "vid", "bink", "", 0, "binkvideo"
     elif fmt == "3ds_camera":
         # 3DS Camera imports 2D AVI/MJPEG clips at 480x240 / 20 fps with
         # 16 kHz mono IMA-ADPCM. Stereoscopic camera clips have two video
@@ -1601,7 +1658,7 @@ def main():
     else:
         print(
             f"unknown format '{fmt}' "
-            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|topos|topos3d|topos_mpeg2|topos3d_mpeg2|mivf|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|flipnote3d|"
+            f"(play|decode|mo|moflex|moflex3d|mods|vx|ty|gba_ads|gba_hydrogen|wii_photo|wii_photo_m4a|nintendo_channel|topos|topos3d|topos_mpeg2|topos3d_mpeg2|mivf|bink|3ds_camera|3ds_camera3d|3ds_sound|thp|rvid|dpg|hvqm4|fastvideo|factor5|flipnote|flipnote3d|"
             f"{'|'.join(AUDIO_FORMATS)})"
         )
         sys.exit(2)
@@ -2242,6 +2299,7 @@ def main():
         "topos": "mkv",
         "topos_mpeg2": "mkv",
         "3ds_camera": "avi",
+        "bink": "bik",
         "factor5": "vid",
         "flipnote": "ppm",
         "flipnote3d": "kwz",
@@ -2666,6 +2724,30 @@ def main():
         else:
             print(
                 f"error: mivf takes ia4m (mono ADPCM), pc16 (PCM) or none, not '{audio}'"
+            )
+            sys.exit(2)
+    elif fmt == "bink":
+        # One video packet per frame, so constant frame rate.
+        enc_opts.extend(["-fps_mode", "cfr"])
+        if vx_quant > 0:
+            enc_opts.extend(["-quant", str(min(vx_quant, 15))])
+        if parsed.bink_quality >= 0:
+            enc_opts.extend(["-quality:v", str(parsed.bink_quality)])
+        vopt_end = len(enc_opts)
+        if audio == "none":
+            enc_opts.extend(["-map", "0:v:0", "-an"])
+        elif audio in ("bink", "adpcm", "bink_stereo"):
+            # LibBink plays mono only; FFmpeg and RAD's player also take stereo.
+            enc_opts.extend(
+                ["-map", "0:v:0", "-map", "0:a:0?", "-c:a", "binkaudio_dct"]
+                + ["-ac", "2" if audio == "bink_stereo" else "1"]
+                + ["-ar", str(bink_audio_rate(inp, audio_rate)), "-sn", "-dn"]
+            )
+            if parsed.bink_audio_quality >= 0:
+                enc_opts.extend(["-quality:a", str(parsed.bink_audio_quality)])
+        else:
+            print(
+                f"error: bink takes bink (mono), bink_stereo or none audio, not '{audio}'"
             )
             sys.exit(2)
     elif fmt in TOPOS_FORMATS:

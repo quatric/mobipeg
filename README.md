@@ -15,6 +15,7 @@ such as audio, video, subtitles and related metadata.
 
 | Format | Container | Platform | Encode | Decode |
 |--------|-----------|----------|--------|--------|
+| Bink 1 (BIKi) | `.bik` | PC games (RAD Game Tools) | ✅ | ✅ |
 | BPK1 | `.bpk`, `.bpk1`, `.apd` | Nintendo 3DS Swapdoodle / Swapnote | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
 | Factor 5 DivX | `.vid` | GameCube (Factor 5) | ✅ | ✅ |
@@ -318,6 +319,38 @@ python3 encode.py mivf pc16 input.mp4 --m2y2 --quantizer 30
 ```
 
 `decode` reads `.mivf` files, including M2Y2 video.
+
+### Bink 1 movies
+
+`bink` writes Bink 1 movies (revision `BIKi`), the RAD Game Tools format many
+PC games play their cutscenes in. The encoders
+and the muxer started as a port of LibBink's `binkenc`, and the files decode
+the same in FFmpeg's Bink decoder and in LibBink, pixel for pixel and sample
+for sample. They have not been tried in RAD's own player.
+
+- Video (`-c:v binkvideo`) keeps the source size and frame rate. Each 8x8
+  block is coded as whichever of skip, motion copy, fill, two-colour pattern,
+  intra DCT, motion-compensated inter DCT or raw costs least for the picture
+  it gives (rate-distortion choice, motion search up to 15 pixels).
+  `--bink-quality 0-10` sets the quality (default 3); `--quantizer 1-15` sets
+  Bink's DCT quantiser directly (lower is finer). A keyframe every 120 frames.
+- Audio (`-c:a binkaudio_dct`) is Bink DCT audio, mono by default (`bink`),
+  since LibBink plays mono only; `bink_stereo` writes stereo, which FFmpeg
+  decodes. The source rate is kept up to 48 kHz. `--bink-audio-quality
+  0-10` (default 6) sets how finely each band is quantised: 6 is about
+  140 kbit/s for mono 44.1 kHz.
+
+The encoder is fast (a 400x240 60 fps clip encodes at about 350 frames a
+second), so it is not split into chunks.
+
+```sh
+python3 encode.py bink bink input.mp4
+python3 encode.py bink none input.mp4 --scale 640x480 --bink-quality 6
+```
+
+The FFmpeg side is plain `ffmpeg -i in.mp4 -c:v binkvideo -c:a binkaudio_dct
+-ac 1 out.bik`; `-quality:v`, `-quant`, `-lambda` and `-motion_range` tune the
+video, `-quality:a` the audio. `decode` reads `.bik` files.
 
 ### Splitting stereoscopic MOFLEX video
 
