@@ -111,6 +111,7 @@ extern const FFOutputFormat ff_bfstm_muxer;
 extern const FFInputFormat  ff_bintext_demuxer;
 extern const FFInputFormat  ff_bink_demuxer;
 extern const FFOutputFormat ff_bink_muxer;
+extern const FFOutputFormat ff_bink2_muxer;
 extern const FFInputFormat  ff_binka_demuxer;
 extern const FFInputFormat  ff_bpk_demuxer;
 extern const FFOutputFormat ff_bpk_muxer;

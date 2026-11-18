@@ -126,6 +126,7 @@ ENCODE_EXTENSIONS = {
     "3ds_sound": "m4a",
     "factor5": "vid",
     "bink": "bik",
+    "bink2": "bk2",
     "flipnote": "ppm",
     "flipnote3d": "kwz",
 }
@@ -311,6 +312,7 @@ class EncodeGUI(tk.Tk):
             "3DS Topos player MPEG-2 .mkv (3D)": "topos3d_mpeg2",
             "3DS MIVF player .mivf": "mivf",
             "PC Bink 1 video .bik": "bink",
+            "PC Bink 2 video .bk2": "bink2",
             "Nintendo 3DS Camera 2D .avi": "3ds_camera",
             "Nintendo 3DS Camera 3D .avi": "3ds_camera3d",
             "Nintendo 3DS Sound AAC .m4a": "3ds_sound",
@@ -354,6 +356,7 @@ class EncodeGUI(tk.Tk):
             "mivf": ["ia4m", "pc16", "none"],
             # LibBink plays mono Bink audio only; FFmpeg also decodes stereo.
             "bink": ["bink", "bink_stereo", "none"],
+            "bink2": ["bink", "bink_stereo", "none"],
             "3ds_camera": ["adpcm", "none"],
             "3ds_camera3d": ["adpcm", "none"],
             "3ds_sound": ["aac"],
@@ -773,6 +776,7 @@ class EncodeGUI(tk.Tk):
                     "topos3d",
                     "mivf",
                     "bink",
+                    "bink2",
                 },
                 (self.enc_quant_label, self.enc_quant_entry),
             ),
@@ -789,6 +793,7 @@ class EncodeGUI(tk.Tk):
                     "factor5",
                     "mivf",
                     "bink",
+                    "bink2",
                 }
                 | AUDIO_ONLY_FORMATS,
                 (self.enc_arate_label, self.enc_arate_entry),
@@ -1283,6 +1288,7 @@ class EncodeGUI(tk.Tk):
             "topos3d",
             "mivf",
             "bink",
+            "bink2",
         ):
             q = self.enc_quant_var.get().strip()
             if q and q != "0":
@@ -1310,6 +1316,7 @@ class EncodeGUI(tk.Tk):
             "topos3d_mpeg2",
             "mivf",
             "bink",
+            "bink2",
         ):
             fps = self.enc_fps_var.get().strip()
             if fps:
@@ -1326,6 +1333,7 @@ class EncodeGUI(tk.Tk):
                 "factor5",
                 "mivf",
                 "bink",
+                "bink2",
             }
             | AUDIO_ONLY_FORMATS
         ):

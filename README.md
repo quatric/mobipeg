@@ -16,6 +16,7 @@ such as audio, video, subtitles and related metadata.
 | Format | Container | Platform | Encode | Decode |
 |--------|-----------|----------|--------|--------|
 | Bink 1 (BIKi) | `.bik` | PC games (RAD Game Tools) | ✅ | ✅ |
+| Bink 2 (KB2j) | `.bk2` | PC and console games (RAD Game Tools) | ✅ | ❌ |
 | BPK1 | `.bpk`, `.bpk1`, `.apd` | Nintendo 3DS Swapdoodle / Swapnote | ✅ | ✅ |
 | DPG | `.dpg` | Nintendo DS (MoonShell) | ✅ | ✅ |
 | Factor 5 DivX | `.vid` | GameCube (Factor 5) | ✅ | ✅ |
@@ -352,6 +353,42 @@ The FFmpeg side is plain `ffmpeg -i in.mp4 -c:v binkvideo -c:a binkaudio_dct
 -ac 1 out.bik`; `-quality:v`, `-quant`, `-lambda` and `-motion_range` tune the
 video, `-quality:a` the audio. `decode` reads `.bik` files.
 
+### Bink 2 movies
+
+`bink2` writes Bink 2 movies (revision `KB2j`). The video encoder is
+[bink2enc](https://github.com/SBerda/bink2enc) by Simon Berda, ported from
+Rust into FFmpeg as `-c:v bink2video`; its output is byte for byte what
+bink2enc writes for the same picture and settings. bink2enc is AGPL-3.0, so
+the encoder needs an FFmpeg built with `--enable-gpl --enable-version3` (see
+[Building](#building)), and binaries that include it are AGPL-licensed.
+
+- Video keeps the source size and frame rate, converted to full-range YUV.
+  32x32 macroblocks are coded as intra, skip, motion (one or four half-pel
+  vectors) or motion plus residual, whichever costs least for the picture it
+  gives. `--quantizer 1-36` sets the quantiser (default 12, lower is finer;
+  `--hq` uses 6). `--bitrate` turns on rate control instead, which moves the
+  quantiser between 6 and 30 to meet the target. A keyframe every 125 frames,
+  and another at each scene cut. An input frame identical to the one before
+  is coded as a skipped frame.
+- Audio is the same Bink DCT audio as `bink`, mono by default.
+
+FFmpeg has no Bink 2 decoder, so `decode` cannot read `.bk2` files; FFmpeg
+only probes and remuxes them. The files have not been tried in RAD's own
+player. The slices are encoded in parallel: a 1280x720 clip encodes at about
+100 frames a second.
+
+```sh
+python3 encode.py bink2 bink input.mp4
+python3 encode.py bink2 none input.mp4 --bitrate 4M
+```
+
+The FFmpeg side is `ffmpeg -i in.mp4 -c:v bink2video -c:a binkaudio_dct -ac 1
+out.bk2`. `-quant` (or `-q:v`) sets the quantiser and `-b:v` or `-rate` (KiB/s)
+the rate control target. `-qmin_b2`/`-qmax_b2` bound it, and `-g` sets the
+keyframe interval. `-lambda`, `-deadzone`, `-search`, `-mv4`, `-rowflag` and
+`-flags_b2` (whose low 2 bits pick 2, 3, 4 or 8 slices) are bink2enc's own
+tuning switches.
+
 ### Splitting stereoscopic MOFLEX video
 
 The MOFLEX demuxer exports the `VideoWithLayout` descriptor as standard
@@ -428,6 +465,9 @@ cd .. && PKG_CONFIG_PATH="$PWD/x264-install/lib/pkgconfig" \
 
 Confirm with `ffmpeg -encoders | grep mobiclip`.
 
+The Bink 2 encoder (`bink2video`) is AGPL-3.0, so it is only built when
+`--enable-version3` is added to the configure line as well.
+
 ## Documentation
 
 For full technical documentation of the MobiClip formats (video/audio codecs,
@@ -447,6 +487,9 @@ Coding examples are available in the **doc/examples** directory.
 
 FFmpeg codebase is mainly LGPL-licensed with optional components licensed under
 GPL. Please refer to the LICENSE file for detailed information.
+
+The Bink 2 encoder (`libavcodec/bink2enc.c`) is ported from bink2enc and is
+licensed under the GNU Affero General Public License, version 3 or later.
 
 ## Contributing
 

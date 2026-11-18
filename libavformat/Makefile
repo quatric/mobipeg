@@ -169,6 +169,7 @@ OBJS-$(CONFIG_BFSTM_DEMUXER)             += brstm.o
 OBJS-$(CONFIG_BFSTM_MUXER)               += brstmenc.o dsp_adpcm.o
 OBJS-$(CONFIG_BINK_DEMUXER)              += bink.o
 OBJS-$(CONFIG_BINK_MUXER)                += binkenc.o
+OBJS-$(CONFIG_BINK2_MUXER)               += binkenc.o
 OBJS-$(CONFIG_BINKA_DEMUXER)             += binka.o
 OBJS-$(CONFIG_BPK_DEMUXER)               += bpkdec.o
 OBJS-$(CONFIG_BPK_MUXER)                 += bpkenc.o

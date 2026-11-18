@@ -148,10 +148,8 @@ static int read_header(AVFormatContext *s)
     vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     vst->codecpar->codec_id   = AV_CODEC_ID_BINKVIDEO;
 
-    if ((vst->codecpar->codec_tag & 0xFFFFFF) == MKTAG('K', 'B', '2', 0)) {
-        av_log(s, AV_LOG_WARNING, "Bink 2 video is not implemented\n");
-        vst->codecpar->codec_id = AV_CODEC_ID_NONE;
-    }
+    if ((vst->codecpar->codec_tag & 0xFFFFFF) == MKTAG('K', 'B', '2', 0))
+        vst->codecpar->codec_id = AV_CODEC_ID_BINKVIDEO2;
 
     if ((ret = ff_get_extradata(s, vst->codecpar, pb, 4)) < 0)
         return ret;

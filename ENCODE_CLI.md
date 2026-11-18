@@ -52,6 +52,7 @@ to `encode`.
 | `topos`, `topos_mpeg2` | 400x240 | Topos 3DS homebrew player `.mkv`: H.264 High@3.1 (New 3DS) or MPEG-2 Main 2 Mbit/s (Old 3DS) |
 | `mivf` | 400x240 | MIVF 3DS homebrew player `.mivf`: M2Y1 video (`--m2y2` for range-coded M2Y2), seek index |
 | `bink` | source | Bink 1 `.bik` (PC games): Bink video, Bink DCT audio |
+| `bink2` | source | Bink 2 `.bk2` (PC and console games): Bink video 2, Bink DCT audio (`--enable-version3` build) |
 | `topos3d`, `topos3d_mpeg2` | 400x240 per eye | The same as 800x240 side-by-side 3D (two inputs, or one packed source) |
 
 Audio-only outputs (no `input2`, `--scale`/`--keyframes`/etc. don't apply):
@@ -88,7 +89,7 @@ special to pass, just point it at the file.
 | `topos`, `topos3d` | `aac` (default), `mp2`, `none` |
 | `topos_mpeg2`, `topos3d_mpeg2` | `mp2` (default), `aac`, `none` |
 | `mivf` | `ia4m` (mono ADPCM, default; `adpcm` means the same), `pc16` (16-bit PCM, stereo), `none` |
-| `bink` | `bink` (mono, default; `adpcm` means the same), `bink_stereo`, `none` |
+| `bink`, `bink2` | `bink` (mono, default; `adpcm` means the same), `bink_stereo`, `none` |
 | `3ds_camera`, `3ds_camera3d` | `adpcm`, `none` |
 | `thp` | `adpcm`, `none` |
 | `rvid` | `pcm`, `none` |
@@ -175,6 +176,19 @@ Requires a `--enable-libx264` build against the
 LibBink plays mono audio only, so `bink` audio is mono unless `bink_stereo` is
 asked for. The source sample rate is kept up to 48 kHz; `--audio-rate` picks
 another (up to 65535 Hz).
+
+## Bink 2-only (`bink2`)
+
+| Flag | Meaning |
+|---|---|
+| `--quantizer N` | Quantiser 1-36 (default 12, lower is finer). |
+| `--bitrate R` | Rate control target, e.g. `4M`: the quantiser moves between 6 and 30 to meet it. |
+| `--bink-audio-quality N` | Audio quality 0-10, as for `bink`. |
+| `--hq` | Quantiser 6. |
+
+The encoder is a port of bink2enc and is AGPL-3.0, so FFmpeg must be built with
+`--enable-gpl --enable-version3` for it. FFmpeg cannot decode Bink 2, so
+`decode` does not read `.bk2` files.
 
 ## RVID-only (`rvid`)
 

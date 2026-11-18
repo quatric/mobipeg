@@ -1,5 +1,5 @@
 /*
- * Bink 1 (BIKi) muxer
+ * Bink 1 (BIKi) and Bink 2 (KB2j) muxer
  * Copyright (C) 2026 quatric <quatricsoftware@gmail.com>
  *
  * Based on the binkenc encoder of LibBink,
@@ -24,7 +24,7 @@
 
 /**
  * @file
- * Bink 1 muxer.
+ * Bink 1 and Bink 2 muxer.
  *
  * A frame is the audio packet of the (single) audio track, prefixed by its
  * size, followed by the video packet. Audio packets each start with their
@@ -54,6 +54,8 @@ typedef struct BinkFrame {
 
 typedef struct BinkMuxContext {
     int video_idx, audio_idx;
+    int bink2;
+    uint32_t video_flags;
     AVRational fps;
     int sample_rate, channels;
 
@@ -96,9 +98,13 @@ static int bink_init(AVFormatContext *s)
     for (unsigned i = 0; i < s->nb_streams; i++) {
         AVCodecParameters *par = s->streams[i]->codecpar;
         if (par->codec_type == AVMEDIA_TYPE_VIDEO && bink->video_idx < 0) {
-            if (par->codec_id != AV_CODEC_ID_BINKVIDEO ||
-                (par->codec_tag && par->codec_tag != MKTAG('B', 'I', 'K', 'i'))) {
-                av_log(s, AV_LOG_ERROR, "Bink files need BIKi Bink video\n");
+            if (par->codec_id == AV_CODEC_ID_BINKVIDEO2 &&
+                (!par->codec_tag || par->codec_tag == MKTAG('K', 'B', '2', 'j'))) {
+                bink->bink2 = 1;
+                bink->video_flags = par->extradata_size >= 4 ? AV_RL32(par->extradata) : 0x12;
+            } else if (par->codec_id != AV_CODEC_ID_BINKVIDEO ||
+                       (par->codec_tag && par->codec_tag != MKTAG('B', 'I', 'K', 'i'))) {
+                av_log(s, AV_LOG_ERROR, "Bink files need BIKi Bink video or KB2j Bink video 2\n");
                 return AVERROR(EINVAL);
             }
             bink->video_idx = i;
@@ -293,7 +299,7 @@ static int bink_write_trailer(AVFormatContext *s)
         return AVERROR(EINVAL);
     }
 
-    header = 44 + 12 * tracks + 4LL * (bink->nb_frames + 1);
+    header = 44 + 4 * bink->bink2 + 12 * tracks + 4LL * (bink->nb_frames + 1);
     total  = header + bink->payload;
     if (total > UINT32_MAX) {
         av_log(s, AV_LOG_ERROR, "Bink files are limited to 4 GiB\n");
@@ -305,7 +311,7 @@ static int bink_write_trailer(AVFormatContext *s)
         return ret;
     avio_seek(pb, 0, SEEK_SET);
 
-    ffio_wfourcc(pb, "BIKi");
+    ffio_wfourcc(pb, bink->bink2 ? "KB2j" : "BIKi");
     avio_wl32(pb, total - 8);
     avio_wl32(pb, bink->nb_frames);
     avio_wl32(pb, bink->largest_frame);
@@ -314,8 +320,10 @@ static int bink_write_trailer(AVFormatContext *s)
     avio_wl32(pb, s->streams[bink->video_idx]->codecpar->height);
     avio_wl32(pb, bink->fps.num);
     avio_wl32(pb, bink->fps.den);
-    avio_wl32(pb, 0);               /* video flags */
+    avio_wl32(pb, bink->video_flags);
     avio_wl32(pb, tracks);
+    if (bink->bink2)
+        avio_wl32(pb, 0x87e70800);  /* field of KB2i and later; value of RAD's files */
     if (tracks) {
         avio_wl32(pb, FFMAX(2, bink->max_audio_bytes));
         avio_wl16(pb, bink->sample_rate);
@@ -351,6 +359,20 @@ const FFOutputFormat ff_bink_muxer = {
     .p.extensions     = "bik",
     .p.audio_codec    = AV_CODEC_ID_BINKAUDIO_DCT,
     .p.video_codec    = AV_CODEC_ID_BINKVIDEO,
+    .p.subtitle_codec = AV_CODEC_ID_NONE,
+    .priv_data_size   = sizeof(BinkMuxContext),
+    .init             = bink_init,
+    .write_packet     = bink_write_packet,
+    .write_trailer    = bink_write_trailer,
+    .deinit           = bink_deinit,
+};
+
+const FFOutputFormat ff_bink2_muxer = {
+    .p.name           = "bink2",
+    .p.long_name      = NULL_IF_CONFIG_SMALL("Bink 2"),
+    .p.extensions     = "bk2",
+    .p.audio_codec    = AV_CODEC_ID_BINKAUDIO_DCT,
+    .p.video_codec    = AV_CODEC_ID_BINKVIDEO2,
     .p.subtitle_codec = AV_CODEC_ID_NONE,
     .priv_data_size   = sizeof(BinkMuxContext),
     .init             = bink_init,
