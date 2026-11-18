@@ -75,3 +75,5 @@ __pycache__/
 # FastVideo C# build output (contains absolute paths)
 fastvideo/bin/
 fastvideo/obj/
+/libswscale/aarch64/ops_asmgen
+/libswscale/aarch64/ops_static
