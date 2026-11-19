@@ -378,12 +378,14 @@ The Bink 2 decoder (`bink2video`, revisions `KB2a` to `KB2n`) started as a
 port of the one in [NihAV](https://nihav.org) by Kostya Shishkov and was then
 matched against RAD's `bink2w32.dll` under Wine: `KB2n` files from RAD's
 current Bink 2 encoder decode the same as in RAD's player, and so do sample
-files of the older `KB2g` and `KB2i` revisions. Their frames leave out flag
-0x40000, under which RAD's decoder also smooths the edges inside each inter
-residual, clamps motion vectors more tightly near the picture edge, and
-takes picture DCs from whole decoded macroblocks; FFmpeg does the same. The
-old bitstream of `KB2f` and earlier (frames without 0x2000) still differs
-slightly from RAD. The one difference left is in the
+files of the older `KB2f`, `KB2g` and `KB2i` revisions. Their frames leave
+out flag 0x40000, under which RAD's decoder also smooths the edges inside
+each inter residual, clamps motion vectors more tightly near the picture
+edge, and takes picture DCs from whole decoded macroblocks; FFmpeg does the
+same. The old bitstream of `KB2f` and earlier (frames without 0x2000) is
+deblocked too, and draws its DC-only intra blocks with RAD's float kernel.
+Pictures under 128 lines are one slice in every revision, as RAD decodes
+them. The one difference left is in the
 part of the last macroblock row or column past the picture rounded up to 16
 pixels, which RAD's decoder never stores and reads back from uninitialised
 memory; FFmpeg takes it as zero, and the encoder never codes an intra
@@ -401,8 +403,9 @@ The FFmpeg side is `ffmpeg -i in.mp4 -c:v bink2video -c:a binkaudio_dct -ac 1
 out.bk2`. `-quant` (or `-q:v`) sets the quantiser and `-b:v` or `-rate` (KiB/s)
 the rate control target. `-qmin_b2`/`-qmax_b2` bound it, and `-g` sets the
 keyframe interval. `-lambda`, `-deadzone`, `-search`, `-mv4`, `-rowflag` and
-`-flags_b2` (whose low 2 bits pick 2, 3, 4 or 8 slices) are bink2enc's own
-tuning switches.
+`-flags_b2` (whose low 2 bits pick 2, 3, 4 or 8 slices; fewer when the
+picture has too few macroblock rows for them) are bink2enc's own tuning
+switches.
 
 ### Splitting stereoscopic MOFLEX video
 

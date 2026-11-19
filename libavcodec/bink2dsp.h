@@ -134,26 +134,35 @@ static av_unused int bink2_smooth_pick(int n, int centre, int thr, int fallback)
     return thr > d ? n & 0x1FFF : fallback;
 }
 
+/* The DCs a DC-only intra block is smoothed towards, from its 3x3
+ * neighbourhood of info words nb, in raster order into v: a side falls back
+ * to the centre and a corner to the side next to it in the same row. */
+static av_unused void bink2_smooth_select(const uint16_t nb[3][3], int thr, int v[9])
+{
+    int ctr = nb[1][1], c = ctr & 0x1FFF;
+    v[4] = c;
+    v[3] = bink2_smooth_pick(nb[1][0], ctr, thr, c);
+    v[5] = bink2_smooth_pick(nb[1][2], ctr, thr, c);
+    v[1] = bink2_smooth_pick(nb[0][1], ctr, thr, c);
+    v[7] = bink2_smooth_pick(nb[2][1], ctr, thr, c);
+    v[0] = bink2_smooth_pick(nb[0][0], ctr, thr, v[3]);
+    v[2] = bink2_smooth_pick(nb[0][2], ctr, thr, v[5]);
+    v[6] = bink2_smooth_pick(nb[2][0], ctr, thr, v[3]);
+    v[8] = bink2_smooth_pick(nb[2][2], ctr, thr, v[5]);
+}
+
 /* Draw an intra block that has only a DC as a surface through the DCs of
  * its neighbours; nb is the 3x3 neighbourhood of info words. */
 static av_unused void bink2_smooth_dc_block(uint8_t *dst, ptrdiff_t stride,
                                             const uint16_t nb[3][3], int thr)
 {
-    int ctr = nb[1][1], c = ctr & 0x1FFF;
-    int l  = bink2_smooth_pick(nb[1][0], ctr, thr, c);
-    int r  = bink2_smooth_pick(nb[1][2], ctr, thr, c);
-    int u  = bink2_smooth_pick(nb[0][1], ctr, thr, c);
-    int d  = bink2_smooth_pick(nb[2][1], ctr, thr, c);
-    int ul = bink2_smooth_pick(nb[0][0], ctr, thr, l);
-    int ur = bink2_smooth_pick(nb[0][2], ctr, thr, r);
-    int dl = bink2_smooth_pick(nb[2][0], ctr, thr, l);
-    int dr = bink2_smooth_pick(nb[2][2], ctr, thr, r);
-    int hu[8], hc[8], hd[8];
+    int v[9], hu[8], hc[8], hd[8];
 
+    bink2_smooth_select(nb, thr, v);
     for (int x = 0; x < 8; x++) {
-        hu[x] = bink2_smooth_interp(u + 4, ul - u, ur - u, x);
-        hc[x] = bink2_smooth_interp(c + 4, l - c, r - c, x);
-        hd[x] = bink2_smooth_interp(d + 4, dl - d, dr - d, x);
+        hu[x] = bink2_smooth_interp(v[1] + 4, v[0] - v[1], v[2] - v[1], x);
+        hc[x] = bink2_smooth_interp(v[4] + 4, v[3] - v[4], v[5] - v[4], x);
+        hd[x] = bink2_smooth_interp(v[7] + 4, v[6] - v[7], v[8] - v[7], x);
     }
     for (int y = 0; y < 8; y++)
         for (int x = 0; x < 8; x++)
@@ -161,10 +170,12 @@ static av_unused void bink2_smooth_dc_block(uint8_t *dst, ptrdiff_t stride,
                                                                     B2W16(hd[x] - hc[x]), y) >> 3);
 }
 
+typedef void (*Bink2SmoothBlock)(uint8_t *dst, ptrdiff_t stride, const uint16_t nb[3][3], int thr);
+
 /* Smooth every intra DC-only block of a plane whose 8x8 blocks are
  * described by an iw x ih grid of info words. */
 static av_unused void bink2_smooth_dc_plane(uint8_t *pix, ptrdiff_t stride, const uint16_t *info,
-                                            int iw, int ih, int thr)
+                                            int iw, int ih, int thr, Bink2SmoothBlock block)
 {
     for (int y = 0; y < ih; y++)
         for (int x = 0; x < iw; x++) {
@@ -176,7 +187,7 @@ static av_unused void bink2_smooth_dc_plane(uint8_t *pix, ptrdiff_t stride, cons
                     int xx = x + i - 1, yy = y + j - 1;
                     nb[j][i] = xx < 0 || yy < 0 || xx >= iw || yy >= ih ? 0 : info[yy * iw + xx];
                 }
-            bink2_smooth_dc_block(pix + y * 8 * stride + x * 8, stride, nb, thr);
+            block(pix + y * 8 * stride + x * 8, stride, nb, thr);
         }
 }
 

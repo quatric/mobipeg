@@ -1829,8 +1829,8 @@ static int assemble(AVCodecContext *avctx, AVPacket *pkt)
     memset(out, 0, size);
     for (int i = 0; i < s->nb_slices; i++) {
         size_t n = (s->slices[i].bw.nbits + 7) >> 3;
-        if (i)
-            AV_WL32(out + 4 * i, pos);
+        if (i)  /* an empty slice has offset 0 */
+            AV_WL32(out + 4 * i, s->slices[i].se > s->slices[i].sb ? pos : 0);
         if (n)
             memcpy(out + pos, s->slices[i].bw.buf, n);
         pos += FFALIGN(n, 4);
@@ -1949,7 +1949,7 @@ static av_cold int bink2_encode_init(AVCodecContext *avctx)
 {
     Bink2EncContext *s = avctx->priv_data;
     static const int slice_counts[4] = { 2, 3, 4, 8 };
-    int nsl = slice_counts[s->container_flags & 3], height_a, start = 0, end, prev = 0, ret;
+    int nsl = slice_counts[s->container_flags & 3], height_a, start, end, prev = 0, empty, ret;
     int bounds[MAX_SLICES];
     size_t frame_bytes;
 
@@ -1962,21 +1962,39 @@ static av_cold int bink2_encode_init(AVCodecContext *avctx)
     s->bw = (s->w + 31) >> 5;
     s->bh = (s->h + 31) >> 5;
     height_a = (s->h + 31) & ~31;
-    end = height_a + 32 * nsl - 1;
-    for (int i = 0; i < nsl - 1; i++) {
-        start += ((end - start) / (nsl - i)) & ~31;
-        end -= 32;
-        bounds[i] = start >> 5;
-    }
-    bounds[nsl - 1] = height_a >> 5;
-    s->nb_slices = 0;
-    for (int i = 0; i < nsl; i++) {
-        if (bounds[i] > prev) {
-            s->slices[s->nb_slices].sb = prev;
-            s->slices[s->nb_slices].se = bounds[i];
-            s->nb_slices++;
+    /* The reference decoder takes pictures under 128 lines as one slice
+     * (its encoder asks for two and leaves the second empty), and misreads
+     * other empty slices, so take fewer slices when there are too few rows
+     * for the asked count. */
+    if (height_a < 128)
+        s->container_flags &= ~3;
+    nsl = slice_counts[s->container_flags & 3];
+    for (;;) {
+        start = 0;
+        end = height_a + 32 * nsl - 1;
+        for (int i = 0; i < nsl - 1; i++) {
+            start += ((end - start) / (nsl - i)) & ~31;
+            end -= 32;
+            bounds[i] = start >> 5;
         }
-        prev = bounds[i];
+        bounds[nsl - 1] = height_a >> 5;
+        if (height_a < 128) {
+            bounds[0] = bounds[1];
+            break;
+        }
+        empty = 0;
+        for (int i = 0; i < nsl; i++)
+            empty |= bounds[i] <= (i ? bounds[i - 1] : 0);
+        if (!empty || !(s->container_flags & 3))
+            break;
+        s->container_flags--;
+        nsl = slice_counts[s->container_flags & 3];
+    }
+    s->nb_slices = nsl;
+    for (int i = 0; i < nsl; i++) {
+        s->slices[i].sb = prev;
+        s->slices[i].se = FFMAX(bounds[i], prev);
+        prev = s->slices[i].se;
     }
 
     if (s->rate <= 0 && avctx->bit_rate > 0)

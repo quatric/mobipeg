@@ -312,6 +312,27 @@ static void put_residual(uint8_t *dst, ptrdiff_t stride, IBlocks *blk, int nq,
 
 static void put_mb4_old(uint8_t *dst, ptrdiff_t stride, FBlocks blk, int add)
 {
+    if (add) {
+        /* The reference adds a residual whose four blocks have only DCs
+         * without the transform, truncating DC / 8 + 0.5 from just below. */
+        int dc_only = 1;
+        for (int b = 0; b < 4 && dc_only; b++)
+            for (int i = 1; i < 64; i++)
+                if (blk[b][i] != 0.0f) {
+                    dc_only = 0;
+                    break;
+                }
+        if (dc_only) {
+            for (int b = 0; b < 4; b++) {
+                uint8_t *d = dst + (b >> 1) * 8 * stride + (b & 1) * 8;
+                int v = ftoi(blk[b][0] + 0.49999991f);
+                for (int y = 0; y < 8; y++)
+                    for (int x = 0; x < 8; x++)
+                        d[y * stride + x] = av_clip_uint8(d[y * stride + x] + v);
+            }
+            return;
+        }
+    }
     for (int b = 0; b < 4; b++) {
         uint8_t *d = dst + (b >> 1) * 8 * stride + (b & 1) * 8;
         idct_float(blk[b]);
@@ -906,13 +927,14 @@ static void decode_dcs_old(GetBitContext *gb, int *dcs, int n, int q, int read_b
 }
 
 static int decode_acs_4blocks_old(GetBitContext *gb, FBlocks dst, const float *qmat,
-                                  int q, uint32_t cbp, const uint8_t *scan)
+                                  int q, uint32_t cbp, const uint8_t *scan, uint8_t ncoded[4])
 {
     float quant = old_quants[q];
     for (int blk = 0; blk < 4; blk++) {
         int alt = cbp >> (16 + blk) & 1;
         int val_cb = alt ? CB_VAL2 : CB_VAL1, skip_cb = alt ? CB_SKIP2 : CB_SKIP1;
         int esc_len = 0, idx = 1;
+        ncoded[blk] = 0;
         if (!(cbp >> blk & 1))
             continue;
         while (idx < 64) {
@@ -924,7 +946,9 @@ static int decode_acs_4blocks_old(GetBitContext *gb, FBlocks dst, const float *q
                 int pos = scan[idx];
                 if (get_bits1(gb))
                     level = -level;
-                dst[blk][pos] = (float)level * qmat[(pos & 7) * 8 + (pos >> 3)] * quant;
+                /* the reference scales the matrix first */
+                dst[blk][pos] = (float)level * (qmat[(pos & 7) * 8 + (pos >> 3)] * quant);
+                ncoded[blk]++;
             }
             idx++;
             if (idx >= 64)
@@ -946,10 +970,11 @@ static int decode_acs_4blocks_old(GetBitContext *gb, FBlocks dst, const float *q
 }
 
 static int decode_luma_old(GetBitContext *gb, uint32_t prev_cbp, FBlocks dst[4], uint32_t edge_state,
-                           DCInfo *dc, int bx, int *old_q, int intra, uint32_t *ocbp)
+                           DCInfo *dc, int bx, int *old_q, int intra, uint32_t *ocbp, uint16_t info[16])
 {
     uint32_t cbp = decode_cbp_luma_old(gb, prev_cbp);
     int q = decode_quant_old(gb, *old_q), ret;
+    uint8_t nc[4];
     if (q < 0)
         return q;
     *old_q = q;
@@ -963,20 +988,23 @@ static int decode_luma_old(GetBitContext *gb, uint32_t prev_cbp, FBlocks dst[4],
     }
     for (int i = 0; i < 4; i++) {
         if ((ret = decode_acs_4blocks_old(gb, dst[i], intra ? qmat_intra_luma_old : qmat_inter_luma_old,
-                                          q, cbp >> (i * 4), luma_scan_old)) < 0)
+                                          q, cbp >> (i * 4), luma_scan_old, nc)) < 0)
             return ret;
-        for (int j = 0; j < 4; j++)
+        for (int j = 0; j < 4; j++) {
             dst[i][j][0] = (float)dc->dcs[i * 4 + j] * 0.125f;
+            info[i * 4 + j] = intra ? bink2_block_info(dc->dcs[i * 4 + j], nc[j], 1) : 0;
+        }
     }
     *ocbp = cbp;
     return 0;
 }
 
 static int decode_chroma_old(GetBitContext *gb, uint32_t prev_cbp, FBlocks dst, uint32_t edge_state,
-                             DCInfo *dc, int bx, int *old_q, int intra, uint32_t *ocbp)
+                             DCInfo *dc, int bx, int *old_q, int intra, uint32_t *ocbp, uint16_t info[4])
 {
     uint32_t cbp = decode_cbp_chroma_old(gb, prev_cbp);
     int q = decode_quant_old(gb, *old_q), ret;
+    uint8_t nc[4];
     if (q < 0)
         return q;
     *old_q = q;
@@ -988,10 +1016,12 @@ static int decode_chroma_old(GetBitContext *gb, uint32_t prev_cbp, FBlocks dst, 
         decode_dcs_old(gb, dc->dc_buf, 4, q, 0);
         chroma_predict_inter(dc, -1023, 1023);
     }
-    if ((ret = decode_acs_4blocks_old(gb, dst, qmat_chroma_old, q, cbp, chroma_scan_old)) < 0)
+    if ((ret = decode_acs_4blocks_old(gb, dst, qmat_chroma_old, q, cbp, chroma_scan_old, nc)) < 0)
         return ret;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         dst[i][0] = (float)dc->dcs[i] * 0.125f;
+        info[i] = intra ? bink2_block_info(dc->dcs[i], nc[i], 1) : 0;
+    }
     *ocbp = cbp;
     return 0;
 }
@@ -1442,6 +1472,92 @@ static void deblock_h(Bink2Context *c, int p, int fstep, int x, int y)
         bink2_filter_edge(pix + y * 8 * st + x * 8, st, 1, taps);
 }
 
+/* The older bitstream draws a DC-only intra block from the same nine DCs
+ * with a fixed float kernel instead: each pixel is a weighted sum, taken in
+ * the reference's order, of the DCs (in raster order) its kernel reaches. */
+static const struct { uint8_t n, idx[8]; float w[8]; } old_smooth_taps[64] = {
+    { 4, { 0, 3, 1, 4 }, { 0x1.8b0a3ap-6f, 0x1.f91638p-6f, 0x1.f91638p-6f, 0x1.41ace6p-5f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.1fd098p-6f, 0x1.723578p-6f, 0x1.3227eep-5f, 0x1.851d46p-5f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.7a1c14p-7f, 0x1.eafa6ep-7f, 0x1.638934p-5f, 0x1.c37968p-5f } },
+    { 6, { 0, 3, 1, 4, 2, 5 }, { 0x1.a19d1ap-8f, 0x1.136638p-7f, 0x1.7a1c14p-5f, 0x1.de900cp-5f, 0x1.3c082ep-9f, 0x1.ace688p-9f } },
+    { 6, { 0, 3, 1, 4, 2, 5 }, { 0x1.3c082ep-9f, 0x1.ace688p-9f, 0x1.7a1c14p-5f, 0x1.de900cp-5f, 0x1.a19d1ap-8f, 0x1.136638p-7f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.638934p-5f, 0x1.c37968p-5f, 0x1.7a1c14p-7f, 0x1.eafa6ep-7f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.3227eep-5f, 0x1.851d46p-5f, 0x1.1fd098p-6f, 0x1.723578p-6f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.f91638p-6f, 0x1.41ace6p-5f, 0x1.8b0a3ap-6f, 0x1.f91638p-6f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.1fd098p-6f, 0x1.3227eep-5f, 0x1.723578p-6f, 0x1.851d46p-5f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.9f5b36p-7f, 0x1.c25876p-6f, 0x1.c25876p-6f, 0x1.d618fap-5f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.0ca08ep-7f, 0x1.2c3afap-6f, 0x1.05dae6p-5f, 0x1.1093dcp-4f } },
+    { 6, { 0, 3, 1, 4, 2, 5 }, { 0x1.20f18ap-8f, 0x1.53bcp-7f, 0x1.17e9fep-5f, 0x1.206112p-4f, 0x1.9f5b36p-10f, 0x1.0ca08ep-8f } },
+    { 6, { 0, 3, 1, 4, 2, 5 }, { 0x1.9f5b36p-10f, 0x1.0ca08ep-8f, 0x1.17e9fep-5f, 0x1.206112p-4f, 0x1.20f18ap-8f, 0x1.53bcp-7f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.05dae6p-5f, 0x1.1093dcp-4f, 0x1.0ca08ep-7f, 0x1.2c3afap-6f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.c25876p-6f, 0x1.d618fap-5f, 0x1.9f5b36p-7f, 0x1.c25876p-6f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.723578p-6f, 0x1.851d46p-5f, 0x1.1fd098p-6f, 0x1.3227eep-5f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.7a1c14p-7f, 0x1.638934p-5f, 0x1.eafa6ep-7f, 0x1.c37968p-5f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.0ca08ep-7f, 0x1.05dae6p-5f, 0x1.2c3afap-6f, 0x1.1093dcp-4f } },
+    { 4, { 0, 3, 1, 4 }, { 0x1.529b0ep-8f, 0x1.5de47ep-6f, 0x1.5de47ep-6f, 0x1.3c082ep-4f } },
+    { 6, { 0, 3, 1, 4, 2, 5 }, { 0x1.5ba29ap-9f, 0x1.8d4c1ep-7f, 0x1.78fb22p-6f, 0x1.4e1748p-4f, 0x1.c37968p-11f, 0x1.3c082ep-8f } },
+    { 6, { 0, 3, 1, 4, 2, 5 }, { 0x1.c37968p-11f, 0x1.3c082ep-8f, 0x1.78fb22p-6f, 0x1.4e1748p-4f, 0x1.5ba29ap-9f, 0x1.8d4c1ep-7f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.5de47ep-6f, 0x1.3c082ep-4f, 0x1.529b0ep-8f, 0x1.5de47ep-6f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.2c3afap-6f, 0x1.1093dcp-4f, 0x1.0ca08ep-7f, 0x1.05dae6p-5f } },
+    { 4, { 1, 4, 2, 5 }, { 0x1.eafa6ep-7f, 0x1.c37968p-5f, 0x1.7a1c14p-7f, 0x1.638934p-5f } },
+    { 6, { 0, 3, 6, 1, 4, 7 }, { 0x1.a19d1ap-8f, 0x1.7a1c14p-5f, 0x1.3c082ep-9f, 0x1.136638p-7f, 0x1.de900cp-5f, 0x1.ace688p-9f } },
+    { 6, { 0, 3, 6, 1, 4, 7 }, { 0x1.20f18ap-8f, 0x1.17e9fep-5f, 0x1.9f5b36p-10f, 0x1.53bcp-7f, 0x1.206112p-4f, 0x1.0ca08ep-8f } },
+    { 6, { 0, 3, 6, 1, 4, 7 }, { 0x1.5ba29ap-9f, 0x1.78fb22p-6f, 0x1.c37968p-11f, 0x1.8d4c1ep-7f, 0x1.4e1748p-4f, 0x1.3c082ep-8f } },
+    { 8, { 0, 3, 6, 1, 4, 7, 2, 5 }, { 0x1.450fbcp-10f, 0x1.b16a5p-7f, 0x1.450fbcp-12f, 0x1.b16a5p-7f, 0x1.60266p-4f, 0x1.60266p-8f, 0x1.450fbcp-12f, 0x1.60266p-8f } },
+    { 8, { 0, 3, 1, 4, 7, 2, 5, 8 }, { 0x1.450fbcp-12f, 0x1.60266p-8f, 0x1.b16a5p-7f, 0x1.60266p-4f, 0x1.60266p-8f, 0x1.450fbcp-10f, 0x1.b16a5p-7f, 0x1.450fbcp-12f } },
+    { 6, { 1, 4, 7, 2, 5, 8 }, { 0x1.8d4c1ep-7f, 0x1.4e1748p-4f, 0x1.3c082ep-8f, 0x1.5ba29ap-9f, 0x1.78fb22p-6f, 0x1.c37968p-11f } },
+    { 6, { 1, 4, 7, 2, 5, 8 }, { 0x1.53bcp-7f, 0x1.206112p-4f, 0x1.0ca08ep-8f, 0x1.20f18ap-8f, 0x1.17e9fep-5f, 0x1.9f5b36p-10f } },
+    { 6, { 1, 4, 7, 2, 5, 8 }, { 0x1.136638p-7f, 0x1.de900cp-5f, 0x1.ace688p-9f, 0x1.a19d1ap-8f, 0x1.7a1c14p-5f, 0x1.3c082ep-9f } },
+    { 6, { 0, 3, 6, 1, 4, 7 }, { 0x1.3c082ep-9f, 0x1.7a1c14p-5f, 0x1.a19d1ap-8f, 0x1.ace688p-9f, 0x1.de900cp-5f, 0x1.136638p-7f } },
+    { 6, { 0, 3, 6, 1, 4, 7 }, { 0x1.9f5b36p-10f, 0x1.17e9fep-5f, 0x1.20f18ap-8f, 0x1.0ca08ep-8f, 0x1.206112p-4f, 0x1.53bcp-7f } },
+    { 6, { 0, 3, 6, 1, 4, 7 }, { 0x1.c37968p-11f, 0x1.78fb22p-6f, 0x1.5ba29ap-9f, 0x1.3c082ep-8f, 0x1.4e1748p-4f, 0x1.8d4c1ep-7f } },
+    { 8, { 0, 3, 6, 1, 4, 7, 5, 8 }, { 0x1.450fbcp-12f, 0x1.b16a5p-7f, 0x1.450fbcp-10f, 0x1.60266p-8f, 0x1.60266p-4f, 0x1.b16a5p-7f, 0x1.60266p-8f, 0x1.450fbcp-12f } },
+    { 8, { 6, 3, 1, 4, 7, 2, 5, 8 }, { 0x1.450fbcp-12f, 0x1.60266p-8f, 0x1.60266p-8f, 0x1.60266p-4f, 0x1.b16a5p-7f, 0x1.450fbcp-12f, 0x1.b16a5p-7f, 0x1.450fbcp-10f } },
+    { 6, { 1, 4, 7, 2, 5, 8 }, { 0x1.3c082ep-8f, 0x1.4e1748p-4f, 0x1.8d4c1ep-7f, 0x1.c37968p-11f, 0x1.78fb22p-6f, 0x1.5ba29ap-9f } },
+    { 6, { 1, 4, 7, 2, 5, 8 }, { 0x1.0ca08ep-8f, 0x1.206112p-4f, 0x1.53bcp-7f, 0x1.9f5b36p-10f, 0x1.17e9fep-5f, 0x1.20f18ap-8f } },
+    { 6, { 1, 4, 7, 2, 5, 8 }, { 0x1.ace688p-9f, 0x1.de900cp-5f, 0x1.136638p-7f, 0x1.3c082ep-9f, 0x1.7a1c14p-5f, 0x1.a19d1ap-8f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.7a1c14p-7f, 0x1.638934p-5f, 0x1.c37968p-5f, 0x1.eafa6ep-7f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.0ca08ep-7f, 0x1.05dae6p-5f, 0x1.1093dcp-4f, 0x1.2c3afap-6f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.529b0ep-8f, 0x1.5de47ep-6f, 0x1.3c082ep-4f, 0x1.5de47ep-6f } },
+    { 6, { 6, 3, 4, 7, 5, 8 }, { 0x1.5ba29ap-9f, 0x1.8d4c1ep-7f, 0x1.4e1748p-4f, 0x1.78fb22p-6f, 0x1.3c082ep-8f, 0x1.c37968p-11f } },
+    { 6, { 6, 3, 4, 7, 5, 8 }, { 0x1.c37968p-11f, 0x1.3c082ep-8f, 0x1.4e1748p-4f, 0x1.78fb22p-6f, 0x1.8d4c1ep-7f, 0x1.5ba29ap-9f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.3c082ep-4f, 0x1.5de47ep-6f, 0x1.5de47ep-6f, 0x1.529b0ep-8f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.1093dcp-4f, 0x1.2c3afap-6f, 0x1.05dae6p-5f, 0x1.0ca08ep-7f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.c37968p-5f, 0x1.eafa6ep-7f, 0x1.638934p-5f, 0x1.7a1c14p-7f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.1fd098p-6f, 0x1.3227eep-5f, 0x1.851d46p-5f, 0x1.723578p-6f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.9f5b36p-7f, 0x1.c25876p-6f, 0x1.d618fap-5f, 0x1.c25876p-6f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.0ca08ep-7f, 0x1.2c3afap-6f, 0x1.1093dcp-4f, 0x1.05dae6p-5f } },
+    { 6, { 6, 3, 4, 7, 5, 8 }, { 0x1.20f18ap-8f, 0x1.53bcp-7f, 0x1.206112p-4f, 0x1.17e9fep-5f, 0x1.0ca08ep-8f, 0x1.9f5b36p-10f } },
+    { 6, { 6, 3, 4, 7, 5, 8 }, { 0x1.9f5b36p-10f, 0x1.0ca08ep-8f, 0x1.206112p-4f, 0x1.17e9fep-5f, 0x1.53bcp-7f, 0x1.20f18ap-8f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.1093dcp-4f, 0x1.05dae6p-5f, 0x1.2c3afap-6f, 0x1.0ca08ep-7f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.d618fap-5f, 0x1.c25876p-6f, 0x1.c25876p-6f, 0x1.9f5b36p-7f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.851d46p-5f, 0x1.723578p-6f, 0x1.3227eep-5f, 0x1.1fd098p-6f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.8b0a3ap-6f, 0x1.f91638p-6f, 0x1.41ace6p-5f, 0x1.f91638p-6f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.1fd098p-6f, 0x1.723578p-6f, 0x1.851d46p-5f, 0x1.3227eep-5f } },
+    { 4, { 6, 3, 4, 7 }, { 0x1.7a1c14p-7f, 0x1.eafa6ep-7f, 0x1.c37968p-5f, 0x1.638934p-5f } },
+    { 6, { 6, 3, 4, 7, 5, 8 }, { 0x1.a19d1ap-8f, 0x1.136638p-7f, 0x1.de900cp-5f, 0x1.7a1c14p-5f, 0x1.ace688p-9f, 0x1.3c082ep-9f } },
+    { 6, { 6, 3, 4, 7, 5, 8 }, { 0x1.3c082ep-9f, 0x1.ace688p-9f, 0x1.de900cp-5f, 0x1.7a1c14p-5f, 0x1.136638p-7f, 0x1.a19d1ap-8f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.c37968p-5f, 0x1.638934p-5f, 0x1.eafa6ep-7f, 0x1.7a1c14p-7f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.851d46p-5f, 0x1.3227eep-5f, 0x1.723578p-6f, 0x1.1fd098p-6f } },
+    { 4, { 4, 7, 5, 8 }, { 0x1.41ace6p-5f, 0x1.f91638p-6f, 0x1.f91638p-6f, 0x1.8b0a3ap-6f } },
+};
+
+static void smooth_dc_block_old(uint8_t *dst, ptrdiff_t stride, const uint16_t nb[3][3], int thr)
+{
+    int v[9];
+
+    bink2_smooth_select(nb, thr, v);
+    for (int i = 0; i < 64; i++) {
+        float acc = (float)v[old_smooth_taps[i].idx[0]] * old_smooth_taps[i].w[0];
+        for (int k = 1; k < old_smooth_taps[i].n; k++) {
+            float t = (float)v[old_smooth_taps[i].idx[k]] * old_smooth_taps[i].w[k];
+            acc += t;
+        }
+        acc += 0.49999991f;
+        dst[(i >> 3) * stride + (i & 7)] = av_clip_uint8((int)acc);
+    }
+}
+
 /* Vertical edges over a pw x ph area, then horizontal ones, leaving out
  * its borders and the edges the bitstream flags as off. */
 static void deblock_plane(Bink2Context *c, int p, int fstep, int pw, int ph)
@@ -1574,14 +1690,20 @@ static int decode_slice(AVCodecContext *avctx, void *arg, int jobnr, int threadn
                     put_mb4(chroma_dst(c, 2, bx, by), c->stride[2], v, 0);
                 } else {
                     FBlocks y[4] = { { { 0 } } }, u = { { 0 } }, v = { { 0 } };
-                    if ((ret = decode_luma_old(gb, cbp_y, y, edge_state_y, &sc->y, bx, &q_y, 1, &cbp_y)) < 0 ||
-                        (ret = decode_chroma_old(gb, cbp_v, v, edge_state_c, &sc->v, bx, &q_v, 1, &cbp_v)) < 0 ||
-                        (ret = decode_chroma_old(gb, cbp_u, u, edge_state_c, &sc->u, bx, &q_u, 1, &cbp_u)) < 0)
+                    uint16_t iy[16], iu[4], iv[4];
+                    if ((ret = decode_luma_old(gb, cbp_y, y, edge_state_y, &sc->y, bx, &q_y, 1, &cbp_y, iy)) < 0 ||
+                        (ret = decode_chroma_old(gb, cbp_v, v, edge_state_c, &sc->v, bx, &q_v, 1, &cbp_v, iv)) < 0 ||
+                        (ret = decode_chroma_old(gb, cbp_u, u, edge_state_c, &sc->u, bx, &q_u, 1, &cbp_u, iu)) < 0)
                         return ret;
+                    set_info_luma(c, 0, bx, by, iy);
+                    set_info_chroma(c, 1, bx, by, iu);
+                    set_info_chroma(c, 2, bx, by, iv);
                     if (do_alpha) {
                         FBlocks a[4] = { { { 0 } } };
-                        if ((ret = decode_luma_old(gb, cbp_a, a, edge_state_y, &sc->a, bx, &q_a, 1, &cbp_a)) < 0)
+                        uint16_t ia[16];
+                        if ((ret = decode_luma_old(gb, cbp_a, a, edge_state_y, &sc->a, bx, &q_a, 1, &cbp_a, ia)) < 0)
                             return ret;
+                        set_info_luma(c, 3, bx, by, ia);
                         put_luma_old(c, 3, bx, by, a, 0);
                     }
                     put_luma_old(c, 0, bx, by, y, 0);
@@ -1650,14 +1772,20 @@ static int decode_slice(AVCodecContext *avctx, void *arg, int jobnr, int threadn
                     }
                 } else {
                     FBlocks y[4] = { { { 0 } } }, u = { { 0 } }, v = { { 0 } };
-                    if ((ret = decode_luma_old(gb, cbp_y_p, y, edge_state_y, &sc->y, bx, &q_y_p, 0, &cbp_y_p)) < 0 ||
-                        (ret = decode_chroma_old(gb, cbp_v_p, v, edge_state_y, &sc->v, bx, &q_v_p, 0, &cbp_v_p)) < 0 ||
-                        (ret = decode_chroma_old(gb, cbp_u_p, u, edge_state_y, &sc->u, bx, &q_u_p, 0, &cbp_u_p)) < 0)
+                    uint16_t iy[16], iu[4], iv[4];
+                    if ((ret = decode_luma_old(gb, cbp_y_p, y, edge_state_y, &sc->y, bx, &q_y_p, 0, &cbp_y_p, iy)) < 0 ||
+                        (ret = decode_chroma_old(gb, cbp_v_p, v, edge_state_y, &sc->v, bx, &q_v_p, 0, &cbp_v_p, iv)) < 0 ||
+                        (ret = decode_chroma_old(gb, cbp_u_p, u, edge_state_y, &sc->u, bx, &q_u_p, 0, &cbp_u_p, iu)) < 0)
                         return ret;
+                    fill_info(c, 0, bx, by, 4, 0);
+                    fill_info(c, 1, bx, by, 2, 0);
+                    fill_info(c, 2, bx, by, 2, 0);
                     if (do_alpha) {
                         FBlocks a[4] = { { { 0 } } };
-                        if ((ret = decode_luma_old(gb, cbp_a_p, a, edge_state_y, &sc->a, bx, &q_a_p, 0, &cbp_a_p)) < 0)
+                        uint16_t ia[16];
+                        if ((ret = decode_luma_old(gb, cbp_a_p, a, edge_state_y, &sc->a, bx, &q_a_p, 0, &cbp_a_p, ia)) < 0)
                             return ret;
+                        fill_info(c, 3, bx, by, 4, 0);
                         put_luma_old(c, 3, bx, by, a, 1);
                     }
                     put_luma_old(c, 0, bx, by, y, 1);
@@ -1702,7 +1830,7 @@ static int bink2_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     c->frame_flags = get_bits_long(&gb, 32);
     for (int i = 0; i < c->num_slices - 1; i++) {
         offsets[i] = get_bits_long(&gb, 32);
-        if (offsets[i] >= avpkt->size)
+        if (offsets[i] > avpkt->size)  /* an empty slice may start at the end */
             return AVERROR_INVALIDDATA;
     }
     c->cur ^= 1;
@@ -1741,15 +1869,16 @@ static int bink2_decode_frame(AVCodecContext *avctx, AVFrame *frame,
             goto fail;
         }
 
-    /* The reference decoder's in-loop post-processing of the newer
-     * bitstream: smooth DC-only intra blocks, then deblock every edge
-     * that the frame does not turn off, by direction (0x4000, 0x8000) or,
-     * when it carries edge flags (0x10000), by row and column. */
-    if (c->frame_flags & 0x2000) {
+    /* The reference decoder's in-loop post-processing: smooth DC-only
+     * intra blocks (with the kernel of the frame's bitstream), then deblock
+     * every edge that the frame does not turn off, by direction (0x4000,
+     * 0x8000) or, when it carries edge flags (0x10000), by row and column. */
+    {
         int nplanes = c->do_alpha ? 4 : 3;
         for (int p = 0; p < nplanes; p++)
             bink2_smooth_dc_plane(c->planes[c->cur][p], c->stride[p], c->info[p],
-                                  c->info_w[p], c->info_h[p], (c->frame_flags & 0xFF) * 8);
+                                  c->info_w[p], c->info_h[p], (c->frame_flags & 0xFF) * 8,
+                                  c->frame_flags & 0x2000 ? bink2_smooth_dc_block : smooth_dc_block_old);
         /* the reference keeps the picture rounded up to 16 luma pixels */
         for (int p = 0; p < nplanes; p++) {
             int chroma = p == 1 || p == 2, w16 = FFALIGN(w, 16), h16 = FFALIGN(h, 16);
@@ -1816,6 +1945,11 @@ static av_cold int bink2_decode_init(AVCodecContext *avctx)
         }
     }
     c->slice_h[c->num_slices - 1] = height_a >> 5;
+    /* As in KB2g, pictures under 128 lines are a single slice; later
+     * versions still carry the other slices' offsets, as zero. */
+    if (c->version > 'g' && height_a < 128)
+        for (int i = 0; i < c->num_slices; i++)
+            c->slice_h[i] = height_a >> 5;
 
     c->bw = (w + 31) >> 5;
     c->bh = (h + 31) >> 5;
