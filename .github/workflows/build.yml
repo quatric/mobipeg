@@ -376,6 +376,7 @@ jobs:
             --prefix="$PWD/dist" \
             --arch=${{ matrix.ffarch }} \
             --enable-gpl \
+            --enable-version3 \
             --enable-static \
             --disable-shared \
             --disable-doc \
@@ -722,6 +723,7 @@ jobs:
             --pkg-config="/usr/local/bin/${{ matrix.cross_prefix }}-pkg-config" \
             ${{ matrix.asm_flag }} \
             --enable-gpl \
+            --enable-version3 \
             --enable-libx264 \
             --enable-libvorbis \
             --enable-libopus \
@@ -953,6 +955,7 @@ jobs:
               --prefix="$OUTDIR" \
               --arch=$ARCH \
               --enable-gpl \
+              --enable-version3 \
               --enable-libx264 \
               --enable-libvorbis \
               --enable-libopus \

@@ -484,7 +484,8 @@ cd .. && PKG_CONFIG_PATH="$PWD/x264-install/lib/pkgconfig" \
 Confirm with `ffmpeg -encoders | grep mobiclip`.
 
 The Bink 2 encoder (`bink2video`) is AGPL-3.0, so it is only built when
-`--enable-version3` is added to the configure line as well.
+`--enable-version3` is added to the configure line as well.  The release
+builds are configured with it, so their binaries are GPLv3.
 
 ## Documentation
 
