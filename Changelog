@@ -11,7 +11,7 @@ version 4.0:
 - MIVF: M2Y1/M2Y2 video codec, IA4M audio decoder, muxer and demuxer; `mivf` format in encode.py and the GUI (M2Y2 checkbox, audio rate)
 - Bink 1 encoding: video and DCT audio encoders and a .bik muxer; `bink` format in encode.py and the GUI
 - Bink 2 encoding (bink2enc ported into libavcodec, KB2j muxer) and a Bink 2 decoder matched against RAD's, including the old bitstream, short pictures and frames without edge flags
-- MobiClip encoder (x264): motion search on the format's half-pel grid, intra and partition searches cut short when they cannot win, frame threads, and rate-distortion costs weighed at the quantizer the format actually codes at; files about 1-7% smaller at the same quality
+- MobiClip encoder (x264): motion search on the format's half-pel grid, intra and partition searches cut short when they cannot win, frame threads, and rate-distortion costs weighed at the quantizer the format actually codes at; files 11-24% smaller than 3.0's at the same quality
 - Release builds are configured with --enable-version3 (GPLv3) so they include Bink 2
 - Speed (Apple M4, against 3.0): MobiClip video encoding about 2x faster (2.0x-2.1x fewer instructions, 2.1x-2.35x less wall time); a whole encode.py run 2.3x (.moflex), 2.8x (.mo) and 7.6x (.mods) faster
 
