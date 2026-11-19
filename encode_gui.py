@@ -61,7 +61,7 @@ _script_dir = (
 ENCODE_SCRIPT = os.path.join(_script_dir, "encode.py")
 
 # Shown in the title bar; keep in step with version_info.txt and the release tag.
-MOBIPEG_VERSION = "3.0"
+MOBIPEG_VERSION = "4.0"
 
 
 # One source of truth for what the decoder accepts: (family, extensions).
