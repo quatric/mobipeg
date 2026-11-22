@@ -105,9 +105,6 @@ def check_per_format(gui, dump=False):
     video_only = [
         ("scale", app.enc_scale_label, app.enc_scale_entry),
         ("fps", app.enc_fps_label, app.enc_fps_entry),
-        # --hq only moves video knobs, so offering it for an audio format
-        # would be a control that silently does nothing.
-        ("highest-quality", app.enc_hq_chk, app.enc_hq_chk),
     ]
 
     for fmt in sorted(set(app.formats_map.values())):
@@ -420,18 +417,9 @@ def check_extras(gui):
     # --- presets and saved settings ---
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
     app.on_enc_format_change()
-    app.apply_builtin_preset("Small (700k two-pass)")
-    check(app.enc_bitrate_var.get() == "700k" and app.enc_multipass_var.get(),
-          "preset: bitrate/multipass not applied")
-    check(not app.enc_hq_var.get(), "preset: Highest Quality should be off")
-    cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
-    check("--bitrate" in cmd and "--multipass" in cmd,
-          "preset: advanced flags not sent (%s)" % cmd)
-    app.apply_builtin_preset("Fit 3DS SD (under 4 GiB)")
-    check(app.enc_maxsize_var.get() == "4000", "preset: max size not applied")
-    app.apply_builtin_preset("Best quality (largest file)")
-    check(app.enc_hq_var.get() and app.enc_quant_var.get() == "12",
-          "preset: best quality not applied")
+    app.apply_builtin_preset("Balanced")
+    check(app.enc_quant_var.get() == "32" and app.enc_me_var.get() == "hex",
+          "profile: Balanced not applied")
 
     app.enc_offset_var.set("77")
     snap = app.snapshot_settings()
@@ -532,7 +520,7 @@ def check_levels(gui):
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
     expect = {
         # widget: lowest level index that shows it
-        "enc_audio_cb": 0, "enc_hq_chk": 0, "enc_maxsize_entry": 0,
+        "enc_audio_cb": 0, "enc_maxsize_entry": 1,
         "enc_scale_entry": 0, "enc_profile_cb": 0, "enc_speed_cb": 0, "enc_fps_entry": 1, "enc_offset_entry": 1, "enc_hdr_cb": 1,
         "enc_super_frame": 1, "enc_jobs_entry": 2, "enc_layout_entry": None,
     }
@@ -555,11 +543,6 @@ def check_levels(gui):
     app.enc_fmt_var.set("Nintendo DSP-ADPCM .dsp")
     app.on_enc_format_change()
     check(not is_shown(app.enc_out_frame), "Simple + audio-only: empty Output frame shown")
-    # A preset that needs the Advanced section raises the level.
-    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
-    app.on_enc_format_change()
-    app.apply_builtin_preset("Small (700k two-pass)")
-    check(app.enc_level_var.get() == "Advanced", "bitrate preset did not raise the level")
     app.enc_level_var.set("Advanced")
 
 
@@ -569,18 +552,18 @@ def check_presets_and_drop(gui):
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
     app.on_enc_format_change()
     app.enc_level_var.set("Simple")
-    app.apply_builtin_preset("Quality — the sweet spot (Q30)")
+    app.apply_builtin_preset("Quality \u2014 the sweet spot")
     check(app.enc_level_var.get() == "Simple", "a Q preset must not raise the level")
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     for flag, value in (("--quantizer", "30"), ("--mobi-subme", "9"),
                         ("--mobi-skip", "0"), ("--me", "hex")):
         if check(flag in cmd, "Q30 preset: %s missing from %s" % (flag, cmd)):
             check(cmd[cmd.index(flag) + 1] == value, "Q30 preset: %s wrong" % flag)
-    check("--hq" not in cmd, "Q30 preset: Highest Quality should be off")
+    check("--hq" not in cmd, "the Highest Quality flag is gone")
 
     # Encoding speed: Fast lowers the search depth and picks the diamond search.
     app.enc_speed_var.set(app.SPEED_CHOICES[1])
-    app.apply_builtin_preset("Best \u2014 wide search (Q27)")  # subme 9, me umh
+    app.apply_builtin_preset("Best \u2014 wide search")  # subme 9, me umh
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     check(cmd[cmd.index("--mobi-subme") + 1] == "6", "Fast: search depth not capped at 6")
     check(cmd[cmd.index("--me") + 1] == "umh", "Fast: an explicit motion search was overridden")
@@ -591,7 +574,7 @@ def check_presets_and_drop(gui):
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     check(cmd[cmd.index("--mobi-subme") + 1] == "9" and "--me" not in cmd,
           "Standard speed changed the search settings: %s" % cmd)
-    app.apply_profile("Quality \u2014 the sweet spot (Q30)")
+    app.apply_profile("Quality \u2014 the sweet spot")
     check(app.enc_quant_var.get() == "30", "profile dropdown did not apply the preset")
     app.enc_level_var.set("Advanced")
 
@@ -674,6 +657,36 @@ def check_output_field(gui):
     app.enc_input_var.set("")
 
 
+def check_profiles(gui):
+    """Save / apply / delete a profile through the Quality profile controls."""
+    import tkinter.messagebox as mb
+    app = gui.app
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    check(not hasattr(app, "preset_btn"), "the separate Presets menu is still there")
+    check(is_shown(app.enc_profile_btns), "Save/Delete buttons not shown")
+    from tkinter import simpledialog
+    orig = simpledialog.askstring
+    simpledialog.askstring = lambda *a, **k: "My profile"
+    app.enc_quant_var.set("33")
+    try:
+        app.save_user_preset()
+    finally:
+        simpledialog.askstring = orig
+    check("My profile" in app.enc_profile_cb.cget("values"), "saved profile not in the dropdown")
+    app.enc_quant_var.set("20")
+    app.apply_profile("My profile")
+    check(app.enc_quant_var.get() == "33", "saved profile did not restore its settings")
+    asked = mb.askyesno
+    mb.askyesno = lambda *a, **k: True
+    try:
+        app.enc_profile_var.set("My profile")
+        app.delete_selected_profile()
+    finally:
+        mb.askyesno = asked
+    check("My profile" not in app.enc_profile_cb.cget("values"), "deleted profile still listed")
+
+
 def main():
     dump = "--dump" in sys.argv
     here = os.path.dirname(os.path.abspath(__file__))
@@ -715,6 +728,7 @@ def main():
     check_presets_and_drop(gui)
     check_scroll(gui)
     check_output_field(gui)
+    check_profiles(gui)
 
     gui.app.destroy()
 

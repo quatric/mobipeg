@@ -107,10 +107,6 @@ AUDIO_ONLY_FORMATS = {
     "3ds_sound",
 }
 
-# Formats Highest Quality is not offered for: their encoder's own default
-# is already the sensible quality, and HQ's QP 12 would bloat the files.
-NO_HQ_FORMATS = {"mivf", "bink"}
-
 # Output container extension per format, mirroring encode.py's out_ext map
 # (and AUDIO_FORMAT_EXTENSIONS for the audio-only formats) -- used only to
 # preview the default output filename before a run, not to pick the muxer.
@@ -577,15 +573,6 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_roundtrip_chk.grid(row=14, column=1, sticky="w", padx=5, pady=2)
 
-        self.enc_hq_var = tk.BooleanVar(value=True)
-        self.enc_hq_chk = ttk.Checkbutton(
-            self.encode_frame,
-            text="Use Highest Quality (Largest Filesize)",
-            variable=self.enc_hq_var,
-            command=self.on_toggle_hq,
-        )
-        self.enc_hq_chk.grid(row=15, column=1, sticky="w", padx=5, pady=2)
-
         # MIVF only, where Highest Quality is hidden, so it takes that row.
         self.enc_m2y2_var = tk.BooleanVar(value=False)
         self.enc_m2y2_chk = ttk.Checkbutton(
@@ -842,12 +829,6 @@ class EncodeGUI(tk.Tk):
                 set(self.formats_map.values()) - AUDIO_ONLY_FORMATS,
                 (self.enc_fps_label, self.enc_fps_entry),
             ),
-            # MIVF's encoder has its own sensible default (QP 34); Highest
-            # Quality's QP 12 would make files several times larger.
-            (
-                set(self.formats_map.values()) - AUDIO_ONLY_FORMATS - NO_HQ_FORMATS,
-                (self.enc_hq_chk,),
-            ),
             ({"rvid"}, (self.enc_rvid_mode_label, self.enc_rvid_mode_cb)),
             ({"vx", "mods"}, (self.enc_fast_audio_chk,)),
             ({"mivf"}, (self.enc_m2y2_chk,)),
@@ -883,12 +864,6 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_fmt_var.trace_add("write", lambda *a: self.on_encode_input_changed())
         self.enc_output_var.trace_add("write", lambda *a: self.on_output_path_changed())
-        for var in (
-            self.enc_quant_var,
-            self.enc_mobi_subme_var,
-            self.enc_mobi_skip_var,
-        ):
-            var.trace_add("write", self.update_hq_state_from_fields)
         self.on_enc_format_change()
 
     # ------------------------------------------------------------------
@@ -929,7 +904,9 @@ class EncodeGUI(tk.Tk):
              "enc_arate_entry", "enc_roundtrip_chk", "enc_fast_audio_chk",
              "enc_quant_label", "enc_quant_entry", "enc_offset_label",
              "enc_offset_entry", "enc_offset_hint", "enc_normalize_chk",
-             "enc_hdr_label", "enc_hdr_cb", "enc_hdr_hint", "enc_super_frame")),
+             "enc_hdr_label", "enc_hdr_cb", "enc_hdr_hint", "enc_super_frame",
+             "enc_maxsize_label", "enc_maxsize_entry", "enc_fat32_btn",
+             "enc_est_label")),
         (2, ("enc_layout_label", "enc_layout_entry", "enc_jobs_label",
              "enc_jobs_entry", "enc_jobs_hint")),
         (3, ("enc_adv_toggle_chk",)),  # never: the level picker replaces it
@@ -978,14 +955,8 @@ class EncodeGUI(tk.Tk):
         ).pack(side="left")
         self.enc_level_var.trace_add("write", lambda *a: self.on_level_change())
 
-        # --- Presets: a menu button beside the format picker ---
+        # Saved profiles live in the Quality profile dropdown (Output section).
         self.preset_store = mt.JsonStore("presets.json")
-        self.preset_btn = ttk.Menubutton(f, text="Presets ▾")
-        self.preset_menu = tk.Menu(
-            self.preset_btn, tearoff=0, postcommand=self.rebuild_preset_menu
-        )
-        self.preset_btn["menu"] = self.preset_menu
-        self.preset_btn.grid(row=1, column=2, padx=5, pady=5)
 
         # --- Source & audio ---
         self.enc_src_frame = ttk.LabelFrame(f, text="Source and audio", padding=8)
@@ -1042,7 +1013,13 @@ class EncodeGUI(tk.Tk):
             of, textvariable=self.enc_profile_var, state="readonly",
             values=self.profile_names(),
         )
-        self.enc_profile_cb.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+        self.enc_profile_cb.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+        self.enc_profile_btns = ttk.Frame(of)
+        self.enc_profile_btns.grid(row=0, column=2, sticky="w", padx=5, pady=2)
+        ttk.Button(self.enc_profile_btns, text="Save...", width=7,
+                   command=self.save_user_preset).pack(side="left")
+        ttk.Button(self.enc_profile_btns, text="Delete", width=7,
+                   command=self.delete_selected_profile).pack(side="left", padx=(4, 0))
         self.enc_profile_cb.bind(
             "<<ComboboxSelected>>", lambda e: self.apply_profile(self.enc_profile_var.get())
         )
@@ -1178,7 +1155,7 @@ class EncodeGUI(tk.Tk):
             "outdir": self.enc_outdir_var, "scale": self.enc_scale_var,
             "keyframes": self.enc_keyframes_var, "quant": self.enc_quant_var,
             "audio_rate": self.enc_audio_rate_var, "fps": self.enc_fps_var,
-            "hq": self.enc_hq_var, "roundtrip": self.enc_roundtrip_var,
+            "roundtrip": self.enc_roundtrip_var,
             "fast_audio": self.enc_fast_audio_var, "adv": self.enc_adv_toggle_var,
             "bitrate": self.enc_bitrate_var, "multipass": self.enc_multipass_var,
             "subme": self.enc_mobi_subme_var, "skip": self.enc_mobi_skip_var,
@@ -1198,7 +1175,7 @@ class EncodeGUI(tk.Tk):
 
         self.enc_input_var.trace_add("write", lambda *a: self.schedule_source_probe())
         for var in (self.enc_maxsize_var, self.enc_bitrate_var, self.enc_audio_var,
-                    self.enc_hq_var, self.enc_quant_var):
+                    self.enc_quant_var):
             var.trace_add("write", lambda *a: self.update_size_estimate())
         self.enc_audio_var.trace_add("write", lambda *a: self.refresh_extra_controls())
 
@@ -1229,6 +1206,7 @@ class EncodeGUI(tk.Tk):
              fmt in self.STEREO_FORMATS)
         show((self.enc_maxsize_label, self.enc_maxsize_entry, self.enc_fat32_btn,
               self.enc_est_label, self.enc_profile_label, self.enc_profile_cb,
+              self.enc_profile_btns,
               self.enc_speed_label, self.enc_speed_cb), fmt in self.MOBI_SIZE_FORMATS)
         show((self.enc_hdr_label, self.enc_hdr_cb, self.enc_hdr_hint), not audio_only)
         show((self.enc_jobs_label, self.enc_jobs_entry, self.enc_jobs_hint),
@@ -1473,38 +1451,9 @@ class EncodeGUI(tk.Tk):
         finally:
             self.destroy()
 
-    def rebuild_preset_menu(self):
-        self.enc_profile_cb.config(values=self.profile_names())
-        m = self.preset_menu
-        m.delete(0, tk.END)
-        for name in mt.BUILTIN_PRESETS:
-            m.add_command(label=name, command=lambda n=name: self.apply_builtin_preset(n))
-        users = self.preset_store.load()
-        if users:
-            m.add_separator()
-            for name in sorted(users):
-                m.add_command(label=name, command=lambda n=name: self.apply_user_preset(n))
-        m.add_separator()
-        m.add_command(label="Save current settings as preset...", command=self.save_user_preset)
-        if users:
-            sub = tk.Menu(m, tearoff=0)
-            for name in sorted(users):
-                sub.add_command(label=name, command=lambda n=name: self.delete_user_preset(n))
-            m.add_cascade(label="Delete preset", menu=sub)
-
     def apply_builtin_preset(self, name):
-        p = dict(mt.BUILTIN_PRESETS[name])
-        data = {
-            "hq": p["hq"], "quant": p["quant"], "subme": p["subme"], "skip": p["skip"],
-            "bitrate": p["bitrate"], "multipass": p["multipass"],
-            "max_size_mb": p["max_size_mb"], "me": p["me"],
-        }
-        # subme/skip/bitrate are only sent with the Advanced section on.
-        data["adv"] = bool(p["bitrate"]) and not p["hq"]
-        # Fields first, then hq, so a preset that is not HQ stays that way.
-        self.apply_settings({k: v for k, v in data.items() if k != "hq"})
-        self.enc_hq_var.set(bool(p["hq"]))
-        self.set_status(f"Preset: {name}")
+        self.apply_settings(dict(mt.BUILTIN_PRESETS[name]))
+        self.set_status(f"Profile: {name}")
 
     def apply_user_preset(self, name):
         data = self.preset_store.load().get(name)
@@ -1535,11 +1484,18 @@ class EncodeGUI(tk.Tk):
         else:
             messagebox.showerror("Preset", "Could not write the preset file.")
 
-    def delete_user_preset(self, name):
+    def delete_selected_profile(self):
+        name = self.enc_profile_var.get()
         users = self.preset_store.load()
-        if name in users and messagebox.askyesno("Delete preset", f'Delete "{name}"?'):
+        if name in mt.BUILTIN_PRESETS:
+            messagebox.showinfo("Profile", "Built-in profiles cannot be deleted.")
+        elif name in users and messagebox.askyesno("Delete profile", f'Delete "{name}"?'):
             users.pop(name)
             self.preset_store.save(users)
+            self.enc_profile_cb.config(values=self.profile_names())
+            self.enc_profile_var.set("Choose a profile...")
+        else:
+            messagebox.showinfo("Profile", "Pick a saved profile to delete.")
 
     # ------------------------------------------------------------------
     # Running processes: progress, Stop, follow-up buttons
@@ -1582,7 +1538,8 @@ class EncodeGUI(tk.Tk):
         if self._proc is not None:
             self._stopped = True
             self.append_console("\nStopping...\n")
-            mt.terminate_tree(self._proc)
+            if not isinstance(self._proc, str):
+                mt.terminate_tree(self._proc)
 
     def script_cmd(self):
         return (
@@ -1653,6 +1610,9 @@ class EncodeGUI(tk.Tk):
         self.stop_btn.state(["!disabled"])
         self._hide_followups()
         self._stopped = False
+        # Claim the slot now: the worker thread only creates the process a
+        # moment later, and busy() must not read False in between.
+        self._proc = "starting"
         self._set_progress(0.0, title or "Working...")
         self.console.config(state="normal")
         if clear:
@@ -1695,6 +1655,8 @@ class EncodeGUI(tk.Tk):
                     **mt.popen_kwargs_new_group(),
                 )
                 self._proc = process
+                if self._stopped:  # Stop was pressed before the process existed
+                    mt.terminate_tree(process)
                 last = 0.0
                 started = time.time()  # restarts when a second pass resets the bar
 
@@ -1806,35 +1768,6 @@ class EncodeGUI(tk.Tk):
     def add_current_to_queue(self):
         self.queue_tab.add_current()
         self.select_tab(self.queue_tab)
-
-    def on_toggle_hq(self):
-        if self.enc_hq_var.get():
-            self.enc_quant_var.set("12")
-            self.enc_mobi_subme_var.set("9")
-            self.enc_mobi_skip_var.set("0")
-            fmt = self.formats_map.get(self.enc_fmt_var.get())
-            options = self.audio_options.get(fmt, [])
-            if "pcm" in options:
-                self.enc_audio_var.set("pcm")
-        else:
-            self.enc_quant_var.set("0")
-            self.enc_mobi_subme_var.set("")
-            self.enc_mobi_skip_var.set("512")
-            fmt = self.formats_map.get(self.enc_fmt_var.get())
-            options = self.audio_options.get(fmt, [])
-            if "adpcm" in options:
-                self.enc_audio_var.set("adpcm")
-
-    def update_hq_state_from_fields(self, *args):
-        is_hq = (
-            self.enc_quant_var.get().strip() == "12"
-            and self.enc_mobi_subme_var.get().strip() == "9"
-            and self.enc_mobi_skip_var.get().strip() == "0"
-        )
-        if is_hq and not self.enc_hq_var.get():
-            self.enc_hq_var.set(True)
-        elif not is_hq and self.enc_hq_var.get():
-            self.enc_hq_var.set(False)
 
     def setup_decode_tab(self):
         self.decode_frame.columnconfigure(1, weight=1)
@@ -1964,20 +1897,6 @@ class EncodeGUI(tk.Tk):
 
     def on_enc_format_change(self, event=None):
         fmt = self.formats_map.get(self.enc_fmt_var.get())
-
-        # Highest Quality does not apply to these formats: leave their
-        # quantizer at the format default while one is selected, and put
-        # Highest Quality back on when moving to a format it applies to.
-        prev = getattr(self, "_enc_prev_fmt", None)
-        if fmt in NO_HQ_FORMATS and prev not in NO_HQ_FORMATS:
-            self._hq_before_no_hq = self.enc_hq_var.get()
-            if self._hq_before_no_hq:
-                self.enc_quant_var.set("0")
-        elif fmt not in NO_HQ_FORMATS and prev in NO_HQ_FORMATS:
-            if getattr(self, "_hq_before_no_hq", False):
-                self.enc_hq_var.set(True)
-                self.on_toggle_hq()
-        self._enc_prev_fmt = fmt
 
         self.enc_input2_label.config(text="Right Eye (3D):")
 
@@ -2213,8 +2132,6 @@ class EncodeGUI(tk.Tk):
                 cmd.extend(["--keyframes", kf])
         if self.enc_roundtrip_var.get():
             cmd.append("--roundtrip")
-        if self.enc_hq_var.get() and fmt not in NO_HQ_FORMATS:
-            cmd.append("--hq")
         if self.enc_m2y2_var.get() and fmt == "mivf":
             cmd.append("--m2y2")
         if self.enc_fast_audio_var.get() and fmt in ("vx", "mods"):
@@ -2238,7 +2155,9 @@ class EncodeGUI(tk.Tk):
             "bink2",
         ):
             q = self.enc_quant_var.get().strip()
-            if q and q != "0":
+            # 12 is the GUI default for MobiClip; MIVF and Bink keep their own
+            # encoder default unless the user changes it.
+            if q and q != "0" and not (q == "12" and fmt in ("mivf", "bink")):
                 cmd.extend(["--quantizer", q])
         if fmt in (
             "mo",

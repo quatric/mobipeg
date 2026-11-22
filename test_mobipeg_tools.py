@@ -188,7 +188,7 @@ class Store(unittest.TestCase):
             self.assertEqual(s.load(), {})
 
     def test_builtin_presets_shape(self):
-        keys = {"hq", "quant", "subme", "skip", "me", "bitrate", "multipass", "max_size_mb"}
+        keys = {"quant", "subme", "skip", "me"}
         for name, p in mt.BUILTIN_PRESETS.items():
             self.assertEqual(set(p), keys, name)
 
