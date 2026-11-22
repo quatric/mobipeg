@@ -298,6 +298,7 @@ class EncodeGUI(tk.Tk):
 
         self.apply_builtin_preset("Best")  # the default; saved settings override it
         self.load_settings()
+        self.warm_up_encode_columns()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # Height the console keeps however short the window gets: its label and
@@ -918,10 +919,37 @@ class EncodeGUI(tk.Tk):
     def level_index(self):
         return self.LEVELS.index(self.enc_level_var.get())
 
+    def pin_encode_columns(self):
+        """Keep the Encode form's columns from ever shrinking.
+
+        Rows come and go with the level and format, and the columns followed
+        the widest row left, so the fields jumped. Each column keeps the widest
+        size it has needed (see warm_up_encode_columns for the first pass)."""
+        f = self.encode_frame
+        f.update_idletasks()
+        for col in range(3):
+            w = f.grid_bbox(col, 0)[2]
+            if w > f.columnconfigure(col)["minsize"]:
+                f.columnconfigure(col, minsize=w)
+
+    def warm_up_encode_columns(self):
+        """Visit every format at every level once so the widest size is known."""
+        fmt, lvl = self.enc_fmt_var.get(), self.enc_level_var.get()
+        self._warming = True
+        for label in self.formats_map:
+            self.enc_fmt_var.set(label)
+            for name in self.LEVELS:
+                self.enc_level_var.set(name)
+        self.enc_fmt_var.set(fmt)
+        self.enc_level_var.set(lvl)
+        self._warming = False
+        self.on_enc_format_change()
+
     def on_level_change(self):
         self.enc_adv_toggle_var.set(self.level_index() == 2)
         self.on_enc_format_change()
-        self.save_settings()  # keep the choice even if the app is killed, not closed
+        if not getattr(self, "_warming", False):
+            self.save_settings()  # keep the choice even if the app is killed, not closed
 
     def apply_level_gates(self):
         lvl = self.level_index()
@@ -1220,6 +1248,7 @@ class EncodeGUI(tk.Tk):
         for w in self.enc_ffargs_widgets:
             w.grid()
         self.apply_level_gates()
+        self.pin_encode_columns()
         self.update_size_estimate()
 
     def refresh_super_state(self):
