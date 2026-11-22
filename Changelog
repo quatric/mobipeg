@@ -1,6 +1,15 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 4.1:
+- GUI: Simple / Intermediate / Advanced levels (saved between runs) show only the options that level needs, and the form keeps its size when you switch
+- GUI: Quality profile (Best, High, Quality - the sweet spot, Balanced, Small, in steps of 6 quantizer, plus your own saved profiles) and Encoding speed dropdowns; Scale is available at every level and snaps to multiples of 16 for MobiClip formats
+- GUI: one Output file field, drag and drop of files onto the form, a Queue tab, an Inspect tab, and a progress bar with an ETA and finish time
+- GUI: Source and audio (audio track, offset, normalize), Max size and HDR tone-mapping options at Intermediate; green Success! or red Failure! when a job ends
+- GUI: flat square tabs, two-finger trackpad scrolling, and the window no longer sits under the Dock
+- encode.py: choose the audio track, shift and normalize audio, fit a MobiClip file under a size limit, tone-map HDR sources, and an `inspect` mode that reports on a .moflex
+- encode.py: .mods uses the same keyframe cadence as .mo and .moflex, and parallel chunk encodes print progress so a GUI bar can follow them
+- Credits: Helwettpackardenterprise (MobiClip format research) and Oldhimaster1 (Mobipeg modifications and the Mobipeg-MOFLEX GUI ideas)
 version 4.0:
 - Rebased onto FFmpeg master (2026-11-17)
 - GUI shows the version in its title and keeps the console on screen on short displays
