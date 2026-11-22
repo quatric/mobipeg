@@ -251,7 +251,6 @@ class QueueTab(ttk.Frame):
         bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.add_btn = ttk.Button(bar, text="Add files...", command=self.add_files)
         self.add_btn.pack(side="left")
-        ttk.Button(bar, text="Add Encode-tab input", command=self.add_current).pack(side="left", padx=4)
         ttk.Button(bar, text="Remove", command=self.remove_selected).pack(side="left", padx=4)
         ttk.Button(bar, text="Up", width=4, command=lambda: self.move(-1)).pack(side="left")
         ttk.Button(bar, text="Down", width=5, command=lambda: self.move(1)).pack(side="left", padx=(2, 4))
@@ -339,7 +338,7 @@ class QueueTab(ttk.Frame):
     def add_current(self):
         p = self.app.enc_input_var.get().strip()
         if not p or not os.path.isfile(p):
-            messagebox.showwarning("Queue", "Choose an input file on the Encode tab first.")
+            self.add_files()  # nothing chosen on the Encode tab: pick files here
             return
         self.add_paths([p])
 
