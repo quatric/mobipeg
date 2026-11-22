@@ -1512,7 +1512,8 @@ class EncodeGUI(tk.Tk):
         self.progress = ttk.Progressbar(bar, mode="determinate", maximum=100, length=160)
         self.progress.grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(bar, textvariable=self.status_var).grid(row=0, column=1, sticky="ew")
+        self.status_label = ttk.Label(bar, textvariable=self.status_var)
+        self.status_label.grid(row=0, column=1, sticky="ew")
         self.after_btns = ttk.Frame(bar)
         self.after_btns.grid(row=0, column=2, sticky="e")
         self.stop_btn = ttk.Button(self.after_btns, text="■ Stop", command=self.stop_process)
@@ -1526,8 +1527,11 @@ class EncodeGUI(tk.Tk):
         self.last_output = ""
         self._pending_run = None
 
-    def set_status(self, text):
+    OK_COLOR, FAIL_COLOR = "#1a7f37", "#cf222e"
+
+    def set_status(self, text, color=""):
         self.status_var.set(text)
+        self.status_label.config(foreground=color)
 
     def busy(self):
         return self._proc is not None
@@ -1706,6 +1710,7 @@ class EncodeGUI(tk.Tk):
                     0,
                     self.append_console,
                     f"\nProcess finished with exit code {process.returncode}\n",
+                    self.OK_COLOR if process.returncode == 0 else self.FAIL_COLOR,
                 )
             except Exception as e:
                 self.after(0, self.append_console, f"\nFailed to run command: {e}\n")
@@ -1723,8 +1728,9 @@ class EncodeGUI(tk.Tk):
                 self.set_status("Stopped")
             elif code == 0:
                 self._set_progress(1.0, "Done")
+                self.status_label.config(foreground=self.OK_COLOR)
             else:
-                self.set_status(f"Failed (exit code {code})")
+                self.set_status(f"Failed (exit code {code})", self.FAIL_COLOR)
             if on_done:
                 on_done(code, stopped)
 
@@ -2051,9 +2057,11 @@ class EncodeGUI(tk.Tk):
         if hasattr(self, "dec_eyes_note"):
             self.dec_eyes_note.config(text=note)
 
-    def append_console(self, text):
+    def append_console(self, text, color=None):
         self.console.config(state="normal")
-        self.console.insert(tk.END, text)
+        if color:
+            self.console.tag_config(color, foreground=color)
+        self.console.insert(tk.END, text, color or ())
         self.console.see(tk.END)
         self.console.config(state="disabled")
 
