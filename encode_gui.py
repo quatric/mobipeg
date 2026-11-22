@@ -189,8 +189,11 @@ class EncodeGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"mobipeg v{MOBIPEG_VERSION}")
-        self.geometry("750x900")
-        self.minsize(700, 750)
+        # Fit the screen: leave room for the menu bar and the Dock (their size
+        # is not visible to Tk), so the bottom of the window is never hidden.
+        height = min(900, self.winfo_screenheight() - 170)
+        self.geometry(f"750x{height}+{max(0, (self.winfo_screenwidth() - 750) // 2)}+30")
+        self.minsize(700, min(750, height))
         self.configure(padx=15, pady=15)
 
         try:
