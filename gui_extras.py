@@ -19,12 +19,51 @@ from tkinter import ttk, filedialog, messagebox
 import mobipeg_tools as mt
 
 
+class FlatTabs(ttk.Frame):
+    """Tab strip with square, flat tabs and an underline on the selected one.
+
+    ttk.Notebook on macOS draws native rounded tabs that cannot be restyled,
+    so this stands in for it. It offers the three calls the app uses:
+    add(page, text=...), select(page) and the usual winfo_reqheight().
+    """
+
+    ACCENT = "#2f7fd8"
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
+        self._bg = ttk.Style().lookup("TFrame", "background") or "#ececec"
+        self.bar = ttk.Frame(self)
+        self.bar.grid(row=0, column=0, sticky="w")
+        ttk.Separator(self).grid(row=1, column=0, sticky="ew")
+        self._tabs = []
+
+    def add(self, page, text=""):
+        cell = ttk.Frame(self.bar)
+        cell.pack(side="left")
+        label = ttk.Label(cell, text=text, padding=(14, 6), cursor="hand2")
+        label.pack()
+        line = tk.Frame(cell, height=3, bg=self._bg)
+        line.pack(fill="x")
+        label.bind("<Button-1>", lambda _e, p=page: self.select(p))
+        self._tabs.append((page, label, line))
+        page.grid(row=2, column=0, sticky="nsew")
+        self.select(page) if len(self._tabs) == 1 else page.grid_remove()
+
+    def select(self, page):
+        for p, label, line in self._tabs:
+            on = p is page
+            label.configure(foreground="" if on else "grey")
+            line.configure(bg=self.ACCENT if on else self._bg)
+            p.grid() if on else p.grid_remove()
+
+
 class ScrollableFrame(ttk.Frame):
     """A frame whose `inner` child scrolls vertically inside a fixed viewport."""
 
     def __init__(self, parent, height=560):
-        # Padding keeps the canvas inside the notebook page's rounded border (aqua).
-        super().__init__(parent, padding=8)
+        super().__init__(parent)
         self.canvas = tk.Canvas(self, highlightthickness=0, height=height, borderwidth=0)
         self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vbar.set)

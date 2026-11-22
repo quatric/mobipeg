@@ -402,16 +402,16 @@ def check_extras(gui):
     app.enc_me_var.set("umh")
     app.enc_dct8_var.set("off")
     app.enc_block_var.set("2048")
-    app.enc_adv_toggle_var.set(False)
+    app.enc_level_var.set("Intermediate")
     cmd = build(app, "3DS Mobiclip .moflex (2D)")
     check("--min-qp" not in cmd, "advanced closed: --min-qp still passed")
-    app.enc_adv_toggle_var.set(True)
+    app.enc_level_var.set("Advanced")
     cmd = build(app, "3DS Mobiclip .moflex (2D)")
     for flag, value in (("--min-qp", "14"), ("--me", "umh"), ("--8x8dct", "0"),
                         ("--mo-block", "2048")):
         if check(flag in cmd, "advanced: %s missing from %s" % (flag, cmd)):
             check(cmd[cmd.index(flag) + 1] == value, "advanced: %s wrong" % flag)
-    app.enc_adv_toggle_var.set(False)
+    app.enc_level_var.set("Intermediate")
     app.enc_minqp_var.set("")
     app.enc_me_var.set("default")
     app.enc_dct8_var.set("default")
@@ -526,6 +526,43 @@ def check_extras(gui):
     check("disabled" not in app.inspect_tab.cia_btn.state(), "CIA hand-off not enabled")
 
 
+def check_levels(gui):
+    """Simple / Intermediate / Advanced hide controls without losing any."""
+    app = gui.app
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    expect = {
+        # widget: lowest level index that shows it
+        "enc_audio_cb": 0, "enc_hq_chk": 0, "enc_maxsize_entry": 0,
+        "enc_scale_entry": 1, "enc_offset_entry": 1, "enc_hdr_cb": 1,
+        "enc_super_frame": 1, "enc_jobs_entry": 2, "enc_layout_entry": None,
+    }
+    for index, name in enumerate(app.LEVELS):
+        app.enc_level_var.set(name)
+        app.update_idletasks()
+        for attr, minimum in expect.items():
+            if minimum is None:
+                continue
+            shown = is_shown(getattr(app, attr))
+            check(shown == (index >= minimum),
+                  "%s level: %s shown=%s, expected %s" % (name, attr, shown, index >= minimum))
+        check(not is_shown(app.enc_adv_toggle_chk), "%s: old Advanced checkbox is back" % name)
+        check(is_shown(app.enc_adv_frame) == (name == "Advanced"),
+              "%s: advanced tuning frame visibility wrong" % name)
+        ff = [w for w in app.enc_ffargs_widgets if w.grid_info()]
+        check(bool(ff) == (name == "Advanced"), "%s: extra ffmpeg row visibility wrong" % name)
+    # An audio-only format has nothing left in the Output frame at Simple.
+    app.enc_level_var.set("Simple")
+    app.enc_fmt_var.set("Nintendo DSP-ADPCM .dsp")
+    app.on_enc_format_change()
+    check(not is_shown(app.enc_out_frame), "Simple + audio-only: empty Output frame shown")
+    # A preset that needs the Advanced section raises the level.
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    app.apply_builtin_preset("Small (700k two-pass)")
+    check(app.enc_level_var.get() == "Advanced", "bitrate preset did not raise the level")
+    app.enc_level_var.set("Advanced")
+
+
 def main():
     dump = "--dump" in sys.argv
     here = os.path.dirname(os.path.abspath(__file__))
@@ -554,6 +591,7 @@ def main():
         )
         return 2
     gui.app.withdraw()
+    gui.app.enc_level_var.set("Advanced")  # the format checks expect every control
     gui.app.update_idletasks()
 
     check_tables(gui, encode)
@@ -562,6 +600,7 @@ def main():
     check_flipnote(gui)
     check_decoder_families(gui)
     check_extras(gui)
+    check_levels(gui)
 
     gui.app.destroy()
 

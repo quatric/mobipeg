@@ -44,7 +44,7 @@ import re
 import sys
 
 import mobipeg_tools as mt
-from gui_extras import ScrollableFrame, PathListEditor, QueueTab, InspectTab
+from gui_extras import FlatTabs, ScrollableFrame, PathListEditor, QueueTab, InspectTab
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -221,7 +221,7 @@ class EncodeGUI(tk.Tk):
         self.panes = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.panes.pack(fill=tk.BOTH, expand=True)
 
-        self.notebook = ttk.Notebook(self.panes)
+        self.notebook = FlatTabs(self.panes)
         self.panes.add(self.notebook, weight=1)
 
         # --- ENCODE TAB ---
@@ -897,12 +897,63 @@ class EncodeGUI(tk.Tk):
     STEREO_FORMATS = {"moflex3d", "topos3d", "topos3d_mpeg2"}
     SUPER_FORMATS = {"moflex", "moflex3d"}
     NO_AUDIO_FORMATS = {"hvqm4", "gba_ads", "gba_hydrogen"}
+    LEVELS = ["Simple", "Intermediate", "Advanced"]
+    # (lowest level that shows them, widget attributes). Applied on top of the
+    # per-format visibility, so a control is shown only if both allow it.
+    # The old "Show Advanced" checkbox is replaced by the Advanced level.
+    LEVEL_GATES = (
+        (1, ("enc_scale_label", "enc_scale_entry", "enc_fps_label", "enc_fps_entry",
+             "enc_keyframes_label", "enc_keyframes_entry", "enc_arate_label",
+             "enc_arate_entry", "enc_roundtrip_chk", "enc_fast_audio_chk",
+             "enc_quant_label", "enc_quant_entry", "enc_offset_label",
+             "enc_offset_entry", "enc_offset_hint", "enc_normalize_chk",
+             "enc_hdr_label", "enc_hdr_cb", "enc_hdr_hint", "enc_super_frame")),
+        (2, ("enc_layout_label", "enc_layout_entry", "enc_jobs_label",
+             "enc_jobs_entry", "enc_jobs_hint")),
+        (3, ("enc_adv_toggle_chk",)),  # never: the level picker replaces it
+    )
+    EXTRA_FFARGS_ROWS = (25, 26)  # grid rows of the "Extra FFmpeg parameters" field
+
+    def level_index(self):
+        return self.LEVELS.index(self.enc_level_var.get())
+
+    def on_level_change(self):
+        self.enc_adv_toggle_var.set(self.level_index() == 2)
+        self.on_enc_format_change()
+
+    def apply_level_gates(self):
+        lvl = self.level_index()
+        for minimum, names in self.LEVEL_GATES:
+            if lvl < minimum:
+                for n in names:
+                    getattr(self, n).grid_remove()
+        if lvl < 2:
+            for w in self.enc_ffargs_widgets:
+                w.grid_remove()
+        if not any(w.grid_info() for w in self.enc_out_frame.winfo_children()):
+            self.enc_out_frame.grid_remove()
+
     STEREO_CHOICES = ["auto", "sbs", "sbs-r", "tb", "tb-r", "frameseq", "frameseq-r"]
 
     def setup_extra_encode_controls(self):
         f = self.encode_frame
         self.src_info = None
         self._src_job = None
+        # Gridded once and kept, since grid_slaves() cannot find a hidden widget.
+        self.enc_ffargs_widgets = [
+            w for r in self.EXTRA_FFARGS_ROWS for w in f.grid_slaves(row=r)
+        ]
+
+        # --- Level: how many options to show ---
+        lvl = ttk.Frame(f)
+        lvl.grid(row=1, column=2, padx=5, pady=5)
+        ttk.Label(lvl, text="Level:").pack(side="left", padx=(0, 4))
+        self.enc_level_var = tk.StringVar(value="Intermediate")
+        ttk.Combobox(
+            lvl, textvariable=self.enc_level_var, values=self.LEVELS,
+            state="readonly", width=12,
+        ).pack(side="left")
+        self.enc_level_var.trace_add("write", lambda *a: self.on_level_change())
 
         # --- Presets: a menu button beside the format picker ---
         self.preset_store = mt.JsonStore("presets.json")
@@ -1078,7 +1129,8 @@ class EncodeGUI(tk.Tk):
 
         # Everything the Encode tab remembers between runs and saves in presets.
         self.persist_vars = {
-            "fmt": self.enc_fmt_var, "audio": self.enc_audio_var,
+            "fmt": self.enc_fmt_var, "level": self.enc_level_var,
+            "audio": self.enc_audio_var,
             "outdir": self.enc_outdir_var, "scale": self.enc_scale_var,
             "keyframes": self.enc_keyframes_var, "quant": self.enc_quant_var,
             "audio_rate": self.enc_audio_rate_var, "fps": self.enc_fps_var,
@@ -1139,6 +1191,9 @@ class EncodeGUI(tk.Tk):
         out_any = (fmt in self.MOBI_SIZE_FORMATS) or (not audio_only) or (fmt in self.JOBS_FORMATS)
         self.enc_out_frame.grid() if out_any else self.enc_out_frame.grid_remove()
         self.enc_super_frame.grid() if fmt in self.SUPER_FORMATS else self.enc_super_frame.grid_remove()
+        for w in self.enc_ffargs_widgets:
+            w.grid()
+        self.apply_level_gates()
         self.update_size_estimate()
 
     def refresh_super_state(self):
@@ -1336,8 +1391,8 @@ class EncodeGUI(tk.Tk):
                     var.set(str(v))
             except tk.TclError:
                 pass
-        if "adv" in data:
-            self.enc_adv_toggle_var.set(bool(data["adv"]))
+        if data.get("adv") and self.level_index() < 2:
+            self.enc_level_var.set("Advanced")  # the settings need that section
         if "srt" in data and isinstance(data["srt"], list):
             self.enc_srt_list.set([p for p in data["srt"] if isinstance(p, str)])
         for key, var in (("audio2", self.enc_audio2_var), ("poster", self.enc_poster_var)):
@@ -1401,7 +1456,7 @@ class EncodeGUI(tk.Tk):
             "max_size_mb": p["max_size_mb"],
         }
         # subme/skip/bitrate are only sent with the Advanced section on.
-        data["adv"] = bool(p["bitrate"] or p["subme"] or p["skip"] != "512") and not p["hq"]
+        data["adv"] = bool(p["bitrate"]) and not p["hq"]
         # Fields first, then hq, so a preset that is not HQ stays that way.
         self.apply_settings({k: v for k, v in data.items() if k != "hq"})
         self.enc_hq_var.set(bool(p["hq"]))
