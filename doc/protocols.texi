@@ -1139,6 +1139,11 @@ The libcurl protocol accepts the following options.
 @item user_agent
 Override the @code{User-Agent} header. Defaults to @code{Lavf/<version>}.
 
+@item method
+Override the HTTP method. @code{HEAD} retrieves the response headers and
+the resource size without a response body. Any other method name is sent
+as supplied; method tokens are case-sensitive.
+
 @item referer
 Set the @code{Referer} header.
 
@@ -1151,7 +1156,8 @@ Set the HTTP proxy to tunnel through.
 
 @item cookies
 Cookies to be sent in future requests, given as newline-delimited
-@code{Set-Cookie}-style values.
+@code{Set-Cookie}-style values. A cookie without a domain is only sent to the
+host of the URL.
 
 @item location
 The actual location of the data after following redirects. This is an output

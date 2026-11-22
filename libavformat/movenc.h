@@ -140,6 +140,7 @@ typedef struct MOVTrack {
     int64_t     elst_end_pts;
     int         end_reliable;
     int64_t     dts_shift;
+    int64_t     start_delay; ///< presentation delay kept in the composition offsets
 
     int         hint_track;   ///< the track that hints this track, -1 if no hint track is set
     int         nb_src_track;
@@ -183,6 +184,7 @@ typedef struct MOVTrack {
     int pal_done;
 
     int is_unaligned_qt_rgb;
+    int colr_warned;
 
     unsigned int squash_fragment_samples_to_one; //< flag to note formats where all samples for a fragment are to be squashed
 
@@ -228,6 +230,7 @@ typedef struct MOVMuxContext {
     int iods_audio_profile;
 
     int moov_written;
+    int64_t moov_end; ///< End of the initial moov atom.
     int fragments;
     int max_fragment_duration;
     int min_fragment_duration;

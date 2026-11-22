@@ -71,6 +71,7 @@
 #include "riff.h"
 #include "isom.h"
 #include "libavcodec/get_bits.h"
+#include "libavcodec/opus/tab.h"
 #include "id3v1.h"
 #include "mov_chan.h"
 #include "replaygain.h"
@@ -336,6 +337,56 @@ static int mov_metadata_loci(MOVContext *c, AVIOContext *pb, unsigned len)
     return av_dict_set(&c->fc->metadata, key, buf, 0);
 }
 
+// 3GPP TS 26.244 user data box or tnam, after its version and flags
+static int mov_metadata_3gp(MOVContext *c, AVIOContext *pb, int64_t len,
+                            const char *key, AVDictionary **metadata)
+{
+    char language[4], *str;
+    int size, ch, ret;
+
+    c->fc->event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED;
+    if (!strcmp(key, "date"))
+        return len < 2 ? 0 : av_dict_set_int(metadata, key, avio_rb16(pb), 0);
+
+    if (len < 3 || len >= INT_MAX / 2)
+        return 0;
+    ff_mov_lang_to_iso639(avio_rb16(pb), language);
+    len -= 2;
+
+    size = 2 * len + 1;
+    str = av_malloc(size);
+    if (!str)
+        return AVERROR(ENOMEM);
+    ch = avio_r8(pb);
+    if (ch == 0xFE || ch == 0xFF) { // UTF-16 byte order mark, never in UTF-8
+        if (len < 2) {
+            av_free(str);
+            return 0;
+        }
+        avio_skip(pb, 1);
+        len -= 2 + (ch == 0xFE ? avio_get_str16be(pb, len - 2, str, size)
+                               : avio_get_str16le(pb, len - 2, str, size));
+    } else {
+        str[0] = ch;
+        len -= 1 + (ch ? avio_get_str(pb, len - 1, str + 1, size - 1) : 0);
+    }
+
+    ret = av_dict_set(metadata, key, str, 0);
+    if (ret >= 0 && *language && strcmp(language, "und")) {
+        char key2[32];
+        snprintf(key2, sizeof(key2), "%s-%s", key, language);
+        ret = av_dict_set(metadata, key2, str, 0);
+    }
+    av_free(str);
+
+    if (ret >= 0 && len > 0 && !strcmp(key, "album")) {
+        int track = avio_r8(pb);
+        if (track)
+            ret = av_dict_set_int(metadata, "track", track, 0);
+    }
+    return ret;
+}
+
 static int mov_metadata_hmmt(MOVContext *c, AVIOContext *pb, unsigned len)
 {
     int i, n_hmmt;
@@ -369,6 +420,7 @@ static int mov_read_udta_string(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     int (*parse)(MOVContext*, AVIOContext*, unsigned, const char*) = NULL;
     int raw = 0;
     int num = 0;
+    int tgp = 0;
     AVDictionary **metadata;
 
     if (c->trak_index >= 0 && c->trak_index < c->fc->nb_streams)
@@ -384,18 +436,21 @@ static int mov_read_udta_string(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     case MKTAG( 'a','A','R','T'): key = "album_artist";    break;
     case MKTAG( 'a','k','I','D'): key = "account_type";
         parse = mov_metadata_int8_no_padding; break;
+    case MKTAG( 'a','l','b','m'): key = "album"; tgp = 1; break;
     case MKTAG( 'a','p','I','D'): key = "account_id"; break;
+    case MKTAG( 'a','u','t','h'): key = "author"; tgp = 1; break;
     case MKTAG( 'c','a','t','g'): key = "category"; break;
     case MKTAG( 'c','p','i','l'): key = "compilation";
         parse = mov_metadata_int8_no_padding; break;
-    case MKTAG( 'c','p','r','t'): key = "copyright"; break;
+    case MKTAG( 'c','p','r','t'): key = "copyright"; tgp = 1; break;
     case MKTAG( 'd','e','s','c'): key = "description"; break;
     case MKTAG( 'd','i','s','k'): key = "disc";
         parse = mov_metadata_track_or_disc_number; break;
+    case MKTAG( 'd','s','c','p'): key = "comment"; tgp = 1; break;
     case MKTAG( 'e','g','i','d'): key = "episode_uid";
         parse = mov_metadata_int8_no_padding; break;
     case MKTAG( 'F','I','R','M'): key = "firmware"; raw = 1; break;
-    case MKTAG( 'g','n','r','e'): key = "genre";
+    case MKTAG( 'g','n','r','e'): key = "genre"; tgp = 1;
         parse = mov_metadata_gnre; break;
     case MKTAG( 'h','d','v','d'): key = "hd_video";
         parse = mov_metadata_int8_no_padding; break;
@@ -410,6 +465,7 @@ static int mov_read_udta_string(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     case MKTAG( 'n','a','m','e'): key = "name"; break;
     case MKTAG( 'p','c','s','t'): key = "podcast";
         parse = mov_metadata_int8_no_padding; break;
+    case MKTAG( 'p','e','r','f'): key = "artist"; tgp = 1; break;
     case MKTAG( 'p','g','a','p'): key = "gapless_playback";
         parse = mov_metadata_int8_no_padding; break;
     case MKTAG( 'p','u','r','d'): key = "purchase_date"; break;
@@ -423,6 +479,8 @@ static int mov_read_udta_string(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     case MKTAG( 's','o','s','n'): key = "sort_show";    break;
     case MKTAG( 's','t','i','k'): key = "media_type";
         parse = mov_metadata_int8_no_padding; break;
+    case MKTAG( 't','i','t','l'): key = "title"; tgp = 1; break;
+    case MKTAG( 't','n','a','m'): key = "title"; tgp = 1; break;
     case MKTAG( 't','r','k','n'): key = "track";
         parse = mov_metadata_track_or_disc_number; break;
     case MKTAG( 't','v','e','n'): key = "episode_id"; break;
@@ -432,6 +490,7 @@ static int mov_read_udta_string(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     case MKTAG( 't','v','s','h'): key = "show";      break;
     case MKTAG( 't','v','s','n'): key = "season_number";
         parse = mov_metadata_int8_bypass_padding; break;
+    case MKTAG( 'y','r','r','c'): key = "date"; tgp = 1; break;
     case MKTAG(0xa9,'A','R','T'): key = "artist";    break;
     case MKTAG(0xa9,'P','R','D'): key = "producer";  break;
     case MKTAG(0xa9,'a','l','b'): key = "album";     break;
@@ -512,6 +571,8 @@ retry:
         langcode = avio_rb16(pb);
         ff_mov_lang_to_iso639(langcode, language);
         atom.size -= 4;
+        if (tgp && !str_size && !langcode) // full box version and flags
+            return mov_metadata_3gp(c, pb, atom.size, key, metadata);
     } else
         str_size = atom.size;
 
@@ -2275,6 +2336,8 @@ static int mov_read_colr(MOVContext *c, AVIOContext *pb, MOVAtom atom)
         ret = ffio_read_size(pb, icc_profile, atom.size - 4);
         if (ret < 0)
             return ret;
+        if (st)
+            ((MOVStreamContext *)st->priv_data)->stsd_colr_trc = 1;
     } else if (st) {
         color_primaries = avio_rb16(pb);
         color_trc = avio_rb16(pb);
@@ -2308,9 +2371,30 @@ static int mov_read_colr(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
         st->codecpar->color_primaries = color_primaries;
         st->codecpar->color_trc       = color_trc;
+        ((MOVStreamContext *)st->priv_data)->stsd_colr_trc = color_trc != AVCOL_TRC_UNSPECIFIED;
         st->codecpar->color_space     = color_matrix;
         av_log(c->fc, AV_LOG_TRACE, "\n");
     }
+    return 0;
+}
+
+static int mov_read_gama(MOVContext *c, AVIOContext *pb, MOVAtom atom)
+{
+    AVStream *st = get_curr_st(c);
+    MOVStreamContext *sc;
+    double gamma;
+
+    if (!st || atom.size < 4)
+        return 0;
+    sc = st->priv_data;
+
+    gamma = avio_rb32(pb) / 65536.0;
+    av_log(c->fc, AV_LOG_TRACE, "gama %f\n", gamma);
+
+    if (fabs(gamma - 2.2) < 0.01)
+        sc->stsd_gama_trc = AVCOL_TRC_GAMMA22;
+    else if (fabs(gamma - 2.8) < 0.01)
+        sc->stsd_gama_trc = AVCOL_TRC_GAMMA28;
     return 0;
 }
 
@@ -2585,7 +2669,7 @@ static int mov_read_wave(MOVContext *c, AVIOContext *pb, MOVAtom atom)
                     return AVERROR(ENOMEM);
                 st->codecpar->extradata_size = ALAC_EXTRADATA_SIZE;
                 AV_WB32(st->codecpar->extradata    , ALAC_EXTRADATA_SIZE);
-                AV_WB32(st->codecpar->extradata + 4, MKTAG('a','l','a','c'));
+                AV_WL32(st->codecpar->extradata + 4, MKTAG('a','l','a','c'));
                 AV_WB64(st->codecpar->extradata + 12, buffer);
                 avio_read(pb, st->codecpar->extradata + 20, 16);
                 avio_skip(pb, atom.size - 24);
@@ -3390,6 +3474,7 @@ int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries)
     AVStream *st;
     MOVStreamContext *sc;
     int pseudo_stream_id;
+    int gama_trc = -1;
 
     av_assert0 (c->fc->nb_streams >= 1);
     st = c->fc->streams[c->fc->nb_streams-1];
@@ -3425,6 +3510,8 @@ int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries)
         sc->pseudo_stream_id = st->codecpar->codec_tag ? -1 : pseudo_stream_id;
         sc->dref_id= dref_id;
         sc->format = format;
+        sc->stsd_gama_trc = AVCOL_TRC_UNSPECIFIED;
+        sc->stsd_colr_trc = 0;
 
         id = mov_codec_id(st, format);
 
@@ -3464,6 +3551,14 @@ int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries)
         } else if (a.size > 0)
             avio_skip(pb, a.size);
 
+        // Use gama only when colr does not specify the transfer, like QuickTime does
+        if (sc->stsd_colr_trc)
+            sc->stsd_gama_trc = AVCOL_TRC_UNSPECIFIED;
+        if (gama_trc < 0)
+            gama_trc = sc->stsd_gama_trc;
+        else if (gama_trc != sc->stsd_gama_trc)
+            gama_trc = AVCOL_TRC_UNSPECIFIED;
+
         ret = mov_finalize_stsd_entry(c, st);
         if (ret < 0)
             return ret;
@@ -3479,6 +3574,12 @@ int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries)
         }
         sc->stsd_count++;
     }
+
+    // Only when every sample description has the same gamma,
+    // and nothing else (e.g. vpcC) set the transfer
+    if ((gama_trc == AVCOL_TRC_GAMMA22 || gama_trc == AVCOL_TRC_GAMMA28) &&
+        st->codecpar->color_trc == AVCOL_TRC_UNSPECIFIED)
+        st->codecpar->color_trc = gama_trc;
 
     if (pb->eof_reached) {
         av_log(c->fc, AV_LOG_WARNING, "reached eof, corrupted STSD atom\n");
@@ -3943,8 +4044,10 @@ static int mov_read_stts(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     }
 
     st->nb_frames= total_sample_count;
+    // The media duration can't be shorter than the sample table, so prefer
+    // the latter when they differ.
     if (duration)
-        st->duration= FFMIN(st->duration, duration);
+        st->duration = duration;
 
     // All samples have zero duration. They have higher chance be chose by
     // mov_find_next_sample, which leads to seek again and again.
@@ -9101,9 +9204,9 @@ static int mov_read_dops(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     AV_WL16A(st->codecpar->extradata + 16, AV_RB16A(st->codecpar->extradata + 16));
 
     st->codecpar->initial_padding = pre_skip;
-    st->codecpar->seek_preroll = av_rescale_q(OPUS_SEEK_PREROLL_MS,
-                                              (AVRational){1, 1000},
-                                              (AVRational){1, 48000});
+    st->codecpar->seek_preroll =
+        av_rescale_q(OPUS_SEEK_PREROLL_MS, (AVRational){1, 1000},
+                     (AVRational){1, OPUS_TIMESTAMP_RATE});
 
     return 0;
 }
@@ -10379,6 +10482,7 @@ static const MOVParseTableEntry mov_default_parse_table[] = {
 { MKTAG('c','h','p','l'), mov_read_chpl },
 { MKTAG('c','o','6','4'), mov_read_stco },
 { MKTAG('c','o','l','r'), mov_read_colr },
+{ MKTAG('g','a','m','a'), mov_read_gama },
 { MKTAG('c','t','t','s'), mov_read_ctts }, /* composition time to sample */
 { MKTAG('d','i','n','f'), mov_read_default },
 { MKTAG('D','p','x','E'), mov_read_dpxe },
@@ -10973,6 +11077,7 @@ static void mov_free_stream_context(AVFormatContext *s, AVStream *st)
     mov_free_encryption_index(&sc->cenc.encryption_index);
     av_encryption_info_free(sc->cenc.default_encrypted_sample);
     av_aes_ctr_free(sc->cenc.aes_ctr);
+    av_freep(&sc->cenc.aes_ctx);
 
     av_freep(&sc->stereo3d);
     av_freep(&sc->spherical);

@@ -22,7 +22,9 @@
 #ifndef AVFORMAT_HTTP_H
 #define AVFORMAT_HTTP_H
 
+#include <stdint.h>
 #include <string.h>
+#include <time.h>
 
 #include "libavutil/dict.h"
 #include "libavutil/error.h"
@@ -116,6 +118,45 @@ int ff_http_do_new_request(URLContext *h, const char *uri);
 int ff_http_do_new_request2(URLContext *h, const char *uri, AVDictionary **options);
 
 const char* ff_http_get_new_location(URLContext *h);
+
+/**
+ * Parse an HTTP date like "Wed, 21 Oct 2015 07:28:00 GMT".
+ *
+ * @return 0 on success, a negative value otherwise
+ */
+int ff_http_parse_date(const char *date_str, struct tm *buf);
+
+/**
+ * Parse a Set-Cookie style line.
+ *
+ * @param cookie     the name and value of the cookie are added to it
+ * @param attributes the attributes of the cookie are added to it
+ * @return 0 on success, AVERROR_INVALIDDATA if the line holds no cookie,
+ *         another negative error code otherwise
+ */
+int ff_http_parse_set_cookie(const char *set_cookie, AVDictionary **cookie, AVDictionary **attributes);
+
+int ff_http_host_is_ip_literal(const char *host);
+
+/**
+ * @return the Domain attribute without a leading dot, NULL if there is none
+ */
+const char *ff_http_cookie_domain(const AVDictionary *cookie_params);
+
+/**
+ * @param attributes attributes parsed by ff_http_parse_set_cookie()
+ * @return the time the cookie expires at in seconds since the epoch,
+ *         0 if it does not expire
+ */
+int64_t ff_http_cookie_expiry(const AVDictionary *attributes);
+
+/**
+ * Restrict the cookies without a Domain to host.
+ *
+ * @param cookies newline separated Set-Cookie style lines, replaced on success
+ * @return 0 on success, a negative value otherwise
+ */
+int ff_http_bind_cookies_to_host(char **cookies, const char *host);
 
 static inline int ff_http_averror(int status_code, int default_averror)
 {

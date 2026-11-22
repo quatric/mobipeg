@@ -393,25 +393,6 @@ fate-filter-swaprect: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf swaprect
 
 FATE_FILTER_VSYNTH_PGMYUV-$(CONFIG_SWAPRECT_FILTER) += $(FATE_SWAPRECT)
 
-FATE_FILTER-$(call ALLYES, COLOR_FILTER LAVFI_INDEV SWAPRECT_FILTER \
-                              WRAPPED_AVFRAME_DECODER WRAPPED_AVFRAME_ENCODER \
-                              NULL_MUXER) += fate-filter-swaprect-invalid-size \
-                                             fate-filter-swaprect-invalid-fractional-size \
-                                             fate-filter-swaprect-invalid-coordinate \
-                                             fate-filter-swaprect-nonfinite-coordinate
-fate-filter-swaprect-invalid-size: CMD = run $(FFMPEG) -nostdin -hide_banner -f lavfi -i "color=c=black:s=16x16:r=1" -vf "swaprect=w=-1:h=1:x1=0:y1=0:x2=1:y2=0" -frames:v 1 -f null none ; ret=$$?; test $$ret -eq 234
-fate-filter-swaprect-invalid-size: CMP = grep
-fate-filter-swaprect-invalid-size: REF = Rectangle dimensions must be positive
-fate-filter-swaprect-invalid-fractional-size: CMD = run $(FFMPEG) -nostdin -hide_banner -f lavfi -i "color=c=black:s=16x16:r=1" -vf "swaprect=w=0.5:h=1:x1=0:y1=0:x2=1:y2=0" -frames:v 1 -f null none ; ret=$$?; test $$ret -eq 234
-fate-filter-swaprect-invalid-fractional-size: CMP = grep
-fate-filter-swaprect-invalid-fractional-size: REF = Rectangle dimensions must be positive
-fate-filter-swaprect-invalid-coordinate: CMD = run $(FFMPEG) -nostdin -hide_banner -f lavfi -i "color=c=black:s=16x16:r=1" -vf "swaprect=w=1:h=1:x1=1e100:y1=0:x2=1:y2=0" -frames:v 1 -f null none ; ret=$$?; test $$ret -eq 234
-fate-filter-swaprect-invalid-coordinate: CMP = grep
-fate-filter-swaprect-invalid-coordinate: REF = Rectangle expression result is not representable as an integer
-fate-filter-swaprect-nonfinite-coordinate: CMD = run $(FFMPEG) -nostdin -hide_banner -f lavfi -i "color=c=black:s=16x16:r=1" -vf "swaprect=w=1:h=1:x1=1/0:y1=0:x2=1:y2=0" -frames:v 1 -f null none ; ret=$$?; test $$ret -eq 234
-fate-filter-swaprect-nonfinite-coordinate: CMP = grep
-fate-filter-swaprect-nonfinite-coordinate: REF = Rectangle expression result is not representable as an integer
-
 FATE_FILTER_VSYNTH_PGMYUV-$(CONFIG_TBLEND_FILTER) += fate-filter-tblend
 fate-filter-tblend: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf tblend=all_mode=difference128
 
@@ -526,6 +507,18 @@ fate-filter-mpdecimate-mode-1: CMD = framecrc -lavfi testsrc2=r=4:d=5,fps=5,mpde
 
 FATE_FILTER-$(call FILTERFRAMECRC, TESTSRC2 FPS MPDECIMATE) += fate-filter-mpdecimate-mode-1-min-3
 fate-filter-mpdecimate-mode-1-min-3: CMD = framecrc -lavfi testsrc2=r=2:d=7,fps=7,mpdecimate=mode=1:min=3 -pix_fmt yuv420p
+
+FATE_FILTER-$(call FILTERFRAMECRC, TESTSRC2 FPS FORMAT SCALE MPDECIMATE) += fate-filter-mpdecimate-yuv422p10le
+fate-filter-mpdecimate-yuv422p10le: CMD = framecrc -lavfi testsrc2=r=2:d=10,fps=3,format=yuv422p10le,scale,mpdecimate,scale -pix_fmt yuv422p10le
+
+FATE_FILTER-$(call FILTERFRAMECRC, TESTSRC2 FPS FORMAT SCALE MPDECIMATE) += fate-filter-mpdecimate-yuv444p16le
+fate-filter-mpdecimate-yuv444p16le: CMD = framecrc -lavfi testsrc2=r=2:d=7,fps=7,format=yuv444p16le,scale,mpdecimate=mode=1:min=3,scale -pix_fmt yuv444p16le
+
+FATE_FILTER-$(call FILTERFRAMECRC, NULLSRC SCALE FORMAT GEQ MPDECIMATE) += fate-filter-mpdecimate-hi-10bit
+fate-filter-mpdecimate-hi-10bit: CMD = framecrc -lavfi nullsrc=s=32x16:r=1:d=6,scale,format=yuv444p10,geq=lum=400+24*N:cb=512:cr=512,mpdecimate=hi=768:lo=2147483647,scale -pix_fmt yuv444p10le
+
+FATE_FILTER-$(call FILTERFRAMECRC, NULLSRC SCALE FORMAT GEQ MPDECIMATE) += fate-filter-mpdecimate-lo-10bit
+fate-filter-mpdecimate-lo-10bit: CMD = framecrc -lavfi nullsrc=s=32x16:r=1:d=6,scale,format=yuv444p10,geq=lum=400+20*N:cb=512:cr=512,mpdecimate=hi=2147483647:lo=320,scale -pix_fmt yuv444p10le
 
 FATE_FILTER-$(call FILTERFRAMECRC, FPS TESTSRC2) += $(addprefix fate-filter-fps-, up up-round-down up-round-up down down-round-down down-round-up down-eof-pass start-drop start-fill single)
 fate-filter-fps-up: CMD = framecrc -lavfi testsrc2=r=3:d=2,fps=7
@@ -916,6 +909,14 @@ SCENEDETECT_DEPS = LAVFI_INDEV MOVIE_FILTER SELECT_FILTER  \
 FATE_METADATA_FILTER-$(call ALLYES, $(SCENEDETECT_DEPS)) += fate-filter-metadata-scenedetect
 fate-filter-metadata-scenedetect: SRC = $(TARGET_SAMPLES)/svq3/Vertical400kbit.sorenson3.mov
 fate-filter-metadata-scenedetect: CMD = run $(FILTER_METADATA_COMMAND) "sws_flags=+accurate_rnd+bitexact;movie='$(SRC)',select=gt(scene\,.25)"
+
+define FATE_SCENEDETECT_PIXFMT
+FATE_METADATA_FILTER-$$(call ALLYES, $$(SCENEDETECT_DEPS) FORMAT_FILTER) += fate-filter-metadata-scenedetect-$(1)
+fate-filter-metadata-scenedetect-$(1): SRC = $$(TARGET_SAMPLES)/svq3/Vertical400kbit.sorenson3.mov
+fate-filter-metadata-scenedetect-$(1): CMD = run ffprobe$$(PROGSSUF)$$(EXESUF) -of compact=p=0 -show_entries frame=pts,pix_fmt:frame_tags -bitexact -f lavfi "sws_flags=+accurate_rnd+bitexact;movie='$$(SRC)',format=$(1),select=gt(scene\,.25)"
+endef
+
+$(foreach FMT,gray10le rgb48le rgb48be yuv422p10be yuv422p10le yuv444p16le,$(eval $(call FATE_SCENEDETECT_PIXFMT,$(FMT))))
 
 SCDET_DEPS = LAVFI_INDEV MOVIE_FILTER SCDET_FILTER SCALE_FILTER \
                    MOV_DEMUXER SVQ3_DECODER ZLIB

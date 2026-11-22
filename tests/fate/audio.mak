@@ -31,11 +31,43 @@ fate-dolby-e: CMD = pcm -i $(TARGET_SAMPLES)/dolby_e/16-11
 fate-dolby-e: CMP = oneoff
 fate-dolby-e: REF = $(SAMPLES)/dolby_e/16-11.pcm
 
-FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP, ARESAMPLE_FILTER) += fate-dss-lp
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP) += fate-dss-format1
+fate-dss-format1: CMD = framecrc -i $(TARGET_SAMPLES)/dss/olympus-format1.dss
+
+FATE_SAMPLES_AUDIO_FFPROBE-$(CONFIG_DSS_DEMUXER) += fate-dss-format1-duration
+fate-dss-format1-duration: CMD = probe -show_entries stream=duration,nb_frames $(TARGET_SAMPLES)/dss/olympus-format1.dss
+
+FATE_SAMPLES_AUDIO_FFPROBE-$(CONFIG_DSS_DEMUXER) += fate-dss-format1-start-time
+fate-dss-format1-start-time: CMD = probe -read_intervals %+\#1 -show_packets -show_entries stream=start_time,duration,nb_frames:packet=pts $(TARGET_SAMPLES)/dss/olympus-format1-noswap.dss
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, G723_1, ARESAMPLE_FILTER) += fate-dss-lp
 fate-dss-lp: CMD = framecrc -i $(TARGET_SAMPLES)/dss/lp.dss -frames 30 -af aresample
 
 FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP) += fate-dss-sp
 fate-dss-sp: CMD = framecrc -i $(TARGET_SAMPLES)/dss/sp.dss -frames 30
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP) += fate-dss-sp-empty56
+fate-dss-sp-empty56: CMD = framecrc -i $(TARGET_SAMPLES)/dss/olympus-sp-empty56.dss
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP, PIPE_PROTOCOL) += fate-dss-sp-empty56-pipe
+fate-dss-sp-empty56-pipe: CMD = cat $(SAMPLES)/dss/olympus-sp-empty56.dss | framecrc -blocksize 7 -i pipe:0
+fate-dss-sp-empty56-pipe: REF = $(SRC_PATH)/tests/ref/fate/dss-sp-empty56
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP) += fate-dss-format1-noswap-prev-empty60
+fate-dss-format1-noswap-prev-empty60: CMD = framecrc -i $(TARGET_SAMPLES)/dss/olympus-format1-noswap-prev-empty60.dss
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP, PIPE_PROTOCOL) += fate-dss-format1-noswap-prev-empty60-pipe
+fate-dss-format1-noswap-prev-empty60-pipe: CMD = cat $(SAMPLES)/dss/olympus-format1-noswap-prev-empty60.dss | framecrc -blocksize 7 -i pipe:0
+fate-dss-format1-noswap-prev-empty60-pipe: REF = $(SRC_PATH)/tests/ref/fate/dss-format1-noswap-prev-empty60
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP) += fate-dss-sp-pause-block
+fate-dss-sp-pause-block: CMD = framecrc -i $(TARGET_SAMPLES)/dss/olympus-sp-pause-block.dss
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP) += fate-dss-sp-paused
+fate-dss-sp-paused: CMD = framecrc -i $(TARGET_SAMPLES)/dss/sp-paused.dss
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, DSS, DSS_SP) += fate-dss-sp-swap-start
+fate-dss-sp-swap-start: CMD = framecrc -i $(TARGET_SAMPLES)/dss/olympus-sp-swap-start.dss
 
 FATE_SAMPLES_AUDIO-$(call PCM, DSF, DST, ARESAMPLE_FILTER SWRESAMPLE) += fate-dsf-dst
 fate-dsf-dst: CMD = pcm -i $(TARGET_SAMPLES)/dst/dst-64fs44-2ch.dff
@@ -98,6 +130,9 @@ fate-paf-audio: CMD = framecrc -i $(TARGET_SAMPLES)/paf/hod1-partial.paf -vn
 
 FATE_SAMPLES_AUDIO-$(call FRAMECRC, WAV, ADPCM_RHETOREX) += fate-rhetorex
 fate-rhetorex: CMD = framecrc -i $(TARGET_SAMPLES)/rhetorex/rhetorex-mono-4bit-8000.wav
+
+FATE_SAMPLES_AUDIO-$(call FRAMECRC, SACD, DST, DSD_MSBF_ENCODER) += fate-sacd-dst
+fate-sacd-dst: CMD = framecrc -request_sample_fmt dsd -i $(TARGET_SAMPLES)/sacd/2ch-dsd_5ch-dst.iso -map 0:p:1 -c:a dsd_msbf
 
 FATE_SAMPLES_AUDIO-$(call FRAMECRC, VMD, VMDAUDIO, ARESAMPLE_FILTER) += fate-sierra-vmd-audio
 fate-sierra-vmd-audio: CMD = framecrc -i $(TARGET_SAMPLES)/vmd/12.vmd -vn -af aresample

@@ -32,7 +32,7 @@
             tmp_buf[j] = rnd() & mask;            \
     } while (0)
 
-static void check_scene_sad(int depth)
+static void check_scene_sad(int depth, int bswap)
 {
     LOCAL_ALIGNED_32(uint8_t, src1, [WIDTH * HEIGHT * 2]);
     LOCAL_ALIGNED_32(uint8_t, src2, [WIDTH * HEIGHT * 2]);
@@ -50,14 +50,26 @@ static void check_scene_sad(int depth)
         randomize_buffers(uint16_t, src2, width * HEIGHT, mask);
     }
 
-    if (check_func(ff_scene_sad_get_fn(depth), "scene_sad%d", depth)) {
+    if (check_func(bswap ? ff_scene_sad_bswap_get_fn() : ff_scene_sad_get_fn(depth),
+                   "scene_sad%d%s", depth, bswap ? "_bswap" : "")) {
+        /* include rows narrower than and around each vector width */
+        const int widths[] = { 1, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, width };
+        const int heights[] = { 0, 1, HEIGHT };
         uint64_t sum1, sum2;
-        call_ref(src1, STRIDE, src2, STRIDE, width, HEIGHT, &sum1);
-        call_new(src1, STRIDE, src2, STRIDE, width, HEIGHT, &sum2);
-        if (sum1 != sum2) {
-            fprintf(stderr, "scene_sad%d: sum mismatch: %llu != %llu\n",
-                    depth, (unsigned long long) sum1, (unsigned long long) sum2);
-            fail();
+
+        for (int w = 0; w < FF_ARRAY_ELEMS(widths); w++) {
+            for (int h = 0; h < FF_ARRAY_ELEMS(heights); h++) {
+                if (widths[w] > width)
+                    continue;
+                call_ref(src1, STRIDE, src2, STRIDE, widths[w], heights[h], &sum1);
+                call_new(src1, STRIDE, src2, STRIDE, widths[w], heights[h], &sum2);
+                if (sum1 != sum2) {
+                    fprintf(stderr, "scene_sad%d%s: sum mismatch for %dx%d: %llu != %llu\n",
+                            depth, bswap ? "_bswap" : "", widths[w], heights[h],
+                            (unsigned long long) sum1, (unsigned long long) sum2);
+                    fail();
+                }
+            }
         }
         if (depth == 8) {
             for (int offset1 = 0; offset1 < 16; offset1++) {
@@ -87,7 +99,9 @@ void checkasm_check_scene_sad(void)
 {
     const int depths[] = { 8, 10, 12, 14, 15, 16 };
     for (int i = 0; i < FF_ARRAY_ELEMS(depths); i++) {
-        check_scene_sad(depths[i]);
+        check_scene_sad(depths[i], 0);
         report("scene_sad%d", depths[i]);
     }
+    check_scene_sad(16, 1);
+    report("scene_sad16_bswap");
 }

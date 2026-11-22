@@ -1,0 +1,17 @@
+h264-annexb: avc1.64000b
+h264-annexb-avc3: avc3.64000b
+h264-avcc: avc1.64000b
+hevc-annexb-hvc1: hvc1.1.6.L30.90
+hevc-annexb-hev1: hev1.1.6.L30.90
+hevc-annexb-3byte-start-code: hvc1.1.6.L30.90
+hevc-annexb-untagged: error
+hevc-hvcc-hvc1: hvc1.1.6.L30.90
+hevc-hvcc-hev1: hev1.1.6.L30.90
+hevc-hvcc-version0: hvc1.1.6.L30.90
+hevc-hvcc-zeroed: error
+hevc-hvcc-profile-space: hvc1.A1.6.L30.90
+hevc-hvcc-constraints: hvc1.1.6.L30.90.00.10
+hevc-hvcc-constraints-full: hvc1.1.6.L30.90.10.20.30.40.50
+hevc-annexb-32-long-term-refs: hvc1.1.6.L30.90
+hevc-annexb-leading-zero: hvc1.1.6.L30.90
+aac-lc: mp4a.40.2

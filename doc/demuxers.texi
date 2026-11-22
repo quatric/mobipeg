@@ -954,6 +954,33 @@ Emit the whole @code{fla2} payload from payload offset 2 as one
 pre-byteswapped packet instead of splitting it into frames. Experimental,
 for inspecting a stream whose frame scan comes out wrong. Default is
 @code{false}.
+
+@section matroska
+
+Matroska / WebM demuxer.
+
+@subsection Options
+
+@table @option
+@item best_fit_ts @var{bool}
+Fit the timestamps to the units of each stream, where the clock of the file
+is coarser than those units. The most common Matroska clock is a millisecond,
+which places a 48 kHz audio packet up to 24 samples away from its first
+sample.
+
+Audio tracks are moved to a sample time base and their timestamps are
+rebuilt from the packet lengths, which come from the codec for Opus and AAC
+and from the default duration of the track for the other codecs. A stored
+timestamp is followed wherever it departs from that count by more than its
+rounding. Streams whose units the clock already resolves, such as video at
+the usual frame rates, keep the clock of the file.
+
+Vorbis tracks, tracks stored in a compatibility or interleaved mode, tracks
+whose packets a parser re-times and tracks without a known sample rate or
+packet length also keep the clock of the file. The reason is logged at
+verbose level.
+
+Default is disabled.
 @end table
 
 @section mov/mp4/3gp
@@ -1203,6 +1230,18 @@ referenced from the INFO chunk.
 
 When the header's loop flag is set, the loop point is exported as the
 @code{loop_start} metadata key, in microseconds.
+
+@section sacd
+
+Super Audio CD (SACD) demuxer.
+
+It reads a disc image or a device. The multi channel and the 2-channel stereo
+version of a disc are programs with one audio stream each. The chapters are
+the tracks of the first program.
+
+Images with 2048 bytes per sector are detected automatically. Images that
+hold the raw sectors of 2064 bytes need the format to be forced with
+@code{-f sacd}, or a @option{formatprobesize} of at least 2M.
 
 @section sbg
 

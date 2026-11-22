@@ -1,4 +1,4 @@
-7c5b0bf7edaabe9d5267a69d2261cf00 *tests/data/fate/ffmpeg-side-data-bsf-remove-stream.mov
+921d630eb70148b45230da21e31f50f8 *tests/data/fate/ffmpeg-side-data-bsf-remove-stream.mov
 61851 tests/data/fate/ffmpeg-side-data-bsf-remove-stream.mov
 #extradata 0:       29, 0x757e07f6
 #tb 0: 1/19200

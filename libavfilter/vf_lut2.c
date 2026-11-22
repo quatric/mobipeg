@@ -182,9 +182,11 @@ static int query_formats(const AVFilterContext *ctx,
     if (s->tlut2 || !s->odepth)
         return ff_set_pixel_formats_from_list2(ctx, cfg_in, cfg_out, all_pix_fmts);
 
-    ret = ff_formats_ref(ff_make_pixel_format_list(all_pix_fmts), &cfg_in[0]->formats);
-    if (ret < 0)
-        return ret;
+    for (int i = 0; i < 2; i++) {
+        ret = ff_formats_ref(ff_make_pixel_format_list(all_pix_fmts), &cfg_in[i]->formats);
+        if (ret < 0)
+            return ret;
+    }
 
     switch (s->odepth) {
     case 8:  pix_fmts = bit8_pix_fmts;  break;
@@ -256,6 +258,7 @@ static int lut2_##zname##_##xname##_##yname(AVFilterContext *ctx,               
     AVFrame *srcx = td->srcx;                                                    \
     AVFrame *srcy = td->srcy;                                                    \
     const int odepth = s->odepth;                                                \
+    const int lut_mask = sizeof(xtype) + sizeof(ytype) == 2 ? -1 : (1 << s->depth) - 1; \
     int p, y, x;                                                                 \
                                                                                  \
     for (p = 0; p < s->nb_planes; p++) {                                         \
@@ -272,7 +275,7 @@ static int lut2_##zname##_##xname##_##yname(AVFilterContext *ctx,               
                                                                                  \
         for (y = slice_start; y < slice_end; y++) {                              \
             for (x = 0; x < s->widthx[p]; x++) {                                 \
-                dst[x] = av_clip_uintp2_c(lut[(srcyy[x] << s->depthx) | srcxx[x]], odepth); \
+                dst[x] = av_clip_uintp2_c(lut[((srcyy[x] << s->depthx) | srcxx[x]) & lut_mask], odepth); \
             }                                                                    \
                                                                                  \
             dst   += out->linesize[p] / zdiv;                                    \

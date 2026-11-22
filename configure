@@ -975,6 +975,16 @@ resolve(){
     eval $1=\$resolve_out
 }
 
+# removes the names of empty variables from the list
+drop_empty(){
+    drop_empty_out=
+    eval drop_empty_in=\$$1
+    for v in $drop_empty_in; do
+        eval test -n \"\$$v\" && drop_empty_out="$drop_empty_out$v "
+    done
+    eval $1=\$drop_empty_out
+}
+
 add_cppflags(){
     append CPPFLAGS "$@"
 }
@@ -3956,7 +3966,7 @@ ivf_muxer_select="av1_metadata_bsf vp9_superframe_bsf"
 jpeg_mpf_demuxer_select="mjpeg_parser"
 latm_muxer_select="aac_adtstoasc_bsf mpeg4audio"
 matroska_audio_muxer_select="matroska_muxer"
-matroska_demuxer_select="riffdec"
+matroska_demuxer_select="mpeg4audio riffdec"
 matroska_demuxer_suggest="bzlib zlib"
 matroska_muxer_select="iso_writer mpeg4audio riffenc aac_adtstoasc_bsf pgs_frame_merge_bsf vp9_superframe_bsf"
 mcc_demuxer_select="smpte_436m"
@@ -4371,6 +4381,7 @@ avdevice_suggest="libm stdatomic"
 avfilter_deps="avutil"
 avfilter_suggest="libm stdatomic zlib"
 avformat_deps="avcodec avutil"
+avformat_select="golomb"
 avformat_suggest="libm network zlib stdatomic"
 avutil_suggest="amf clock_gettime ffnvcodec gcrypt libm zlib libdrm libmfx opencl openssl user32 vaapi vulkan videotoolbox corefoundation corevideo coremedia bcrypt stdatomic"
 swresample_deps="avutil"
@@ -8232,32 +8243,34 @@ if ! enabled_any memalign posix_memalign aligned_malloc; then
 fi
 
 flatten_extralibs(){
-    nested_entries=
     list_name=$1
     eval list=\$${1}
-    for entry in $list; do
-        entry_copy=$entry
-        resolve entry_copy
-        flat_entries=
-        for e in $entry_copy; do
-            case $e in
-                *_extralibs) nested_entries="$nested_entries$e ";;
-                          *) flat_entries="$flat_entries$e ";;
-            esac
+    flatten_all=
+    while test -n "$list"; do
+        flatten_all="$flatten_all$list "
+        nested_entries=
+        for entry in $list; do
+            eval test -n \"\$${entry}_flattened\" && continue
+            eval ${entry}_flattened=1
+            eval entry_value=\$$entry
+            flat_entries=
+            for e in $entry_value; do
+                case $e in
+                    *_extralibs) nested_entries="$nested_entries$e ";;
+                              *) flat_entries="$flat_entries$e ";;
+                esac
+            done
+            eval $entry="\$flat_entries"
         done
-        eval $entry="\$flat_entries"
+        list=$nested_entries
     done
-    append $list_name "$nested_entries"
-
-    resolve nested_entries
-    if test -n "$(filter '*_extralibs' $nested_entries)"; then
-        flatten_extralibs $list_name
-    fi
+    eval $list_name=\$flatten_all
 }
 
 flatten_extralibs_wrapper(){
     list_name=$1
     flatten_extralibs $list_name
+    drop_empty $list_name
     unique $list_name
     resolve $list_name
     eval $list_name=\$\(\$ldflags_filter \$$list_name\)

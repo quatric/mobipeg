@@ -70,7 +70,7 @@
 #include "libavcodec/itut35.h"
 #include "libavcodec/xiph.h"
 #include "libavcodec/mpeg4audio.h"
-#include "libavcodec/opus/tab.h"
+#include "libavcodec/opus/parse.h"
 
 /* Level 1 elements we create a SeekHead entry for:
  * Info, Tracks, Chapters, Attachments, Tags (potentially twice) and Cues */
@@ -253,6 +253,8 @@ typedef struct MatroskaMuxContext {
     int                 reserve_cues_space;
     int                 cluster_size_limit;
     int64_t             cluster_time_limit;
+    /// the clock of the file, in nanoseconds, 0 to pick it
+    int64_t             timestamp_scale;
     int                 write_crc;
     int                 is_live;
 
@@ -282,34 +284,6 @@ typedef struct MatroskaMuxContext {
 
 /** Seek preroll value for opus */
 #define OPUS_SEEK_PREROLL 80000000
-
-/**
- * Returns the duration of an Opus packet in samples.
- */
-static int parse_opus_packet_duration(const uint8_t *buf, int buf_size)
-{
-    int code   = buf[0] & 0x3;
-    int config = buf[0] >> 3;
-    int frame_count;
-
-    switch (code) {
-    default:
-        av_unreachable("code is in 0..3");
-    case 0:
-        frame_count = 1;
-        break;
-    case 1:
-    case 2:
-        frame_count = 2;
-        break;
-    case 3:
-        if (buf_size <= 1)
-            return AVERROR_INVALIDDATA;
-        frame_count = buf[1] & 0x3F;
-        break;
-    }
-    return frame_count * ff_opus_frame_duration[config];
-}
 
 static int ebml_id_size(uint32_t id)
 {
@@ -1930,13 +1904,16 @@ static int mkv_write_track_video(AVFormatContext *s, MatroskaMuxContext *mkv,
 }
 
 static void mkv_write_default_duration(mkv_track *track, AVIOContext *pb,
-                                       AVRational duration)
+                                       AVRational duration,
+                                       int64_t timestamp_scale)
 {
+    int64_t den = duration.den * timestamp_scale;
+
     put_ebml_uint(pb, MATROSKA_ID_TRACKDEFAULTDURATION,
                   1000000000LL * duration.num / duration.den);
-    track->default_duration_low  = 1000LL * duration.num / duration.den;
+    track->default_duration_low  = 1000000000LL * duration.num / den;
     track->default_duration_high = track->default_duration_low +
-                                    !!(1000LL * duration.num % duration.den);
+                                    !!(1000000000LL * duration.num % den);
 }
 
 static int mkv_write_track(AVFormatContext *s, MatroskaMuxContext *mkv,
@@ -2061,7 +2038,8 @@ static int mkv_write_track(AVFormatContext *s, MatroskaMuxContext *mkv,
             frame_rate = st->r_frame_rate;
 
         if (frame_rate.num > 0)
-            mkv_write_default_duration(track, pb, av_inv_q(frame_rate));
+            mkv_write_default_duration(track, pb, av_inv_q(frame_rate),
+                                       mkv->timestamp_scale);
 
         if (CONFIG_MATROSKA_MUXER && !native_id &&
             ff_codec_get_tag(ff_codec_movvideo_tags, par->codec_id) &&
@@ -2119,8 +2097,10 @@ static int mkv_write_track(AVFormatContext *s, MatroskaMuxContext *mkv,
         if (!audio_frame_samples)
             audio_frame_samples = par->frame_size;
         if (audio_frame_samples)
-            mkv_write_default_duration(track, pb, (AVRational){ audio_frame_samples,
-                                                                par->sample_rate });
+            mkv_write_default_duration(track, pb,
+                                       (AVRational){ audio_frame_samples,
+                                                     par->sample_rate },
+                                       mkv->timestamp_scale);
         if (!native_id)
             // no mkv-specific ID, use ACM mode
             put_ebml_string(pb, MATROSKA_ID_CODECID, "A_MS/ACM");
@@ -2610,7 +2590,7 @@ static int mkv_write_info(AVFormatContext *s)
         return ret;
     pb = mkv->info.bc;
 
-    put_ebml_uint(pb, MATROSKA_ID_TIMECODESCALE, 1000000);
+    put_ebml_uint(pb, MATROSKA_ID_TIMECODESCALE, mkv->timestamp_scale);
     if ((tag = av_dict_get(s->metadata, "title", NULL, 0)))
         put_ebml_string(pb, MATROSKA_ID_TITLE, tag->value);
     if (!(s->flags & AVFMT_FLAG_BITEXACT)) {
@@ -2643,11 +2623,15 @@ static int mkv_write_info(AVFormatContext *s)
         int64_t metadata_duration = get_metadata_duration(s);
 
         if (s->duration > 0) {
-            int64_t scaledDuration = av_rescale(s->duration, 1000, AV_TIME_BASE);
+            int64_t scaledDuration =
+                av_rescale(s->duration, 1000000000LL,
+                           AV_TIME_BASE * mkv->timestamp_scale);
             put_ebml_float(pb, MATROSKA_ID_DURATION, scaledDuration);
             av_log(s, AV_LOG_DEBUG, "Write early duration from recording time = %" PRIu64 "\n", scaledDuration);
         } else if (metadata_duration > 0) {
-            int64_t scaledDuration = av_rescale(metadata_duration, 1000, AV_TIME_BASE);
+            int64_t scaledDuration =
+                av_rescale(metadata_duration, 1000000000LL,
+                           AV_TIME_BASE * mkv->timestamp_scale);
             put_ebml_float(pb, MATROSKA_ID_DURATION, scaledDuration);
             av_log(s, AV_LOG_DEBUG, "Write early duration from metadata = %" PRIu64 "\n", scaledDuration);
         } else if (s->pb->seekable & AVIO_SEEKABLE_NORMAL) {
@@ -2663,6 +2647,7 @@ static int mkv_write_header(AVFormatContext *s)
     MatroskaMuxContext *mkv = s->priv_data;
     AVIOContext *pb = s->pb;
     int ret, version = 2;
+    int cluster_time_limit_set;
 
     ret = avio_open_dyn_buf(&mkv->tmp_bc);
     if (ret < 0)
@@ -2739,6 +2724,7 @@ static int mkv_write_header(AVFormatContext *s)
 
     mkv->cluster_pos = -1;
 
+    cluster_time_limit_set = mkv->cluster_time_limit >= 0;
     // start a new cluster every 5 MB or 5 sec, or 32k / 1 sec for streaming or
     // after 4k and on a keyframe
     if (IS_SEEKABLE(pb, mkv)) {
@@ -2751,6 +2737,17 @@ static int mkv_write_header(AVFormatContext *s)
             mkv->cluster_time_limit = 1000;
         if (mkv->cluster_size_limit < 0)
             mkv->cluster_size_limit = 32 * 1024;
+    }
+    // From milliseconds to the clock of the file, within the reach of the
+    // 16-bit offset of a Block.
+    mkv->cluster_time_limit = av_rescale(mkv->cluster_time_limit, 1000000,
+                                         mkv->timestamp_scale);
+    if (mkv->cluster_time_limit > INT16_MAX) {
+        mkv->cluster_time_limit = INT16_MAX;
+        if (cluster_time_limit_set)
+            av_log(s, AV_LOG_WARNING, "cluster_time_limit capped to %"PRId64
+                   " ms by the timestamp scale\n",
+                   INT16_MAX * mkv->timestamp_scale / 1000000);
     }
 
     return 0;
@@ -2900,12 +2897,13 @@ static int mkv_write_block(void *logctx, MatroskaMuxContext *mkv,
         duration != track->default_duration_low))
         ebml_writer_add_uint(&writer, MATROSKA_ID_BLOCKDURATION, duration);
     else if (par->codec_id == AV_CODEC_ID_OPUS) {
-        ret = parse_opus_packet_duration(pkt->data, pkt->size);
+        ret = ff_opus_packet_samples(pkt->data, pkt->size);
         if (ret >= 0) {
             /* If the packet's duration is inconsistent with the coded duration,
              * add an explicit duration element. */
-            uint64_t parsed_duration = av_rescale_q(ret, (AVRational){1, 48000},
-                                                    st->time_base);
+            uint64_t parsed_duration =
+                av_rescale_q(ret, (AVRational){1, OPUS_TIMESTAMP_RATE},
+                             st->time_base);
             if (parsed_duration != duration)
                 ebml_writer_add_uint(&writer, MATROSKA_ID_BLOCKDURATION, duration);
         }
@@ -3153,7 +3151,9 @@ static int mkv_write_packet_internal(AVFormatContext *s, const AVPacket *pkt)
                    "timestamp %"PRId64" ms, current cluster timestamp %"PRId64
                    " ms, delta %"PRId64" ms outside the signed 16-bit range\n",
                    cluster_time < 0 ? "backward" : "forward", pkt->stream_index,
-                   ts, mkv->cluster_pts, cluster_time);
+                   av_rescale(ts, mkv->timestamp_scale, 1000000),
+                   av_rescale(mkv->cluster_pts, mkv->timestamp_scale, 1000000),
+                   av_rescale(cluster_time, mkv->timestamp_scale, 1000000));
         }
     }
 
@@ -3514,6 +3514,40 @@ static uint64_t mkv_get_uid(const mkv_track *tracks, int i, AVLFG *c)
     }
 }
 
+/**
+ * The clock of the file: the coarsest power of ten of a nanosecond, up to
+ * the de-facto standard millisecond, that is finer than half a sample of
+ * every audio stream, Opus counting at 48 kHz whatever its signalled rate.
+ * A Block holds a signed 16-bit offset from its Cluster, so a finer clock
+ * means shorter clusters, and with video the clock stays at 10 us or above
+ * to leave room for frame reordering. WebM keeps milliseconds, as its
+ * guidelines require.
+ */
+static int64_t mkv_timestamp_scale(AVFormatContext *s,
+                                   const MatroskaMuxContext *mkv)
+{
+    int64_t scale = 1000000, min_scale = 1, max_rate = 0;
+
+    if (mkv->timestamp_scale)
+        return mkv->timestamp_scale;
+    if (IS_WEBM(mkv))
+        return scale;
+    for (unsigned i = 0; i < s->nb_streams; i++) {
+        const AVCodecParameters *par = s->streams[i]->codecpar;
+
+        if (par->codec_type == AVMEDIA_TYPE_VIDEO)
+            min_scale = 10000;
+        if (par->codec_type != AVMEDIA_TYPE_AUDIO)
+            continue;
+        max_rate = FFMAX(max_rate, par->sample_rate);
+        if (par->codec_id == AV_CODEC_ID_OPUS)
+            max_rate = FFMAX(max_rate, OPUS_TIMESTAMP_RATE);
+    }
+    while (scale > min_scale && scale * max_rate > 500000000LL)
+        scale /= 10;
+    return scale;
+}
+
 static int mkv_init(struct AVFormatContext *s)
 {
     FFFormatContext *const si = ffformatcontext(s);
@@ -3550,6 +3584,7 @@ static int mkv_init(struct AVFormatContext *s)
         mkv->write_crc = 0;
     } else
         mkv->mode = MODE_MATROSKAv2;
+    mkv->timestamp_scale = mkv_timestamp_scale(s, mkv);
 
     mkv->cur_audio_pkt = ffformatcontext(s)->pkt;
 
@@ -3604,8 +3639,7 @@ static int mkv_init(struct AVFormatContext *s)
             track->uid = mkv_get_uid(mkv->tracks, i, &c);
         }
 
-        // ms precision is the de-facto standard timescale for mkv files
-        avpriv_set_pts_info(st, 64, 1, 1000);
+        avpriv_set_pts_info(st, 64, mkv->timestamp_scale, 1000000000);
 
         if (st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT) {
             if (IS_WEBM(mkv)) {
@@ -3679,6 +3713,7 @@ static const AVOption options[] = {
     { "cues_to_front", "move Cues (the index) to the front by shifting data if necessary", OFFSET(move_cues_to_front), AV_OPT_TYPE_BOOL, { .i64 = 0}, 0, 1, FLAGS },
     { "cluster_size_limit",  "store at most the provided amount of bytes in a cluster",                                     OFFSET(cluster_size_limit), AV_OPT_TYPE_INT  , { .i64 = -1 }, -1, INT_MAX,   FLAGS },
     { "cluster_time_limit",  "store at most the provided number of milliseconds in a cluster",                               OFFSET(cluster_time_limit), AV_OPT_TYPE_INT64, { .i64 = -1 }, -1, INT64_MAX, FLAGS },
+    { "timestamp_scale", "clock of the file in nanoseconds, 0 to pick one finer than a sample", OFFSET(timestamp_scale), AV_OPT_TYPE_INT64, { .i64 = 0 }, 0, 1000000000, FLAGS },
     { "dash", "create a WebM file conforming to WebM DASH specification", OFFSET(is_dash), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
     { "dash_track_number", "track number for the DASH stream", OFFSET(dash_track_number), AV_OPT_TYPE_INT, { .i64 = 1 }, 1, INT_MAX, FLAGS },
     { "live", "write files assuming it is a live stream", OFFSET(is_live), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },

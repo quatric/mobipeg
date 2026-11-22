@@ -1,4 +1,4 @@
-5e6354ce54a9c6e031beee981a3befbd *tests/data/fate/ffmpeg-side-data-bsf-keep-stream.mov
+80c8d637a6482bc2b9afaf337ff8ade9 *tests/data/fate/ffmpeg-side-data-bsf-keep-stream.mov
 61851 tests/data/fate/ffmpeg-side-data-bsf-keep-stream.mov
 #extradata 0:       29, 0x757e07f6
 #tb 0: 1/19200

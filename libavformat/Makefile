@@ -19,6 +19,7 @@ OBJS = allformats.o         \
        dump.o               \
        dv.o                 \
        format.o             \
+       hevc.o               \
        id3v1.o              \
        id3v2/reader.o       \
        isom_tags.o          \
@@ -49,7 +50,7 @@ include $(SRC_PATH)/libavformat/vorbis/comment/Makefile
 OBJS-$(CONFIG_CBS_APV_LAVF)              += cbs_apv.o cbs.o
 OBJS-$(CONFIG_CBS_AV1_LAVF)              += cbs_av1.o cbs.o
 OBJS-$(CONFIG_ISO_MEDIA)                 += isom.o
-OBJS-$(CONFIG_ISO_WRITER)                += avc.o hevc.o vvc.o
+OBJS-$(CONFIG_ISO_WRITER)                += avc.o vvc.o
 OBJS-$(CONFIG_IAMFDEC)                   += iamf_reader.o iamf_parse.o iamf.o
 OBJS-$(CONFIG_IAMFENC)                   += iamf_writer.o iamf.o
 OBJS-$(CONFIG_NETWORK)                   += network.o
@@ -604,6 +605,7 @@ OBJS-$(CONFIG_RTSP_MUXER)                += rtsp.o rtspenc.o httpauth.o
 OBJS-$(CONFIG_RWAV_DEMUXER)              += rwav.o dsp_adpcm.o
 OBJS-$(CONFIG_RWAV_MUXER)                += rwavenc.o dsp_adpcm.o
 OBJS-$(CONFIG_S337M_DEMUXER)             += s337m.o spdif.o
+OBJS-$(CONFIG_SACD_DEMUXER)              += sacddec.o
 OBJS-$(CONFIG_SADL_DEMUXER)              += sadl.o
 OBJS-$(CONFIG_SAMI_DEMUXER)              += samidec.o subtitles.o
 OBJS-$(CONFIG_SAP_DEMUXER)               += sapdec.o
@@ -705,7 +707,7 @@ OBJS-$(CONFIG_WEBP_ANIM_DEMUXER)         += webp_anim_dec.o
 OBJS-$(CONFIG_WEBP_MUXER)                += webpenc.o
 OBJS-$(CONFIG_WEBVTT_DEMUXER)            += webvttdec.o subtitles.o
 OBJS-$(CONFIG_WEBVTT_MUXER)              += webvttenc.o
-OBJS-$(CONFIG_WHIP_MUXER)                += whip.o avc.o http.o srtp.o
+OBJS-$(CONFIG_WHIP_MUXER)                += whip.o rtc.o avc.o http.o httpcookie.o srtp.o
 OBJS-$(CONFIG_WSAUD_DEMUXER)             += westwood_aud.o
 OBJS-$(CONFIG_WSAUD_MUXER)               += westwood_audenc.o
 OBJS-$(CONFIG_WSD_DEMUXER)               += wsddec.o rawdec.o
@@ -751,9 +753,9 @@ OBJS-$(CONFIG_FD_PROTOCOL)               += file.o
 OBJS-$(CONFIG_FTP_PROTOCOL)              += ftp.o
 OBJS-$(CONFIG_GOPHER_PROTOCOL)           += gopher.o
 OBJS-$(CONFIG_GOPHERS_PROTOCOL)          += gopher.o
-OBJS-$(CONFIG_HTTP_PROTOCOL)             += http.o httpauth.o
-OBJS-$(CONFIG_HTTPPROXY_PROTOCOL)        += http.o httpauth.o
-OBJS-$(CONFIG_HTTPS_PROTOCOL)            += http.o httpauth.o
+OBJS-$(CONFIG_HTTP_PROTOCOL)             += http.o httpauth.o httpcookie.o
+OBJS-$(CONFIG_HTTPPROXY_PROTOCOL)        += http.o httpauth.o httpcookie.o
+OBJS-$(CONFIG_HTTPS_PROTOCOL)            += http.o httpauth.o httpcookie.o
 OBJS-$(CONFIG_ICECAST_PROTOCOL)          += icecast.o
 OBJS-$(CONFIG_MD5_PROTOCOL)              += md5proto.o
 OBJS-$(CONFIG_MMSH_PROTOCOL)             += mmsh.o mms.o asf_tags.o
@@ -790,7 +792,7 @@ OBJS-$(CONFIG_WINDOWS_HANDLE_PROTOCOL)   += file.o
 
 # external library protocols
 OBJS-$(CONFIG_LIBAMQP_PROTOCOL)          += libamqp.o
-OBJS-$(CONFIG_LIBCURL_PROTOCOL)          += libcurl.o
+OBJS-$(CONFIG_LIBCURL_PROTOCOL)          += libcurl.o httpcookie.o
 OBJS-$(CONFIG_LIBRIST_PROTOCOL)          += librist.o
 OBJS-$(CONFIG_LIBRTMP_PROTOCOL)          += librtmp.o
 OBJS-$(CONFIG_LIBRTMPE_PROTOCOL)         += librtmp.o
@@ -804,25 +806,25 @@ OBJS-$(CONFIG_LIBZMQ_PROTOCOL)           += libzmq.o
 
 # Objects duplicated from other libraries for shared builds
 SHLIBOBJS                                += log2_tab.o to_upper4.o \
-                                            h2645_parse.o lcevctab.o
+                                            golomb_tab.o h2645_parse.o \
+                                            lcevctab.o
 SHLIBOBJS-$(CONFIG_ISO_MEDIA)            += mpegaudiotabs.o
-SHLIBOBJS-$(CONFIG_ISO_WRITER)           += golomb_tab.o
 SHLIBOBJS-$(CONFIG_FLV_MUXER)            += mpeg4audio_sample_rates.o
 SHLIBOBJS-$(CONFIG_HLS_DEMUXER)          += ac3_channel_layout_tab.o
 SHLIBOBJS-$(CONFIG_IMAGE_JPEGXL_PIPE_DEMUXER)    += jpegxl_parse.o
 SHLIBOBJS-$(CONFIG_JNI)                  += ffjni.o
 SHLIBOBJS-$(CONFIG_JPEGXL_ANIM_DEMUXER)  += jpegxl_parse.o
-SHLIBOBJS-$(CONFIG_MATROSKA_DEMUXER)     += mpeg4audio_sample_rates.o
+SHLIBOBJS-$(CONFIG_MATROSKA_DEMUXER)     += mpeg4audio_sample_rates.o \
+                                            opus_frame_duration_tab.o
 SHLIBOBJS-$(CONFIG_MATROSKA_MUXER)       += opus_frame_duration_tab.o
 SHLIBOBJS-$(CONFIG_MOV_DEMUXER)          += ac3_channel_layout_tab.o
 SHLIBOBJS-$(CONFIG_MOV_MUXER)            += mpegaudiotabs.o
 SHLIBOBJS-$(CONFIG_MP3_MUXER)            += mpegaudiotabs.o
-SHLIBOBJS-$(CONFIG_MXF_MUXER)            += golomb_tab.o \
-                                            rangecoder_dec.o
+SHLIBOBJS-$(CONFIG_MXF_MUXER)            += rangecoder_dec.o
 SHLIBOBJS-$(CONFIG_NUT_MUXER)            += mpegaudiotabs.o
 SHLIBOBJS-$(CONFIG_KWZ_MUXER)            += jpegtables.o
 SHLIBOBJS-$(CONFIG_RTPDEC)               += jpegtables.o
-SHLIBOBJS-$(CONFIG_RTP_MUXER)            += golomb_tab.o jpegtables.o \
+SHLIBOBJS-$(CONFIG_RTP_MUXER)            += jpegtables.o \
                                             mpeg4audio_sample_rates.o
 SHLIBOBJS-$(CONFIG_SPDIF_MUXER)          += dca_sample_rate_tab.o
 SHLIBOBJS-$(CONFIG_WEBM_MUXER)           += opus_frame_duration_tab.o
@@ -836,7 +838,8 @@ SKIPHEADERS-$(CONFIG_IMF_DEMUXER)        += imf.h
 SKIPHEADERS-$(CONFIG_FFRTMPCRYPT_PROTOCOL) += rtmpdh.h
 SKIPHEADERS-$(CONFIG_NETWORK)            += ip.h network.h rtsp.h
 
-TESTPROGS = demux_probe                                                 \
+TESTPROGS = codecstring                                                 \
+            demux_probe                                                 \
             id3v2                                                       \
             mkdir                                                       \
             rename                                                      \
@@ -849,10 +852,11 @@ TESTPROGS-$(CONFIG_RTPDEC)               += rtpdec
 FIFO-MUXER-TESTPROGS-$(CONFIG_NETWORK)   += fifo_muxer
 TESTPROGS-$(CONFIG_FIFO_MUXER)           += $(FIFO-MUXER-TESTPROGS-yes)
 TESTPROGS-$(CONFIG_FFRTMPCRYPT_PROTOCOL) += rtmpdh
-TESTPROGS-$(CONFIG_HTTP_PROTOCOL)        += http
-# http_nobody covers both the http and httpproxy read paths.
+TESTPROGS-$(CONFIG_HTTP_PROTOCOL)        += http httpcookie
+# http_nobody covers the http, httpproxy and libcurl read paths.
 HTTP_NOBODY_TESTPROG-$(CONFIG_HTTP_PROTOCOL)      = http_nobody
 HTTP_NOBODY_TESTPROG-$(CONFIG_HTTPPROXY_PROTOCOL) = http_nobody
+HTTP_NOBODY_TESTPROG-$(CONFIG_LIBCURL_PROTOCOL)   = http_nobody
 TESTPROGS                                       += $(HTTP_NOBODY_TESTPROG-yes)
 TESTPROGS-$(CONFIG_NETWORK)              += noproxy
 TESTPROGS-$(CONFIG_SRTP)                 += srtp

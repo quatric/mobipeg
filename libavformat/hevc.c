@@ -86,15 +86,6 @@ typedef struct HEVCDecoderConfigurationRecord {
     uint8_t alpha_layer_nuh_id;
 } HEVCDecoderConfigurationRecord;
 
-typedef struct HVCCProfileTierLevel {
-    uint8_t  profile_space;
-    uint8_t  tier_flag;
-    uint8_t  profile_idc;
-    uint32_t profile_compatibility_flags;
-    uint64_t constraint_indicator_flags;
-    uint8_t  level_idc;
-} HVCCProfileTierLevel;
-
 static void hvcc_update_ptl(HEVCDecoderConfigurationRecord *hvcc,
                             HVCCProfileTierLevel *ptl)
 {
@@ -747,7 +738,7 @@ static int hvcc_parse_sps(GetBitContext *gb, HVCCNALUnit *nal,
 
     if (get_bits1(gb)) {                               // long_term_ref_pics_present_flag
         unsigned num_long_term_ref_pics_sps = get_ue_golomb_long(gb);
-        if (num_long_term_ref_pics_sps > 31U)
+        if (num_long_term_ref_pics_sps > HEVC_MAX_LONG_TERM_REF_PICS)
             return AVERROR_INVALIDDATA;
         for (i = 0; i < num_long_term_ref_pics_sps; i++) { // num_long_term_ref_pics_sps
             int len = FFMIN(log2_max_pic_order_cnt_lsb_minus4 + 4, 16);
@@ -1290,54 +1281,58 @@ static int hvcc_parse_nal_unit(const uint8_t *buf, uint32_t len, int type,
     return 0;
 }
 
-static int write_configuration_record(void *logctx, AVIOContext *pb, const uint8_t *data,
-                                      int size, int flags)
+/**
+ * Fill an initialized record from extradata, either an hvcC record or
+ * Annex B.
+ *
+ * @param flags    FLAG_IS_NALFF is added for an hvcC record
+ * @param nal_buf  set to a buffer the record's NAL units point into, to be
+ *                 freed by the caller after the record
+ */
+static int parse_configuration_record(HEVCDecoderConfigurationRecord *hvcc,
+                                      const uint8_t *data, int size,
+                                      int *flags, uint8_t **nal_buf)
 {
-    HEVCDecoderConfigurationRecord hvcc;
-    uint8_t *buf, *end, *start = NULL;
+    uint8_t *buf, *end;
     int ret;
 
     if (size < 6) {
         /* We can't write a valid hvcC from the provided data */
         return AVERROR_INVALIDDATA;
-    } else if (*data == 1) {
+    } else if (ff_hevc_is_hvcc(data, size)) {
         /* Data is already hvcC-formatted. Parse the arrays to skip any NALU
            with nuh_layer_id > 0 */
         GetBitContext gbc;
         int num_arrays;
 
-        if (size < 23)
-            return AVERROR_INVALIDDATA;
-
         ret = init_get_bits8(&gbc, data, size);
         if (ret < 0)
             return ret;
 
-        hvcc_init(&hvcc);
-        skip_bits(&gbc, 8); // hvcc.configurationVersion
-        hvcc.general_profile_space = get_bits(&gbc, 2);
-        hvcc.general_tier_flag = get_bits1(&gbc);
-        hvcc.general_profile_idc = get_bits(&gbc, 5);
-        hvcc.general_profile_compatibility_flags = get_bits_long(&gbc, 32);
-        hvcc.general_constraint_indicator_flags = get_bits64(&gbc, 48);
-        hvcc.general_level_idc = get_bits(&gbc, 8);
+        skip_bits(&gbc, 8); // hvcc->configurationVersion
+        hvcc->general_profile_space = get_bits(&gbc, 2);
+        hvcc->general_tier_flag = get_bits1(&gbc);
+        hvcc->general_profile_idc = get_bits(&gbc, 5);
+        hvcc->general_profile_compatibility_flags = get_bits_long(&gbc, 32);
+        hvcc->general_constraint_indicator_flags = get_bits64(&gbc, 48);
+        hvcc->general_level_idc = get_bits(&gbc, 8);
         skip_bits(&gbc, 4); // reserved
-        hvcc.min_spatial_segmentation_idc = get_bits(&gbc, 12);
+        hvcc->min_spatial_segmentation_idc = get_bits(&gbc, 12);
         skip_bits(&gbc, 6); // reserved
-        hvcc.parallelismType = get_bits(&gbc, 2);
+        hvcc->parallelismType = get_bits(&gbc, 2);
         skip_bits(&gbc, 6); // reserved
-        hvcc.chromaFormat = get_bits(&gbc, 2);
+        hvcc->chromaFormat = get_bits(&gbc, 2);
         skip_bits(&gbc, 5); // reserved
-        hvcc.bitDepthLumaMinus8 = get_bits(&gbc, 3);
+        hvcc->bitDepthLumaMinus8 = get_bits(&gbc, 3);
         skip_bits(&gbc, 5); // reserved
-        hvcc.bitDepthChromaMinus8 = get_bits(&gbc, 3);
-        hvcc.avgFrameRate = get_bits(&gbc, 16);
-        hvcc.constantFrameRate = get_bits(&gbc, 2);
-        hvcc.numTemporalLayers = get_bits(&gbc, 3);
-        hvcc.temporalIdNested = get_bits1(&gbc);
-        hvcc.lengthSizeMinusOne = get_bits(&gbc, 2);
+        hvcc->bitDepthChromaMinus8 = get_bits(&gbc, 3);
+        hvcc->avgFrameRate = get_bits(&gbc, 16);
+        hvcc->constantFrameRate = get_bits(&gbc, 2);
+        hvcc->numTemporalLayers = get_bits(&gbc, 3);
+        hvcc->temporalIdNested = get_bits1(&gbc);
+        hvcc->lengthSizeMinusOne = get_bits(&gbc, 2);
 
-        flags |= FLAG_IS_NALFF;
+        *flags |= FLAG_IS_NALFF;
 
         num_arrays = get_bits(&gbc, 8);
         for (int i = 0; i < num_arrays; i++) {
@@ -1350,32 +1345,36 @@ static int write_configuration_record(void *logctx, AVIOContext *pb, const uint8
                 int len = get_bits(&gbc, 16);
 
                 if (len > (get_bits_left(&gbc) / 8))
-                    goto end;
+                    return AVERROR_INVALIDDATA;
 
                 ret = hvcc_parse_nal_unit(data + get_bits_count(&gbc) / 8,
-                                          len, type, &hvcc, flags);
+                                          len, type, hvcc, *flags);
                 if (ret < 0)
-                    goto end;
+                    return ret;
 
                 skip_bits_long(&gbc, len * 8);
             }
         }
 
-        ret = hvcc_write(logctx, pb, &hvcc, flags);
-        goto end;
-    } else if (!(AV_RB24(data) == 1 || AV_RB32(data) == 1)) {
+        return 0;
+    }
+
+    /* leading_zero_8bits may precede the first start code (H.265 B.2) */
+    while (size > 4 && !AV_RB32(data)) {
+        data++;
+        size--;
+    }
+    if (!(AV_RB24(data) == 1 || AV_RB32(data) == 1)) {
         /* Not a valid Annex B start code prefix */
         return AVERROR_INVALIDDATA;
     }
 
-    ret = ff_nal_parse_units_buf(data, &start, &size);
+    ret = ff_nal_parse_units_buf(data, nal_buf, &size);
     if (ret < 0)
         return ret;
 
-    hvcc_init(&hvcc);
-
-    buf = start;
-    end = start + size;
+    buf = *nal_buf;
+    end = *nal_buf + size;
 
     while (end - buf > 4) {
         uint32_t len = FFMIN(AV_RB32(buf), end - buf - 4);
@@ -1383,18 +1382,52 @@ static int write_configuration_record(void *logctx, AVIOContext *pb, const uint8
 
         buf += 4;
 
-        ret = hvcc_parse_nal_unit(buf, len, type, &hvcc, flags);
+        ret = hvcc_parse_nal_unit(buf, len, type, hvcc, *flags);
         if (ret < 0)
-            goto end;
+            return ret;
 
         buf += len;
     }
 
-    ret = hvcc_write(logctx, pb, &hvcc, flags);
+    return 0;
+}
 
-end:
+static int write_configuration_record(void *logctx, AVIOContext *pb, const uint8_t *data,
+                                      int size, int flags)
+{
+    HEVCDecoderConfigurationRecord hvcc;
+    uint8_t *nal_buf = NULL;
+    int ret;
+
+    hvcc_init(&hvcc);
+    ret = parse_configuration_record(&hvcc, data, size, &flags, &nal_buf);
+    if (ret >= 0)
+        ret = hvcc_write(logctx, pb, &hvcc, flags);
     hvcc_close(&hvcc);
-    av_free(start);
+    av_free(nal_buf);
+    return ret;
+}
+
+int ff_hevc_get_profile_tier_level(HVCCProfileTierLevel *ptl,
+                                   const uint8_t *data, int size)
+{
+    HEVCDecoderConfigurationRecord hvcc;
+    uint8_t *nal_buf = NULL;
+    int flags = 0;
+    int ret;
+
+    hvcc_init(&hvcc);
+    ret = parse_configuration_record(&hvcc, data, size, &flags, &nal_buf);
+    if (ret >= 0) {
+        ptl->profile_space               = hvcc.general_profile_space;
+        ptl->tier_flag                   = hvcc.general_tier_flag;
+        ptl->profile_idc                 = hvcc.general_profile_idc;
+        ptl->profile_compatibility_flags = hvcc.general_profile_compatibility_flags;
+        ptl->constraint_indicator_flags  = hvcc.general_constraint_indicator_flags;
+        ptl->level_idc                   = hvcc.general_level_idc;
+    }
+    hvcc_close(&hvcc);
+    av_free(nal_buf);
     return ret;
 }
 

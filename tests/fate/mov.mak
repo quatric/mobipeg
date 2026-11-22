@@ -132,7 +132,7 @@ fate-mov-frag-overlap: CMD = framemd5 -i $(TARGET_SAMPLES)/mov/frag_overlap.mp4
 
 fate-mov-mp4-frag-flush: CMD = md5 -f lavfi -i color=blue,format=rgb24,trim=duration=0.04 -f lavfi -i anullsrc,aformat=s16,atrim=duration=2 -c:v png -c:a pcm_s16le -movflags +empty_moov+hybrid_fragmented -frag_duration 1000000 -frag_interleave 1 -bitexact -f mp4
 fate-mov-mp4-frag-flush: CMP = oneline
-fate-mov-mp4-frag-flush: REF = 46f748faa3b8b59ebeeb789bee75008a
+fate-mov-mp4-frag-flush: REF = 23006f7699c8ec31c680b7d40b09b7b5
 FATE_MOV_FFMPEG-$(call ALLYES, LAVFI_INDEV COLOR_FILTER FORMAT_FILTER TRIM_FILTER \
                                ANULLSRC_FILTER AFORMAT_FILTER ATRIM_FILTER        \
                                WRAPPED_AVFRAME_DECODER PCM_S16LE_DECODER PCM_S16BE_DECODER \
@@ -188,7 +188,7 @@ fate-mov-vfr-bframes-duration: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_packe
 
 fate-mov-gpmf-remux: CMD = md5 -i $(TARGET_SAMPLES)/mov/fake-gp-media-with-real-gpmf.mp4 -map 0 -c copy -fflags +bitexact -f mp4
 fate-mov-gpmf-remux: CMP = oneline
-fate-mov-gpmf-remux: REF = e919915c5cd22c849e2aba281ddaf0c8
+fate-mov-gpmf-remux: REF = 79393b0ea470997c2a33984188b0b415
 
 fate-mov-guess-delay-1: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries stream=has_b_frames -select_streams v $(TARGET_SAMPLES)/h264/h264_3bf_nopyramid_nobsrestriction.mp4
 fate-mov-guess-delay-2: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries stream=has_b_frames -select_streams v $(TARGET_SAMPLES)/h264/h264_3bf_pyramid_nobsrestriction.mp4
@@ -269,6 +269,12 @@ FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, AVIF OBU, AV1_DECODER AV1_PARSER) \
                            += fate-mov-avif-mux-still-image-1-item
 fate-mov-avif-mux-still-image-1-item: CMD = stream_remux obu $(TARGET_SAMPLES)/av1/still_picture_rgb.obu "" avif \
   "" "-c:v av1" "-c:v copy"
+
+# Loop a color tile and its alpha tile to exercise animated AVIF track headers.
+FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, AVIF MOV, AV1_DECODER AV1_PARSER) \
+                           += fate-mov-avif-mux-animated-alpha
+fate-mov-avif-mux-animated-alpha: CMD = stream_remux mov $(TARGET_SAMPLES)/avif/gain_map_alpha_grid.avif \
+  "-c:v av1 -stream_loop 1" avif "-map 0:0 -map 0:12" "-c:v av1" "-map 0 -c:v copy"
 
 # avif demuxing - still image with 1 item.
 FATE_MOV_FFMPEG_SAMPLES-$(call FRAMECRC, MOV, AV1, AV1_PARSER) \
@@ -357,14 +363,34 @@ FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, MP4 MOV, H264_PARSER) \
                           += fate-mov-mp4-multiple-stsd-muxing
 fate-mov-mp4-multiple-stsd-muxing: CMD = transcode mov $(TARGET_SAMPLES)/h264/extradata-reload-multi-stsd.mov mp4 "-c:v copy" "-c:v copy"
 
+# ALAC config stored in the wave atom without an atom header
+FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, MP4 MOV, ALAC_DECODER) += fate-mov-alac-bare-wave-remux
+fate-mov-alac-bare-wave-remux: CMD = transcode mov $(TARGET_SAMPLES)/mov/01snd09.mov mp4 "-c copy -frames:a 1" "-c copy"
+
 FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, MP4 MOV, AAC_PARSER) \
                           += fate-mov-mp4-edst-remainder
 fate-mov-mp4-edst-remainder: CMD = stream_remux mov $(TARGET_SAMPLES)/audiomatch/tones_fdkaac_44100_stereo_aac_lc.m4a "" mp4 "" "" "-c:a copy"
 
-# A colr box can carry reserved colour values; they must not reach the stream
-FATE_MOV_FFMPEG_FFPROBE_SAMPLES-$(call REMUX, MOV, QTRLE_DECODER) += fate-mov-colr-reserved-color-tags
-fate-mov-colr-reserved-color-tags: CMD = stream_remux mov $(TARGET_SAMPLES)/qtrle/aletrek-rle.mov "" mov \
+# QDMC configuration must be written back in a wave atom
+FATE_MOV_FFMPEG_SAMPLES-$(call REMUX, MOV) += fate-mov-qdmc-remux
+fate-mov-qdmc-remux: CMD = transcode mov $(TARGET_SAMPLES)/qdmc/rumcoke.mov mov "-c copy -t 0.4" "-c copy"
+
+# Reserved colour values must not be written to colr
+FATE_MOV_FFMPEG_FFPROBE_SAMPLES-$(call REMUX, MP4 MOV, H264_PARSER H264_DECODER) += fate-mov-colr-reserved-color-tags
+fate-mov-colr-reserved-color-tags: CMD = stream_remux mov $(TARGET_SAMPLES)/mov/test_iibbibb.mp4 "" mp4 \
     "-map 0:v -frames:v 1 -color_primaries 3 -color_trc 3 -colorspace 3" "" "-c:v copy" \
+    "-select_streams v -show_entries stream=color_primaries,color_transfer,color_space -of default=nw=1"
+
+# nclc signals gamma 2.8 as an unspecified transfer with a gama atom
+FATE_MOV_FFMPEG_FFPROBE_SAMPLES-$(call REMUX, MOV, H264_PARSER H264_DECODER) += fate-mov-gama-color-trc
+fate-mov-gama-color-trc: CMD = stream_remux mov $(TARGET_SAMPLES)/mov/test_iibbibb.mp4 "" mov \
+    "-map 0:v -frames:v 1 -color_primaries smpte170m -color_trc gamma28 -colorspace smpte170m" "" "-c:v copy" \
+    "-select_streams v -show_entries stream=color_primaries,color_transfer,color_space -of default=nw=1"
+
+# without colr, gamma 2.2 is still signaled with a gama atom
+FATE_MOV_FFMPEG_FFPROBE_SAMPLES-$(call REMUX, MOV, H264_PARSER H264_DECODER) += fate-mov-gama-only-color-trc
+fate-mov-gama-only-color-trc: CMD = stream_remux mov $(TARGET_SAMPLES)/mov/test_iibbibb.mp4 "" mov \
+    "-map 0:v -frames:v 1 -color_trc gamma22" "" "-c:v copy" \
     "-select_streams v -show_entries stream=color_primaries,color_transfer,color_space -of default=nw=1"
 
 # format-level branding: major_brand, minor_version, compatible_brands should be deleted on re-encode
@@ -413,7 +439,7 @@ fate-mov-mp4-pcm-float: CMD = transcode wav $(TARGET_PATH)/tests/data/asynth-441
 fate-mov-pcm-remux: tests/data/asynth-44100-1.wav
 fate-mov-pcm-remux: CMD = md5 -i $(TARGET_PATH)/tests/data/asynth-44100-1.wav -map 0 -c copy -fflags +bitexact -f mp4
 fate-mov-pcm-remux: CMP = oneline
-fate-mov-pcm-remux: REF = 389df40a487ac8397ba20bda472434d7
+fate-mov-pcm-remux: REF = 0e17606ac1d7f4071c9bbacc7d521da1
 
 FATE_MOV_FFMPEG-$(call TRANSCODE, RAWVIDEO, MOV, TESTSRC_FILTER SETPTS_FILTER) += fate-mov-vfr
 fate-mov-vfr: CMD = md5 -filter_complex testsrc=size=2x2:duration=1,setpts=N*N:strip_fps=1 -c rawvideo -fflags +bitexact -f mov
@@ -421,7 +447,7 @@ fate-mov-vfr: CMD = md5 -filter_complex testsrc=size=2x2:duration=1,setpts=N*N:s
 FATE_MOV_FFMPEG-$(call TRANSCODE, DFPWM, MOV, LAVFI_INDEV SINE_FILTER ATRIM_FILTER PCM_S16LE_DECODER ARESAMPLE_FILTER) += fate-mov-dfpwm-last-packet
 fate-mov-dfpwm-last-packet: CMD = transcode lavfi "sine=r=48000,atrim=end_sample=85" mov "-auto_conversion_filters -c:a dfpwm -movie_timescale 48000" "-c copy"
 fate-mov-vfr: CMP = oneline
-fate-mov-vfr: REF = 1558b4a9398d8635783c93f84eb5a60d
+fate-mov-vfr: REF = 54167f70fb0c2d164587b6af1aad9623
 
 # The QuickTime user data list has to carry the composer atom the demuxer
 # already reads: without it a mov to mov remux dropped the tag.
@@ -442,6 +468,17 @@ fate-mov-mp4-loci: CMD = transcode wav ./tests/data/asynth-44100-2.wav mp4 \
 fate-mov-mp4-loci-no-altitude: CMD = transcode wav ./tests/data/asynth-44100-2.wav mp4 \
     "-af aresample -c:a pcm_s16le -t 0.05 -metadata location=-33.8568+151.2153/" \
     "-af aresample -c:a pcm_s16le" "-show_entries format_tags=location"
+
+# The 3GPP TS 26.244 user data boxes have to be read back with their languages.
+FATE_MOV_FFMPEG_FFPROBE-$(call TRANSCODE, MPEG4, TGP MOV, LAVFI_INDEV COLOR_FILTER WRAPPED_AVFRAME_DECODER) += fate-mov-3gp-udta-metadata
+fate-mov-3gp-udta-metadata: CMD = transcode lavfi "color=s=32x32:r=1:d=1" 3gp \
+    "-c:v mpeg4 -metadata title=Title -metadata artist=Artist -metadata author=Author \
+     -metadata genre=Genre -metadata comment=Comment -metadata album=Album -metadata track=7 \
+     -metadata copyright=Copyright -metadata date=2024 \
+     -metadata title-eng=Title -metadata artist-eng=Artist -metadata author-eng=Author \
+     -metadata genre-eng=Genre -metadata comment-eng=Comment -metadata album-eng=Album \
+     -metadata copyright-eng=Copyright" \
+    "-c copy" "-show_entries format_tags"
 
 FATE_MOV_FFMPEG_FFPROBE-$(call ALLYES, COLOR_FILTER SETPTS_FILTER MPEG4_ENCODER \
                                       MOV_MUXER MOV_DEMUXER FILE_PROTOCOL)      \
@@ -476,6 +513,75 @@ fate-mov-trun-zero-sample-size: CMD = run_with_patched_temp \
     "ffprobe$(PROGSSUF)$(EXESUF) -fflags +noparse+nofillin -show_packets \
     -show_entries packet=pts,dts,duration,size,pos -print_format compact \
     -select_streams v -v 0" mp4 927 "\\0000\\0000\\0000\\0000"
+
+# Version 0 composition offsets are unsigned: an offset of 2^31 is accepted.
+FATE_MOV_FFMPEG-$(call ALLYES, COLOR_FILTER MPEG4_ENCODER MP4_MUXER FILE_PROTOCOL) \
+                += fate-mov-mp4-ctts-v0-boundary
+fate-mov-mp4-ctts-v0-boundary: CMD = md5 -filter_complex color=s=2x2:r=1:d=4 \
+    -c:v mpeg4 -g 12 -bf 1 -q:v 2 -threads 1 -flags +bitexact -fflags +bitexact \
+    -video_track_timescale 1073741824 -f mp4
+
+MOV_NOELST_VIDEO_DELAY_COMPONENTS = COLOR_FILTER SETPTS_FILTER SINE_FILTER \
+                                    MPEG4_ENCODER PCM_S16LE_ENCODER \
+                                    MP4_MUXER FILE_PROTOCOL
+
+MOV_NOELST_VIDEO_DELAY_FILTER = color=s=2x2:r=24:d=1,setpts=PTS+0.5/TB[v];sine=r=8000:d=1[a]
+
+MOV_NOELST_VIDEO_DELAY = -map [v] -map [a] -fps_mode passthrough \
+    -c:v mpeg4 -g 12 -bf 2 -q:v 2 -threads 1 -c:a pcm_s16le \
+    -flags +bitexact -fflags +bitexact \
+    -use_editlist 0 -movflags +negative_cts_offsets -f mp4
+
+FATE_MOV_FFMPEG_FFPROBE-$(call ALLYES, $(MOV_NOELST_VIDEO_DELAY_COMPONENTS) MOV_DEMUXER) \
+                                    += fate-mov-mp4-noelst-video-delay
+
+# Without edit lists, video starting 0.5 s after the audio keeps its delay in
+# the composition offsets, and the durations cover the delayed last frame.
+fate-mov-mp4-noelst-video-delay: CMD = run_with_temp \
+    "$(FFMPEG) -nostdin -v error -filter_complex $(MOV_NOELST_VIDEO_DELAY_FILTER) $(MOV_NOELST_VIDEO_DELAY) -y" \
+    "ffprobe$(PROGSSUF)$(EXESUF) -show_entries format=duration:stream=index,start_time:packet=stream_index,pts,dts \
+    -print_format compact -v 0" mp4
+
+# Include container headers: the MOV demuxer caps stream duration to the
+# stts duration, so the packet probe above cannot check the mdhd extension.
+FATE_MOV_FFMPEG-$(call ALLYES, $(MOV_NOELST_VIDEO_DELAY_COMPONENTS)) \
+                += fate-mov-mp4-noelst-video-delay-md5
+fate-mov-mp4-noelst-video-delay-md5: CMD = md5 -filter_complex "$(MOV_NOELST_VIDEO_DELAY_FILTER)" $(MOV_NOELST_VIDEO_DELAY)
+
+FATE_MOV_FFMPEG_FFPROBE-$(call ALLYES, COLOR_FILTER SETPTS_FILTER SINE_FILTER \
+                                      ASETPTS_FILTER ARESAMPLE_FILTER MPEG4_ENCODER \
+                                      AAC_ENCODER \
+                                      MP4_MUXER MOV_DEMUXER FILE_PROTOCOL)      \
+                                      += fate-mov-mp4-noelst-common-origin
+
+# Video and AAC audio sharing a negative origin start together: the audio
+# priming does not make the video look delayed.
+fate-mov-mp4-noelst-common-origin: CMD = run_with_temp \
+    "$(FFMPEG) -nostdin -v error \
+    -filter_complex color=s=2x2:r=24:d=1,setpts=PTS-1/TB[v];sine=r=8000:d=1,asetpts=PTS-1/TB[a] \
+    -map [v] -map [a] -fps_mode passthrough \
+    -c:v mpeg4 -g 12 -bf 2 -q:v 2 -threads 1 -c:a aac \
+    -flags +bitexact -fflags +bitexact \
+    -use_editlist 0 -movflags +negative_cts_offsets -f mp4 -y" \
+    "ffprobe$(PROGSSUF)$(EXESUF) -show_entries stream=index,start_time:packet=stream_index,pts,dts \
+    -print_format compact -v 0" mp4
+
+FATE_MOV_FFMPEG_FFPROBE-$(call ALLYES, COLOR_FILTER SETTB_FILTER SETPTS_FILTER \
+                                      SINE_FILTER MPEG4_ENCODER PCM_S16LE_ENCODER \
+                                      MP4_MUXER MOV_DEMUXER FILE_PROTOCOL)      \
+                                      += fate-mov-mp4-noelst-frag-delay
+
+# Fragmented output keeps no start delay: reordering at a 1e9 timescale would
+# overflow the 32-bit offsets once the first fragment is written.
+fate-mov-mp4-noelst-frag-delay: CMD = run_with_temp \
+    "$(FFMPEG) -nostdin -v error \
+    -filter_complex color=s=2x2:r=1:d=5,settb=1/1000,setpts=PTS+0.5/TB[v];sine=r=8000:d=5[a] \
+    -map [v] -map [a] -fps_mode passthrough \
+    -c:v mpeg4 -g 12 -bf 2 -q:v 2 -threads 1 -c:a pcm_s16le \
+    -flags +bitexact -fflags +bitexact -video_track_timescale 1000000000 \
+    -use_editlist 0 -movflags +negative_cts_offsets -frag_duration 1000000 -f mp4 -y" \
+    "ffprobe$(PROGSSUF)$(EXESUF) -select_streams v -show_entries stream=start_time:packet=pts,dts \
+    -print_format compact -v 0" mp4
 
 FATE_MOV_FFMPEG_FFPROBE-$(call ALLYES, LAVFI_INDEV ANULLSRC_FILTER AFORMAT_FILTER \
                                       PCM_S16$(if $(filter yes,$(HAVE_BIGENDIAN)),BE,LE)_DECODER \

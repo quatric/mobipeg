@@ -125,6 +125,12 @@ typedef struct MXFStreamContext {
     enum MXFMetadataSetType sub_descriptor;
     const UID *picture_descriptor_key;
     int cid;                 ///< compression id, used by dnxhd
+    int color_warned;        ///< unsupported color properties have been reported
+    /* color properties found in the essence bitstream, unspecified if absent */
+    enum AVColorPrimaries color_primaries;
+    enum AVColorTransferCharacteristic color_trc;
+    enum AVColorSpace color_space;
+    enum AVColorRange color_range;
 } MXFStreamContext;
 
 typedef struct MXFContainerEssenceEntry {
@@ -739,7 +745,7 @@ static void mxf_write_essence_container_refs(AVFormatContext *s)
     for (i = 0; i < s->nb_streams; i++) {
         MXFStreamContext *sc = s->streams[i]->priv_data;
         // check first track of essence container type and only write it once
-        if (sc->track_essence_element_key[15] != 0)
+        if (sc->track_essence_element_key[15] != (sc->index == INDEX_S436M))
             continue;
         avio_write(pb, *sc->container_ul, 16);
         if (c->essence_container_count == 1)
@@ -748,6 +754,20 @@ static void mxf_write_essence_container_refs(AVFormatContext *s)
 
     if (c->essence_container_count > 1)
         avio_write(pb, multiple_desc_ul, 16);
+}
+
+static void mxf_write_operational_pattern(AVFormatContext *s)
+{
+    AVIOContext *pb = s->pb;
+
+    if (IS_OPATOM(s)) {
+        avio_write(pb, opatom_ul, 16);
+    } else {
+        avio_write(pb, op1a_ul, 14);
+        // qualifiers, ST 378 6.4: multi-track if more than one essence track
+        avio_w8(pb, s->nb_streams > 1 ? 0x09 : 0x01);
+        avio_w8(pb, op1a_ul[15]);
+    }
 }
 
 static void mxf_write_preface(AVFormatContext *s)
@@ -787,10 +807,7 @@ static void mxf_write_preface(AVFormatContext *s)
 
     // operational pattern
     mxf_write_local_tag(s, 16, 0x3B09);
-    if (IS_OPATOM(s))
-        avio_write(pb, opatom_ul, 16);
-    else
-        avio_write(pb, op1a_ul, 16);
+    mxf_write_operational_pattern(s);
 
     // write essence_container_refs
     mxf_write_local_tag(s, 8 + 16LL * DESCRIPTOR_COUNT(mxf->essence_container_count), 0x3B0A);
@@ -1229,6 +1246,11 @@ static inline uint32_t rescale_mastering_luma(AVRational q)
     return av_rescale(q.num, FF_MXF_MASTERING_LUMA_DEN, q.den);
 }
 
+static const char *color_name(const char *name)
+{
+    return name ? name : "reserved";
+}
+
 static int64_t mxf_write_generic_picture_desc(AVFormatContext *s, AVStream *st)
 {
     MXFStreamContext *sc = st->priv_data;
@@ -1246,9 +1268,32 @@ static int64_t mxf_write_generic_picture_desc(AVFormatContext *s, AVStream *st)
     const AVPacketSideData *side_data;
     int component_depth = pix_desc->comp[0].depth;
 
-    color_primaries_ul = mxf_get_codec_ul_by_id(ff_mxf_color_primaries_uls, st->codecpar->color_primaries);
-    color_trc_ul       = mxf_get_codec_ul_by_id(ff_mxf_color_trc_uls, st->codecpar->color_trc);
-    color_space_ul     = mxf_get_codec_ul_by_id(ff_mxf_color_space_uls, st->codecpar->color_space);
+    /* the essence bitstream takes precedence where it describes the color */
+    if (sc->color_primaries == AVCOL_PRI_UNSPECIFIED)
+        sc->color_primaries = st->codecpar->color_primaries;
+    if (sc->color_trc == AVCOL_TRC_UNSPECIFIED)
+        sc->color_trc = st->codecpar->color_trc;
+    if (sc->color_space == AVCOL_SPC_UNSPECIFIED)
+        sc->color_space = st->codecpar->color_space;
+    if (sc->color_range == AVCOL_RANGE_UNSPECIFIED)
+        sc->color_range = st->codecpar->color_range;
+
+    color_primaries_ul = mxf_get_codec_ul_by_id(ff_mxf_color_primaries_uls, sc->color_primaries);
+    color_trc_ul       = mxf_get_codec_ul_by_id(ff_mxf_color_trc_uls, sc->color_trc);
+    color_space_ul     = mxf_get_codec_ul_by_id(ff_mxf_color_space_uls, sc->color_space);
+
+    if (!sc->color_warned) {
+        if (!color_primaries_ul->uid[0] && sc->color_primaries != AVCOL_PRI_UNSPECIFIED)
+            av_log(s, AV_LOG_WARNING, "Color primaries %s have no MXF label, not writing them\n",
+                   color_name(av_color_primaries_name(sc->color_primaries)));
+        if (!color_trc_ul->uid[0] && sc->color_trc != AVCOL_TRC_UNSPECIFIED)
+            av_log(s, AV_LOG_WARNING, "Color transfer %s has no MXF label, not writing it\n",
+                   color_name(av_color_transfer_name(sc->color_trc)));
+        if (!color_space_ul->uid[0] && sc->color_space != AVCOL_SPC_UNSPECIFIED)
+            av_log(s, AV_LOG_WARNING, "Color matrix %s has no MXF label, not writing it\n",
+                   color_name(av_color_space_name(sc->color_space)));
+        sc->color_warned = 1;
+    }
 
     if (st->codecpar->codec_id == AV_CODEC_ID_DVVIDEO) {
         if (st->codecpar->height == 1080)
@@ -1395,11 +1440,11 @@ static int64_t mxf_write_generic_picture_desc(AVFormatContext *s, AVStream *st)
         mxf_write_local_tag(s, 2, 0x3307);
         avio_wb16(pb, 0);
 
-        if (st->codecpar->color_range != AVCOL_RANGE_UNSPECIFIED) {
+        if (sc->color_range != AVCOL_RANGE_UNSPECIFIED) {
             int black = 0,
                 white = (1<<component_depth) - 1,
                 color = (1<<component_depth);
-            if (st->codecpar->color_range == AVCOL_RANGE_MPEG) {
+            if (sc->color_range == AVCOL_RANGE_MPEG) {
                 black = 1   << (component_depth - 4);
                 white = 235 << (component_depth - 8);
                 color = (14 << (component_depth - 4)) + 1;
@@ -2267,10 +2312,7 @@ static int mxf_write_partition(AVFormatContext *s, int bodysid,
     avio_wb32(pb, bodysid); // bodySID
 
     // operational pattern
-    if (IS_OPATOM(s))
-        avio_write(pb, opatom_ul, 16);
-    else
-        avio_write(pb, op1a_ul, 16);
+    mxf_write_operational_pattern(s);
 
     // essence container
     mxf_write_essence_container_refs(s);
@@ -2330,6 +2372,21 @@ static int mxf_parse_prores_frame(AVFormatContext *s, AVStream *st, AVPacket *pk
     }
     if (i == FF_ARRAY_ELEMS(mxf_prores_codec_uls))
         return 0;
+
+    /* frame header color fields, SMPTE RDD 36 */
+    if (pkt->size >= 25 && AV_RL32(pkt->data + 4) == AV_RL32("icpf")) {
+        if (pkt->data[22]) // 0 is unknown
+            sc->color_primaries = pkt->data[22];
+        /* code 1 covers BT.601, BT.709 and BT.2020, keep a more precise stream value */
+        if (pkt->data[23] &&
+            (pkt->data[23] != AVCOL_TRC_BT709 ||
+             (st->codecpar->color_trc != AVCOL_TRC_SMPTE170M &&
+              st->codecpar->color_trc != AVCOL_TRC_BT2020_10 &&
+              st->codecpar->color_trc != AVCOL_TRC_BT2020_12)))
+            sc->color_trc = pkt->data[23];
+        if (pkt->data[24]) // 0 is unknown, not RGB
+            sc->color_space = pkt->data[24];
+    }
 
     sc->frame_size = pkt->size;
 
@@ -2562,6 +2619,15 @@ static int mxf_parse_h264_frame(AVFormatContext *s, AVStream *st,
                       sc->aspect_ratio.num, sc->aspect_ratio.den, 1024*1024);
             intra_only = (sps->constraint_set_flags >> 3) & 1;
             sc->interlaced = !sps->frame_mbs_only_flag;
+
+            if (sps->video_signal_type_present_flag) {
+                sc->color_range = sps->video_full_range_flag ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+                if (sps->colour_description_present_flag) {
+                    sc->color_primaries = sps->colour_primaries;
+                    sc->color_trc       = sps->transfer_characteristics;
+                    sc->color_space     = sps->matrix_coefficients;
+                }
+            }
 
             buf = nal_end;
             break;
@@ -2799,6 +2865,7 @@ static const UID *mxf_get_mpeg2_codec_ul(AVCodecParameters *par)
 static int mxf_parse_mpeg2_frame(AVFormatContext *s, AVStream *st,
                                  AVPacket *pkt, MXFIndexEntry *e)
 {
+    MXFContext *mxf = s->priv_data;
     MXFStreamContext *sc = st->priv_data;
     uint32_t c = -1;
     int i;
@@ -2810,6 +2877,13 @@ static int mxf_parse_mpeg2_frame(AVFormatContext *s, AVStream *st,
                 st->codecpar->profile = pkt->data[i+1] & 0x07;
                 st->codecpar->level   = pkt->data[i+2] >> 4;
                 sc->low_delay = pkt->data[i+6] >> 7;
+            } else if (i + 4 < pkt->size && (pkt->data[i+1] & 0xf0) == 0x20) { // seq display ext
+                /* Header metadata must keep its size when rewritten. */
+                if (!mxf->header_written && (pkt->data[i+1] & 0x01)) { // colour_description
+                    sc->color_primaries = pkt->data[i+2];
+                    sc->color_trc       = pkt->data[i+3];
+                    sc->color_space     = pkt->data[i+4];
+                }
             } else if (i + 5 < pkt->size && (pkt->data[i+1] & 0xf0) == 0x80) { // pict coding ext
                 sc->interlaced = !(pkt->data[i+5] & 0x80); // progressive frame
                 if (sc->interlaced)
@@ -2971,6 +3045,10 @@ static int mxf_init(AVFormatContext *s)
             return AVERROR(ENOMEM);
         st->priv_data = sc;
         sc->index = -1;
+        sc->color_primaries = AVCOL_PRI_UNSPECIFIED;
+        sc->color_trc       = AVCOL_TRC_UNSPECIFIED;
+        sc->color_space     = AVCOL_SPC_UNSPECIFIED;
+        sc->color_range     = AVCOL_RANGE_UNSPECIFIED;
 
         if (((i == 0) ^ (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)) && !IS_OPATOM(s)) {
             av_log(s, AV_LOG_ERROR, "there must be exactly one video stream and it must be the first one\n");
@@ -3146,6 +3224,9 @@ static int mxf_init(AVFormatContext *s)
             // and produce mxf files with the most relevant flavour for opatom
             sc->track_essence_element_key[14] = 0x06;
         }
+        // ANC element numbers start at 1, ST 436-1
+        if (sc->index == INDEX_S436M)
+            sc->track_essence_element_key[15]++;
         PRINT_KEY(s, "track essence element key", sc->track_essence_element_key);
 
         if (!present[sc->index])
@@ -3400,6 +3481,13 @@ static int mxf_write_packet(AVFormatContext *s, AVPacket *pkt)
             return -1;
         }
     }
+
+    // codecs without sequence headers: every key frame is a random access point
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+        st->codecpar->codec_id != AV_CODEC_ID_MPEG2VIDEO &&
+        st->codecpar->codec_id != AV_CODEC_ID_H264 &&
+        pkt->flags & AV_PKT_FLAG_KEY)
+        ie.flags |= 0x80;
 
     if (mxf->cbr_index) {
         if (pkt->size != sc->frame_size && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {

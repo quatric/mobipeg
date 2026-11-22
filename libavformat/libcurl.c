@@ -118,6 +118,7 @@ struct CurlContext {
 
     /* AVOptions. */
     char           *user_agent;
+    char           *method;      /* client HTTP method (GET/HEAD/...), or NULL */
     char           *referer;
     char           *headers;
     char           *http_proxy;
@@ -154,12 +155,14 @@ struct CurlContext {
     int             icy_block_filled;
     uint8_t         icy_block[ICY_MAX_BLOCK + 1];
 
-    /* Producer bookkeeping, touched only by the loop thread. */
+    /* Producer bookkeeping, touched only by the loop thread.  no_body is
+     * set once by setup_curl() before the handle is added, then read-only. */
     int             active;          /* currently added to the multi */
     int64_t         request_start;   /* absolute offset the current request began at */
     int64_t         request_received;/* bytes delivered in the current request */
     int64_t         request_end;     /* expected end of request, or -1 if unknown */
     int             is_initial;      /* using reduced request size */
+    int             no_body;         /* HEAD request: CURLOPT_NOBODY is set */
     int             seek_queued;     /* soft seeking; drain remaining bytes until done */
 
     /* Per-response-block header scratch, loop thread only. */
@@ -378,25 +381,26 @@ static void parse_content_range(CurlContext *c, const char *v)
 }
 
 /* Parse a decimal header value, bounded by len since curl does not promise a
- * NUL terminated header buffer. Returns -1 if absent, malformed or too large. */
-static int64_t parse_metaint(const char *p, size_t len)
+ * NUL terminated header buffer. Returns -1 if absent, malformed or > max. */
+static int64_t parse_header_uint(const char *p, size_t len, int64_t max)
 {
     int64_t v = 0;
     size_t i = 0;
 
-    while (i < len && av_isspace(p[i]))
+    while (i < len && av_isspace((unsigned char)p[i]))
         i++;
-    if (i == len || !av_isdigit(p[i]))
+    if (i == len || !av_isdigit((unsigned char)p[i]))
         return -1;
 
-    for (; i < len && av_isdigit(p[i]); i++) {
-        if (v > (INT_MAX - (p[i] - '0')) / 10)
+    for (; i < len && av_isdigit((unsigned char)p[i]); i++) {
+        int d = p[i] - '0';
+        if (v > (max - d) / 10)
             return -1;
-        v = v * 10 + (p[i] - '0');
+        v = v * 10 + d;
     }
 
     // Reject 4junk
-    while (i < len && av_isspace(p[i]))
+    while (i < len && av_isspace((unsigned char)p[i]))
         i++;
     if (i != len)
         return -1;
@@ -469,6 +473,10 @@ static int verify_content_range(CurlContext *c, int64_t start, int64_t end,
         return 0;
     }
 
+    /* A 200 HEAD reply for an empty representation has start=0, end=-1, total=0. */
+    if (c->no_body && !total && end < 0)
+        return 1;
+
     if (total >= 0 && (start >= total || end >= total)) {
         av_log(c->h, AV_LOG_ERROR, "Server sent back content range "
                "%"PRId64"-%"PRId64" that exceeds the total size "
@@ -522,8 +530,17 @@ static size_t header_callback(char *ptr, size_t size, size_t nitems, void *userd
         parse_content_range(c, ptr + 14);
         return len;
     }
+    if (c->no_body && av_strncasecmp(ptr, "Content-Length:", 15) == 0) {
+        /* Some libcurl versions (e.g. 8.7.1) still report
+         * CURLINFO_CONTENT_LENGTH_DOWNLOAD_T = -1 for HEAD throughout
+         * header_callback(), including the final blank line where
+         * content_size is latched.  Parse Content-Length here so
+         * avio_size()/AVSEEK_SIZE stays populated. */
+        c->hdr_content_length = parse_header_uint(ptr + 15, len - 15, INT64_MAX);
+        return len;
+    }
     if (av_strncasecmp(ptr, "icy-metaint:", 12) == 0) {
-        c->hdr_icy_metaint = parse_metaint(ptr + 12, len - 12);
+        c->hdr_icy_metaint = parse_header_uint(ptr + 12, len - 12, INT_MAX);
         return len;
     }
     /* Collected per block so that headers from a redirect hop, which the
@@ -547,14 +564,19 @@ static size_t header_callback(char *ptr, size_t size, size_t nitems, void *userd
         return len;
 
     curl_off_t cl = -1;
-    if (curl_easy_getinfo(c->easy, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl) == CURLE_OK)
-        c->hdr_content_length = cl >= 0 ? cl : -1;
+    /* Do not clobber a Content-Length parsed above when getinfo is still -1. */
+    if (curl_easy_getinfo(c->easy, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl) == CURLE_OK &&
+        cl >= 0)
+        c->hdr_content_length = cl;
 
     pthread_mutex_lock(&c->mutex);
     if (status >= 200 && status < 300) {
         int64_t content_start = status == 206 ? c->hdr_content_start : 0;
         int64_t content_end   = status == 206 ? c->hdr_content_end : -1;
         int64_t content_total = status == 206 ? c->hdr_content_total : c->hdr_content_length;
+        /* Content-Encoding describes a body. HEAD has none, so its
+         * Content-Length is the resource size. */
+        int keep_size;
         if (content_end < 0 && content_total > 0)
             content_end = content_total - 1;
 
@@ -567,11 +589,13 @@ static size_t header_callback(char *ptr, size_t size, size_t nitems, void *userd
             return len;
         }
 
+        keep_size = !c->hdr_compressed || c->no_body;
+
         /* Don't unlearn a known size when a reply omits it. */
-        if (!c->hdr_compressed && content_total >= 0)
+        if (keep_size && content_total >= 0)
             c->content_size = content_total;
 
-        if (!c->hdr_compressed) {
+        if (keep_size) {
             int64_t total = content_total;
             if (total < 0 && status != 206)
                 total = c->hdr_content_length;
@@ -583,7 +607,7 @@ static size_t header_callback(char *ptr, size_t size, size_t nitems, void *userd
         }
 
         c->stream_ok = 1;
-        c->request_end = c->hdr_compressed ? -1 : content_end;
+        c->request_end = keep_size ? content_end : -1;
         /* Capture the post-redirect URL, this is exposed as "location" AVOption
          * for compatibility with http.c. */
         if (!c->probed) {
@@ -676,7 +700,7 @@ static void start_request(CurlContext *c)
         return;
     }
 
-    if (!c->probed || c->seekable) {
+    if (!c->no_body && (!c->probed || c->seekable)) {
         int64_t start = c->request_start;
         int64_t request_size = c->request_size;
         if (c->is_initial && c->initial_request_size > 0)
@@ -779,6 +803,24 @@ static void on_done(CurlContext *c, CURLcode code)
 
     if (aborted)
         return;
+
+    if (c->no_body) {
+        /* A HEAD reply carries no body.  Do not restart the request or
+         * escalate an empty transfer to EIO ("Server sent back no data at
+         * offset"), and do not treat the clean EOF as a recoverable error. */
+        pthread_mutex_lock(&c->mutex);
+        if (code == CURLE_OK && c->stream_ok) {
+            c->status      = AVERROR_EOF;
+            c->curl_status = CURLE_OK;
+        } else if (!c->status) {
+            c->loop->num_errors++;
+            update_status_locked(c, code == CURLE_OK ? AVERROR(EIO)
+                                                     : curlcode_to_averror(code), code);
+        }
+        pthread_cond_broadcast(&c->cond);
+        pthread_mutex_unlock(&c->mutex);
+        return;
+    }
 
     if (c->seek_queued) {
         /* previous soft seek drain finished; can start new request now */
@@ -1242,6 +1284,72 @@ static int setup_protocols(CurlContext *c)
     return ret;
 }
 
+/* The host as libcurl matches it against cookies. */
+static int curl_url_host(char *host, size_t host_size, const char *url)
+{
+    unsigned flags = curl_version_info(CURLVERSION_NOW)->features & CURL_VERSION_IDN ? CURLU_PUNYCODE : 0;
+    CURLU *u = curl_url();
+    char *curl_host = NULL;
+    CURLUcode uc;
+    int ret;
+
+    if (!u)
+        return AVERROR(ENOMEM);
+    uc = curl_url_set(u, CURLUPART_URL, url, 0);
+    if (uc == CURLUE_OK)
+        uc = curl_url_get(u, CURLUPART_HOST, &curl_host, flags);
+    if (uc == CURLUE_OK) {
+        size_t len = strlen(curl_host);
+        int brackets = len >= 2 && curl_host[0] == '[' && curl_host[len - 1] == ']';
+        len -= 2 * brackets;
+        ret = len < host_size ? 0 : AVERROR(EINVAL);
+        if (!ret)
+            av_strlcpy(host, curl_host + brackets, len + 1);
+    } else
+        ret = uc == CURLUE_OUT_OF_MEMORY ? AVERROR(ENOMEM) : AVERROR(EINVAL);
+    curl_free(curl_host);
+    curl_url_cleanup(u);
+    return ret;
+}
+
+/* CURLOPT_COOKIELIST line for a bound cookies option line, NULL if the line holds
+ * no cookie libcurl can store unchanged. */
+static int cookie_list_line(char **line, const char *cookie)
+{
+    AVDictionary *cookie_pair = NULL, *attributes = NULL;
+    const AVDictionaryEntry *pair, *host_only, *path;
+    const char *domain;
+    int ret;
+
+    *line = NULL;
+    if ((ret = ff_http_parse_set_cookie(cookie, &cookie_pair, &attributes)) < 0) {
+        ret = ret == AVERROR_INVALIDDATA ? 0 : ret;
+        goto end;
+    }
+    pair      = av_dict_iterate(cookie_pair, NULL);
+    domain    = ff_http_cookie_domain(attributes);
+    host_only = av_dict_get(attributes, "@hostonly", NULL, 0);
+    path      = av_dict_get(attributes, "path", NULL, 0);
+    if (host_only && !domain)
+        domain = host_only->value;
+    else if (host_only)
+        goto end;
+    if (!domain || strchr(".#", *domain) || av_stristart(domain, "Set-Cookie:", NULL) ||
+        strchr(pair->key, '\t') || strchr(pair->value, '\t') || strchr(domain, '\t') ||
+        (path && strchr(path->value, '\t')))
+        goto end;
+    *line = av_asprintf("%s\t%s\t%s\t%s\t%"PRId64"\t%s\t%s", domain,
+                        host_only || ff_http_host_is_ip_literal(domain) ? "FALSE" : "TRUE",
+                        path && (*path->value == '/' || *path->value == '"') ? path->value : "/",
+                        av_dict_get(attributes, "secure", NULL, 0) ? "TRUE" : "FALSE",
+                        ff_http_cookie_expiry(attributes), pair->key, pair->value);
+    ret = *line ? 0 : AVERROR(ENOMEM);
+end:
+    av_dict_free(&cookie_pair);
+    av_dict_free(&attributes);
+    return ret;
+}
+
 #define CURL_SETOPT(opt, val)                                               \
     do {                                                                    \
         int ret_ = curl_setopt_checked(c, #opt,                            \
@@ -1296,6 +1404,17 @@ static int setup_curl(CurlContext *c)
 
     if (c->user_agent && c->user_agent[0])
         CURL_SETOPT(CURLOPT_USERAGENT, c->user_agent);
+    if (c->method && c->method[0]) {
+        if (!strcmp(c->method, "HEAD")) {
+            /* NOBODY issues HEAD and skips the body.  CUSTOMREQUEST="HEAD"
+             * alone would leave curl expecting Content-Length bytes and
+             * raise CURLE_PARTIAL_FILE, which is retryable here. */
+            c->no_body = 1;
+            CURL_SETOPT(CURLOPT_NOBODY, 1L);
+        } else {
+            CURL_SETOPT(CURLOPT_CUSTOMREQUEST, c->method);
+        }
+    }
     if (c->http_proxy && c->http_proxy[0])
         CURL_SETOPT(CURLOPT_PROXY, c->http_proxy);
 
@@ -1317,18 +1436,24 @@ static int setup_curl(CurlContext *c)
         return AVERROR(ENOSYS);
     }
     if (c->cookies && c->cookies[0]) {
-        char *copy = av_strdup(c->cookies);
-        char *line, *saveptr = NULL;
+        char host[1024], *copy, *line, *saveptr = NULL;
+
+        if ((ret = curl_url_host(host, sizeof(host), url)) < 0 ||
+            (ret = ff_http_bind_cookies_to_host(&c->cookies, host)) < 0)
+            return ret;
+        copy = av_strdup(c->cookies);
         if (!copy)
             return AVERROR(ENOMEM);
-        for (line = av_strtok(copy, "\r\n", &saveptr); line;
-             line = av_strtok(NULL, "\r\n", &saveptr)) {
-            char *sc = av_asprintf("Set-Cookie: %s", line);
+        for (line = av_strtok(copy, "\n", &saveptr); line;
+             line = av_strtok(NULL, "\n", &saveptr)) {
+            char *sc;
 
-            if (!sc) {
+            if ((ret = cookie_list_line(&sc, line)) < 0) {
                 av_free(copy);
-                return AVERROR(ENOMEM);
+                return ret;
             }
+            if (!sc)
+                continue;
             cc = curl_easy_setopt(e, CURLOPT_COOKIELIST, sc);
             av_free(sc);
             if ((ret = curl_setopt_checked(c, "CURLOPT_COOKIELIST", cc)) < 0) {
@@ -1600,7 +1725,7 @@ static int libcurl_read(URLContext *h, unsigned char *buf, int size)
         }
 
         if (c->status) {
-            if (c->seekable && is_recoverable(c->curl_status))
+            if (c->seekable && !c->no_body && is_recoverable(c->curl_status))
                 return retry_request_locked(h, nonblock);
             if (c->status == AVERROR_EOF && c->icy_block_len >= 0)
                 av_log(h, AV_LOG_WARNING,
@@ -1720,6 +1845,7 @@ static int libcurl_get_short_seek(URLContext *h)
 #define E AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
     { "user_agent", "override User-Agent header", OFFSET(user_agent), AV_OPT_TYPE_STRING, { .str = DEFAULT_USER_AGENT }, 0, 0, D },
+    { "method", "Override the HTTP method used for the request", OFFSET(method), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D | E },
     { "referer", "override Referer header", OFFSET(referer), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D },
     { "headers", "set custom HTTP headers, can override built in default headers", OFFSET(headers), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D | E },
     { "http_proxy", "set HTTP proxy to tunnel through", OFFSET(http_proxy), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, D | E },

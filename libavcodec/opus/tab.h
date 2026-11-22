@@ -26,6 +26,13 @@
 #include <stdint.h>
 
 #include "libavutil/attributes_internal.h"
+#include "libavutil/error.h"
+
+/**
+ * The clock of Opus: packet lengths, pre-skip and trimming count samples at
+ * 48 kHz whatever the sample rate of the stream.
+ */
+#define OPUS_TIMESTAMP_RATE 48000
 
 FF_VISIBILITY_PUSH_HIDDEN
 extern const uint16_t ff_opus_frame_duration[32];

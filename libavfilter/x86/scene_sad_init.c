@@ -27,7 +27,8 @@ static void FUNC_NAME(SCENE_SAD_PARAMS) {                                     \
     uint64_t sad[MMSIZE / 8] = {0};                                           \
     ptrdiff_t awidth = width & ~(MMSIZE - 1);                                 \
     *sum = 0;                                                                 \
-    ASM_FUNC_NAME(src1, stride1, src2, stride2, awidth, height, sad);         \
+    if (awidth && height > 0)                                                 \
+        ASM_FUNC_NAME(src1, stride1, src2, stride2, awidth, height, sad);     \
     for (int i = 0; i < MMSIZE / 8; i++)                                      \
         *sum += sad[i];                                                       \
     ff_scene_sad_c(src1 + awidth, stride1,                                    \
@@ -36,30 +37,35 @@ static void FUNC_NAME(SCENE_SAD_PARAMS) {                                     \
     *sum += sad[0];                                                           \
 }
 
-#define SCENE_SAD16_FUNC(FUNC_NAME, ASM_FUNC_NAME, MMSIZE)                    \
+#define SCENE_SAD16_FUNC(FUNC_NAME, ASM_FUNC_NAME, C_FUNC_NAME, MMSIZE)       \
 void ASM_FUNC_NAME(SCENE_SAD_PARAMS);                                         \
                                                                               \
 static void FUNC_NAME(SCENE_SAD_PARAMS) {                                     \
     uint64_t sad[MMSIZE / 8] = {0};                                           \
     ptrdiff_t bytes = (width << 1) & ~(MMSIZE - 1);                           \
     *sum = 0;                                                                 \
-    ASM_FUNC_NAME(src1, stride1, src2, stride2, bytes, height, sad);          \
+    if (bytes && height > 0)                                                  \
+        ASM_FUNC_NAME(src1, stride1, src2, stride2, bytes, height, sad);      \
     for (int i = 0; i < MMSIZE / 8; i++)                                      \
         *sum += sad[i];                                                       \
-    ff_scene_sad16_c(src1 + bytes, stride1,                                   \
-                     src2 + bytes, stride2,                                   \
-                     width - (bytes >> 1), height, sad);                      \
+    C_FUNC_NAME(src1 + bytes, stride1,                                        \
+                src2 + bytes, stride2,                                        \
+                width - (bytes >> 1), height, sad);                           \
     *sum += sad[0];                                                           \
 }
 
 SCENE_SAD_FUNC(scene_sad_sse2, ff_scene_sad8_sse2, 16)
 #if HAVE_AVX2_EXTERNAL
 SCENE_SAD_FUNC(scene_sad_avx2,     ff_scene_sad8_avx2,  32)
-SCENE_SAD16_FUNC(scene_sad16_avx2, ff_scene_sad16_avx2, 32)
+SCENE_SAD16_FUNC(scene_sad16_avx2, ff_scene_sad16_avx2, ff_scene_sad16_c, 32)
+SCENE_SAD16_FUNC(scene_sad16_bswap_avx2, ff_scene_sad16_bswap_avx2,
+                 ff_scene_sad16_bswap_c, 32)
 #endif
 #if HAVE_AVX512_EXTERNAL
 SCENE_SAD_FUNC(scene_sad_avx512,     ff_scene_sad8_avx512,  64)
-SCENE_SAD16_FUNC(scene_sad16_avx512, ff_scene_sad16_avx512, 64)
+SCENE_SAD16_FUNC(scene_sad16_avx512, ff_scene_sad16_avx512, ff_scene_sad16_c, 64)
+SCENE_SAD16_FUNC(scene_sad16_bswap_avx512, ff_scene_sad16_bswap_avx512,
+                 ff_scene_sad16_bswap_c, 64)
 #endif
 
 ff_scene_sad_fn ff_scene_sad_get_fn_x86(int depth)
@@ -86,5 +92,19 @@ ff_scene_sad_fn ff_scene_sad_get_fn_x86(int depth)
             return scene_sad16_avx2;
 #endif
     }
+    return NULL;
+}
+
+ff_scene_sad_fn ff_scene_sad_bswap_get_fn_x86(void)
+{
+    int cpu_flags = av_get_cpu_flags();
+#if HAVE_AVX512_EXTERNAL
+    if (EXTERNAL_AVX512(cpu_flags))
+        return scene_sad16_bswap_avx512;
+#endif
+#if HAVE_AVX2_EXTERNAL
+    if (EXTERNAL_AVX2_FAST(cpu_flags))
+        return scene_sad16_bswap_avx2;
+#endif
     return NULL;
 }

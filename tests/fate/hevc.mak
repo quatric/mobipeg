@@ -269,6 +269,10 @@ fate-hevc-skipframe-dslice: CMD = framecrc -skip_frame nointra -err_detect explo
 fate-hevc-skipframe-slices: CMD = framecrc -skip_frame nointra -err_detect explode -i $(TARGET_SAMPLES)/hevc-conformance/SLICES_A_Rovi_3.bit
 FATE_HEVC-$(call FRAMECRC, HEVC, HEVC, HEVC_PARSER) += fate-hevc-skipframe-dslice fate-hevc-skipframe-slices
 
+# Skipped reference pictures still contribute to later picture order counts.
+fate-hevc-skipframe-poc: CMD = framecrc -skip_frame nokey -i $(TARGET_SAMPLES)/hevc-conformance/NUT_A_ericsson_5.bit
+FATE_HEVC-$(call FRAMECRC, HEVC, HEVC, HEVC_PARSER) += fate-hevc-skipframe-poc
+
 # this sample has two stsd entries and needs to reload extradata
 FATE_HEVC-$(call FRAMEMD5, MOV, HEVC, SCALE_FILTER) += fate-hevc-extradata-reload
 fate-hevc-extradata-reload: CMD = framemd5 -i $(TARGET_SAMPLES)/hevc/extradata-reload-multi-stsd.mov -sws_flags bitexact
@@ -375,6 +379,16 @@ FATE_HEVC-$(call FRAMECRC, HEVC, HEVC, HEVC_PARSER) += fate-hevc-tile-row-order-
 # of the picture.
 fate-hevc-tile-row-order-nokey: CMD = framecrc -tile_interleave 1 -skip_loop_filter nokey -i $(TARGET_SAMPLES)/hevc/tile_row_order_nokey.hevc -pix_fmt yuv420p
 FATE_HEVC-$(call FRAMECRC, HEVC, HEVC, HEVC_PARSER) += fate-hevc-tile-row-order-nokey
+
+# Exercise the last two inverse-quantization table entries with 12-bit 4:4:4.
+fate-hevc-12bit-qp74: CMD = framemd5 -i $(TARGET_SAMPLES)/hevc/12bit-444-qp74.hevc -pix_fmt yuv444p12le -vf scale
+fate-hevc-12bit-qp75: CMD = framemd5 -i $(TARGET_SAMPLES)/hevc/12bit-444-qp75.hevc -pix_fmt yuv444p12le -vf scale
+FATE_HEVC-$(call FRAMEMD5, HEVC, HEVC, HEVC_PARSER SCALE_FILTER) += fate-hevc-12bit-qp74 fate-hevc-12bit-qp75
+
+# Several slices per tile: the slices are collected and decoded in CTB row order.
+fate-hevc-tile-row-order-multislice: CMD = framecrc -tile_interleave 1 -i $(TARGET_SAMPLES)/hevc/tile_row_order_multislice.hevc -pix_fmt yuv420p
+fate-hevc-tile-row-order-multislice: THREADS = 2
+FATE_HEVC-$(call FRAMECRC, HEVC, HEVC, HEVC_PARSER) += fate-hevc-tile-row-order-multislice
 
 FATE_SAMPLES_AVCONV += $(FATE_HEVC-yes)
 FATE_SAMPLES_FFPROBE += $(FATE_HEVC_FFPROBE-yes)
