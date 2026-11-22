@@ -296,6 +296,7 @@ class EncodeGUI(tk.Tk):
             ],
         )
 
+        self.apply_builtin_preset("Best")  # the default; saved settings override it
         self.load_settings()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -491,13 +492,14 @@ class EncodeGUI(tk.Tk):
 
         # Row 6: Scale
         self.enc_scale_label = ttk.Label(
-            self.encode_frame, text="Scale (e.g. 384x288):"
+            self.encode_frame, text="Scale (e.g. 384x288; MobiClip uses multiples of 16):"
         )
         self.enc_scale_label.grid(row=7, column=0, sticky="e", padx=5, pady=5)
         self.enc_scale_var = tk.StringVar()
         self.enc_scale_entry = ttk.Entry(
             self.encode_frame, textvariable=self.enc_scale_var
         )
+        self.enc_scale_entry.bind("<FocusOut>", self.snap_scale)
         self.enc_scale_entry.grid(row=7, column=1, sticky="ew", padx=5, pady=5)
 
         # Row 7: Keyframes
@@ -1008,7 +1010,7 @@ class EncodeGUI(tk.Tk):
 
         self.enc_profile_label = ttk.Label(of, text="Quality profile:")
         self.enc_profile_label.grid(row=0, column=0, sticky="e", padx=5, pady=2)
-        self.enc_profile_var = tk.StringVar(value="Choose a profile...")
+        self.enc_profile_var = tk.StringVar(value="Best")
         self.enc_profile_cb = ttk.Combobox(
             of, textvariable=self.enc_profile_var, state="readonly",
             values=self.profile_names(),
@@ -1494,7 +1496,8 @@ class EncodeGUI(tk.Tk):
             users.pop(name)
             self.preset_store.save(users)
             self.enc_profile_cb.config(values=self.profile_names())
-            self.enc_profile_var.set("Choose a profile...")
+            self.enc_profile_var.set("Best")
+            self.apply_builtin_preset("Best")
         else:
             messagebox.showinfo("Profile", "Pick a saved profile to delete.")
 
@@ -2101,11 +2104,18 @@ class EncodeGUI(tk.Tk):
         }
         self.execute_cmd(cmd, self.enc_run_btn)
 
+    def snap_scale(self, event=None):
+        """MobiClip codes 16x16 blocks: show the multiple-of-16 size that will be used."""
+        if self.formats_map.get(self.enc_fmt_var.get()) in self.MOBI_SIZE_FORMATS:
+            self.enc_scale_var.set(mt.round_scale16(self.enc_scale_var.get()))
+
     def build_encode_cmd(self, inp1, inp2, outfile):
         """The encode.py command line for the Encode tab's current settings."""
         fmt = self.formats_map.get(self.enc_fmt_var.get())
         audio = self.enc_audio_var.get()
         scale = self.enc_scale_var.get()
+        if fmt in self.MOBI_SIZE_FORMATS:
+            scale = mt.round_scale16(scale)
         outdir = self.enc_outdir_var.get()
 
         cmd = self.script_cmd()

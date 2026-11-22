@@ -193,6 +193,16 @@ class Store(unittest.TestCase):
             self.assertEqual(set(p), keys, name)
 
 
+class Scale16(unittest.TestCase):
+    def test_round_scale16(self):
+        self.assertEqual(mt.round_scale16("400x240"), "400x240")
+        self.assertEqual(mt.round_scale16("384:288"), "384x288")
+        self.assertEqual(mt.round_scale16("390x250"), "384x256")
+        self.assertEqual(mt.round_scale16("5x5"), "16x16")
+        self.assertEqual(mt.round_scale16("half"), "half")
+        self.assertEqual(mt.round_scale16(""), "")
+
+
 class Progress(unittest.TestCase):
     def test_parse_progress(self):
         self.assertAlmostEqual(

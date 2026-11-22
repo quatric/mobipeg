@@ -563,7 +563,7 @@ def check_presets_and_drop(gui):
 
     # Encoding speed: Fast lowers the search depth and picks the diamond search.
     app.enc_speed_var.set(app.SPEED_CHOICES[1])
-    app.apply_builtin_preset("Best - wide search")  # subme 9, me umh
+    app.apply_builtin_preset("Best")  # subme 9, me umh
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     check(cmd[cmd.index("--mobi-subme") + 1] == "6", "Fast: search depth not capped at 6")
     check(cmd[cmd.index("--me") + 1] == "umh", "Fast: an explicit motion search was overridden")
@@ -577,6 +577,13 @@ def check_presets_and_drop(gui):
     app.apply_profile("Quality - the sweet spot")
     check(app.enc_quant_var.get() == "30", "profile dropdown did not apply the preset")
     app.enc_level_var.set("Advanced")
+
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    app.enc_scale_var.set("390x250")
+    cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
+    check(cmd[cmd.index("--scale") + 1] == "384x256", "scale not snapped to 16s: %s" % cmd)
+    check(app.enc_profile_var.get() in app.profile_names(), "default profile missing")
 
     app.enc_fmt_var.set("3DS Mobiclip .moflex (3D)")
     app.on_enc_format_change()

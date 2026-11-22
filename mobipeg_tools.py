@@ -639,6 +639,16 @@ class JsonStore:
             return False
 
 
+def round_scale16(text):
+    """'WxH' or 'W:H' with both sides rounded to the nearest multiple of 16
+    (MobiClip codes 16x16 macroblocks). Anything else comes back unchanged."""
+    m = re.fullmatch(r"\s*(\d+)\s*[x:]\s*(\d+)\s*", text or "")
+    if not m:
+        return text
+    w, h = (max(16, 16 * round(int(v) / 16)) for v in m.groups())
+    return f"{w}x{h}"
+
+
 # Quality profiles that ship with the GUI. Keys match the Encode tab's setting
 # names; the ladder follows the Mobipeg-MOFLEX Studio (quantizer, search depth,
 # motion search). Lower quantizer = better quality, bigger file.
@@ -647,7 +657,7 @@ def _preset(quant, subme, me, skip="0"):
 
 
 BUILTIN_PRESETS = {
-    "Best - wide search": _preset("27", "9", "umh"),
+    "Best": _preset("27", "9", "umh"),
     "Quality - the sweet spot": _preset("30", "9", "hex"),
     "Balanced": _preset("32", "7", "hex"),
     "Small": _preset("36", "7", "hex"),
