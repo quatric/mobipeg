@@ -958,7 +958,7 @@ class EncodeGUI(tk.Tk):
 
         # --- Level: how many options to show ---
         lvl = ttk.Frame(f)
-        lvl.grid(row=1, column=2, padx=5, pady=5)
+        lvl.grid(row=0, column=2, padx=5, pady=5)
         ttk.Label(lvl, text="Level:").pack(side="left", padx=(0, 4))
         self.enc_level_var = tk.StringVar(value="Intermediate")
         ttk.Combobox(
@@ -974,7 +974,7 @@ class EncodeGUI(tk.Tk):
             self.preset_btn, tearoff=0, postcommand=self.rebuild_preset_menu
         )
         self.preset_btn["menu"] = self.preset_menu
-        self.preset_btn.grid(row=0, column=2, padx=5, pady=5)
+        self.preset_btn.grid(row=1, column=2, padx=5, pady=5)
 
         # --- Source & audio ---
         self.enc_src_frame = ttk.LabelFrame(f, text="Source and audio", padding=8)
