@@ -1,6 +1,9 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 4.1.1:
+- Bink 2 (.bk2): the decoder is built again (needs --enable-version3), so video decodes
+- Bink Audio 2 tracks are detected from the KB2 tag; they were decoded as Bink Audio 1 and came out corrupt
 version 4.1:
 - Rebased onto FFmpeg master (2026-11-22)
 - GUI: Simple / Intermediate / Advanced levels (saved between runs) show only the options that level needs, and the form keeps its size when you switch
