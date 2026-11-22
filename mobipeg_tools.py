@@ -651,16 +651,17 @@ def round_scale16(text):
 
 # Quality profiles that ship with the GUI. Keys match the Encode tab's setting
 # names; the ladder follows the Mobipeg-MOFLEX Studio (quantizer, search depth,
-# motion search). Lower quantizer = better quality, bigger file.
+# motion search). Lower quantizer = better quality, bigger file; like H.264, a
+# step of 6 doubles the quantizer step, so the ladder moves in sixes.
 def _preset(quant, subme, me, skip="0"):
     return {"quant": quant, "subme": subme, "skip": skip, "me": me}
 
 
 BUILTIN_PRESETS = {
     "Best": _preset("12", "9", "umh"),  # QP 12 is the finest the decoder accepts
-    "High": _preset("27", "9", "umh"),
-    "Quality - the sweet spot": _preset("30", "9", "hex"),
-    "Balanced": _preset("32", "7", "hex"),
+    "High": _preset("18", "9", "umh"),
+    "Quality - the sweet spot": _preset("24", "9", "hex"),
+    "Balanced": _preset("30", "7", "hex"),
     "Small": _preset("36", "7", "hex"),
 }
 

@@ -418,7 +418,7 @@ def check_extras(gui):
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
     app.on_enc_format_change()
     app.apply_builtin_preset("Balanced")
-    check(app.enc_quant_var.get() == "32" and app.enc_me_var.get() == "hex",
+    check(app.enc_quant_var.get() == "30" and app.enc_me_var.get() == "hex",
           "profile: Balanced not applied")
 
     app.enc_offset_var.set("77")
@@ -555,7 +555,7 @@ def check_presets_and_drop(gui):
     app.apply_builtin_preset("Quality - the sweet spot")
     check(app.enc_level_var.get() == "Simple", "a Q preset must not raise the level")
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
-    for flag, value in (("--quantizer", "30"), ("--mobi-subme", "9"),
+    for flag, value in (("--quantizer", "24"), ("--mobi-subme", "9"),
                         ("--mobi-skip", "0"), ("--me", "hex")):
         if check(flag in cmd, "Q30 preset: %s missing from %s" % (flag, cmd)):
             check(cmd[cmd.index(flag) + 1] == value, "Q30 preset: %s wrong" % flag)
@@ -575,7 +575,7 @@ def check_presets_and_drop(gui):
     check(cmd[cmd.index("--mobi-subme") + 1] == "9" and "--me" not in cmd,
           "Standard speed changed the search settings: %s" % cmd)
     app.apply_profile("Quality - the sweet spot")
-    check(app.enc_quant_var.get() == "30", "profile dropdown did not apply the preset")
+    check(app.enc_quant_var.get() == "24", "profile dropdown did not apply the preset")
     app.enc_level_var.set("Advanced")
 
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
