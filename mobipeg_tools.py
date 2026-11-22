@@ -657,7 +657,8 @@ def _preset(quant, subme, me, skip="0"):
 
 
 BUILTIN_PRESETS = {
-    "Best": _preset("27", "9", "umh"),
+    "Best": _preset("12", "9", "umh"),  # QP 12 is the finest the decoder accepts
+    "High": _preset("27", "9", "umh"),
     "Quality - the sweet spot": _preset("30", "9", "hex"),
     "Balanced": _preset("32", "7", "hex"),
     "Small": _preset("36", "7", "hex"),

@@ -1709,7 +1709,7 @@ class EncodeGUI(tk.Tk):
                 self.after(
                     0,
                     self.append_console,
-                    f"\nProcess finished with exit code {process.returncode}\n",
+                    f"\n{'Success!' if process.returncode == 0 else 'Failure!'} Process finished with exit code {process.returncode}\n",
                     self.OK_COLOR if process.returncode == 0 else self.FAIL_COLOR,
                 )
             except Exception as e:
@@ -1727,10 +1727,10 @@ class EncodeGUI(tk.Tk):
             if stopped:
                 self.set_status("Stopped")
             elif code == 0:
-                self._set_progress(1.0, "Done")
+                self._set_progress(1.0, "Success!")
                 self.status_label.config(foreground=self.OK_COLOR)
             else:
-                self.set_status(f"Failed (exit code {code})", self.FAIL_COLOR)
+                self.set_status(f"Failure! (exit code {code})", self.FAIL_COLOR)
             if on_done:
                 on_done(code, stopped)
 
