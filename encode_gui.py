@@ -906,7 +906,7 @@ class EncodeGUI(tk.Tk):
              "enc_offset_entry", "enc_offset_hint", "enc_normalize_chk",
              "enc_hdr_label", "enc_hdr_cb", "enc_hdr_hint", "enc_super_frame",
              "enc_maxsize_label", "enc_maxsize_entry", "enc_fat32_btn",
-             "enc_est_label")),
+             "enc_est_label", "enc_src_frame")),
         (2, ("enc_layout_label", "enc_layout_entry", "enc_jobs_label",
              "enc_jobs_entry", "enc_jobs_hint")),
         (3, ("enc_adv_toggle_chk",)),  # never: the level picker replaces it
@@ -1214,6 +1214,7 @@ class EncodeGUI(tk.Tk):
         out_any = (fmt in self.MOBI_SIZE_FORMATS) or (not audio_only) or (fmt in self.JOBS_FORMATS)
         self.enc_out_frame.grid() if out_any else self.enc_out_frame.grid_remove()
         self.enc_super_frame.grid() if fmt in self.SUPER_FORMATS else self.enc_super_frame.grid_remove()
+        self.enc_src_frame.grid()
         for w in self.enc_ffargs_widgets:
             w.grid()
         self.apply_level_gates()

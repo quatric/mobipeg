@@ -520,7 +520,7 @@ def check_levels(gui):
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
     expect = {
         # widget: lowest level index that shows it
-        "enc_audio_cb": 0, "enc_maxsize_entry": 1,
+        "enc_audio_cb": 0, "enc_maxsize_entry": 1, "enc_src_frame": 1,
         "enc_scale_entry": 0, "enc_profile_cb": 0, "enc_speed_cb": 0, "enc_fps_entry": 1, "enc_offset_entry": 1, "enc_hdr_cb": 1,
         "enc_super_frame": 1, "enc_jobs_entry": 2, "enc_layout_entry": None,
     }
