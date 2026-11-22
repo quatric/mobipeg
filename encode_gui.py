@@ -932,6 +932,7 @@ class EncodeGUI(tk.Tk):
     def on_level_change(self):
         self.enc_adv_toggle_var.set(self.level_index() == 2)
         self.on_enc_format_change()
+        self.save_settings()  # keep the choice even if the app is killed, not closed
 
     def apply_level_gates(self):
         lvl = self.level_index()
@@ -960,7 +961,7 @@ class EncodeGUI(tk.Tk):
         lvl = ttk.Frame(f)
         lvl.grid(row=0, column=2, padx=5, pady=5)
         ttk.Label(lvl, text="Level:").pack(side="left", padx=(0, 4))
-        self.enc_level_var = tk.StringVar(value="Intermediate")
+        self.enc_level_var = tk.StringVar(value="Simple")
         ttk.Combobox(
             lvl, textvariable=self.enc_level_var, values=self.LEVELS,
             state="readonly", width=12,
