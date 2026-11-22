@@ -522,7 +522,7 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_quant_entry.grid(row=9, column=1, sticky="w", padx=5, pady=5)
 
-        # Row 9: Audio rate (vx / mods codebook / thp / rvid) — match the clip you're replacing.
+        # Row 9: Audio rate (vx / mods codebook / thp / rvid) - match the clip you're replacing.
         self.enc_arate_label = ttk.Label(
             self.encode_frame, text="Audio rate (Hz, 0=source):"
         )
@@ -533,7 +533,7 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_arate_entry.grid(row=10, column=1, sticky="w", padx=5, pady=5)
 
-        # Row 10: FPS — applies to every format; match the clip you're replacing
+        # Row 10: FPS - applies to every format; match the clip you're replacing
         # (e.g. 15 or 60000/1001).  Always shown, never gated behind Advanced.
         self.enc_fps_label = ttk.Label(self.encode_frame, text="FPS (blank=source):")
         self.enc_fps_label.grid(row=11, column=0, sticky="e", padx=5, pady=5)
@@ -560,7 +560,7 @@ class EncodeGUI(tk.Tk):
         self.enc_fast_audio_var = tk.BooleanVar(value=False)
         self.enc_fast_audio_chk = ttk.Checkbutton(
             self.encode_frame,
-            text="Fast audio (skip LTP search — ~90x faster, ~2 dB lower quality)",
+            text="Fast audio (skip LTP search - ~90x faster, ~2 dB lower quality)",
             variable=self.enc_fast_audio_var,
         )
         self.enc_fast_audio_chk.grid(row=13, column=1, sticky="w", padx=5, pady=2)
@@ -881,8 +881,8 @@ class EncodeGUI(tk.Tk):
     NO_AUDIO_FORMATS = {"hvqm4", "gba_ads", "gba_hydrogen"}
     LEVELS = ["Simple", "Intermediate", "Advanced"]
     SPEED_CHOICES = [
-        "Standard — full motion search",
-        "Fast — less motion search (quality and size can change)",
+        "Standard - full motion search",
+        "Fast - less motion search (quality and size can change)",
     ]
 
     def profile_names(self):
@@ -1272,7 +1272,7 @@ class EncodeGUI(tk.Tk):
                     import encode as _enc
 
                     if "zscale" not in mt.available_filters(_enc.FFENC):
-                        warn = "  — this ffmpeg cannot tone-map HDR (no zscale)"
+                        warn = "  - this ffmpeg cannot tone-map HDR (no zscale)"
                 except Exception:
                     pass
             self.enc_src_label.config(text=mt.describe_source(info) + warn, foreground="")

@@ -647,8 +647,8 @@ def _preset(quant, subme, me, skip="0"):
 
 
 BUILTIN_PRESETS = {
-    "Best \u2014 wide search": _preset("27", "9", "umh"),
-    "Quality \u2014 the sweet spot": _preset("30", "9", "hex"),
+    "Best - wide search": _preset("27", "9", "umh"),
+    "Quality - the sweet spot": _preset("30", "9", "hex"),
     "Balanced": _preset("32", "7", "hex"),
     "Small": _preset("36", "7", "hex"),
 }

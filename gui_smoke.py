@@ -552,7 +552,7 @@ def check_presets_and_drop(gui):
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
     app.on_enc_format_change()
     app.enc_level_var.set("Simple")
-    app.apply_builtin_preset("Quality \u2014 the sweet spot")
+    app.apply_builtin_preset("Quality - the sweet spot")
     check(app.enc_level_var.get() == "Simple", "a Q preset must not raise the level")
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     for flag, value in (("--quantizer", "30"), ("--mobi-subme", "9"),
@@ -563,7 +563,7 @@ def check_presets_and_drop(gui):
 
     # Encoding speed: Fast lowers the search depth and picks the diamond search.
     app.enc_speed_var.set(app.SPEED_CHOICES[1])
-    app.apply_builtin_preset("Best \u2014 wide search")  # subme 9, me umh
+    app.apply_builtin_preset("Best - wide search")  # subme 9, me umh
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     check(cmd[cmd.index("--mobi-subme") + 1] == "6", "Fast: search depth not capped at 6")
     check(cmd[cmd.index("--me") + 1] == "umh", "Fast: an explicit motion search was overridden")
@@ -574,7 +574,7 @@ def check_presets_and_drop(gui):
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     check(cmd[cmd.index("--mobi-subme") + 1] == "9" and "--me" not in cmd,
           "Standard speed changed the search settings: %s" % cmd)
-    app.apply_profile("Quality \u2014 the sweet spot")
+    app.apply_profile("Quality - the sweet spot")
     check(app.enc_quant_var.get() == "30", "profile dropdown did not apply the preset")
     app.enc_level_var.set("Advanced")
 
