@@ -472,24 +472,14 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_layout_entry.grid(row=4, column=1, sticky="w", padx=5, pady=5)
 
-        # Row 5: Output Dir
-        ttk.Label(self.encode_frame, text="Output Dir:").grid(
-            row=5, column=0, sticky="e", padx=5, pady=5
-        )
+        # No separate Output Dir field: the output file's folder is the output
+        # directory. This variable follows it (and is what auto-fill and the
+        # queue read), so the two can never disagree.
         self.enc_outdir_var = tk.StringVar(value="")
-        ttk.Entry(self.encode_frame, textvariable=self.enc_outdir_var).grid(
-            row=5, column=1, sticky="ew", padx=5, pady=5
-        )
-        ttk.Button(
-            self.encode_frame,
-            text="Browse...",
-            command=lambda: self.browse_dir(self.enc_outdir_var),
-        ).grid(row=5, column=2, padx=5, pady=5)
 
-        # Row 6: Output File (optional exact path; defaults to basename + the
-        # format's own extension in Output Dir above, but "Save As..." lets
-        # you point at a specific file instead of only picking a directory).
-        ttk.Label(self.encode_frame, text="Output File (optional):").grid(
+        # Row 6: Output file (full path; filled in from the input's folder and
+        # the format's extension, "Save As..." picks any other file).
+        ttk.Label(self.encode_frame, text="Output file:").grid(
             row=6, column=0, sticky="e", padx=5, pady=5
         )
         self.enc_output_var = tk.StringVar(value="")
@@ -889,6 +879,7 @@ class EncodeGUI(tk.Tk):
             "write", lambda *a: self.on_encode_input_changed()
         )
         self.enc_fmt_var.trace_add("write", lambda *a: self.on_encode_input_changed())
+        self.enc_output_var.trace_add("write", lambda *a: self.on_output_path_changed())
         for var in (
             self.enc_quant_var,
             self.enc_mobi_subme_var,
@@ -2047,8 +2038,15 @@ class EncodeGUI(tk.Tk):
         if name and (not current or getattr(self, "_enc_output_auto", "") == current):
             outdir = self.enc_outdir_var.get().strip()
             full = os.path.join(outdir, name) if outdir else name
-            self.enc_output_var.set(full)
             self._enc_output_auto = full
+            if full != current:
+                self.enc_output_var.set(full)
+
+    def on_output_path_changed(self):
+        """Keep the output directory in step with the folder of the output file."""
+        folder = os.path.dirname(self.enc_output_var.get().strip())
+        if folder and folder != self.enc_outdir_var.get().strip():
+            self.enc_outdir_var.set(folder)
 
     def browse_save_encode(self):
         fmt = self.formats_map.get(self.enc_fmt_var.get(), "mo")

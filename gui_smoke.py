@@ -642,6 +642,31 @@ def check_scroll(gui):
     app.withdraw()
 
 
+def check_output_field(gui):
+    """One output field: its folder is the output directory, no feedback loops."""
+    import tempfile
+    app = gui.app
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "movie.mkv")
+    open(src, "w").close()
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    app.enc_output_var.set("")
+    app.enc_input_var.set(src)
+    app.update()
+    check(app.enc_output_var.get() == os.path.join(d, "movie.moflex"),
+          "output not filled from the input: %r" % app.enc_output_var.get())
+    other = os.path.join(d, "elsewhere", "mine.moflex")
+    app.enc_output_var.set(other)
+    check(app.enc_outdir_var.get() == os.path.dirname(other),
+          "typing an output path did not move the output directory")
+    app.enc_fmt_var.set("Wii Mobiclip .mo")
+    app.on_enc_format_change()
+    check(app.enc_output_var.get() == other, "a typed output path was overwritten")
+    app.enc_output_var.set("")
+    app.enc_input_var.set("")
+
+
 def main():
     dump = "--dump" in sys.argv
     here = os.path.dirname(os.path.abspath(__file__))
@@ -682,6 +707,7 @@ def main():
     check_levels(gui)
     check_presets_and_drop(gui)
     check_scroll(gui)
+    check_output_field(gui)
 
     gui.app.destroy()
 
