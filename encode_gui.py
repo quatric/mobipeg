@@ -39,6 +39,7 @@ from tkinter import ttk, filedialog, messagebox
 import shlex
 import subprocess
 import threading
+import time
 import os
 import re
 import sys
@@ -796,7 +797,7 @@ class EncodeGUI(tk.Tk):
             ),
             ({"moflex3d"}, (self.enc_layout_label, self.enc_layout_entry)),
             (
-                {"mo", "moflex", "moflex3d", "vx"},
+                {"mo", "moflex", "moflex3d", "mods", "vx"},
                 (self.enc_keyframes_label, self.enc_keyframes_entry),
             ),
             (
@@ -1661,19 +1662,39 @@ class EncodeGUI(tk.Tk):
                 )
                 self._proc = process
                 last = 0.0
+                started = time.time()  # restarts when a second pass resets the bar
+
+                def eta(frac):
+                    nonlocal started, last
+                    if frac < last - 0.2:
+                        started = time.time()
+                    return mt.eta_text(frac, time.time() - started)
+
                 for line in process.stdout:
                     self.after(0, self.append_console, line)
                     sec = mt.parse_progress_seconds(line)
                     if sec is not None and total:
                         frac = min(sec / total, 1.0)
                         if abs(frac - last) >= 0.005 or frac in (0.0, 1.0):
+                            e = eta(frac)  # before `last` moves, to spot a second pass
                             last = frac
                             self.after(
                                 0, self._set_progress, frac,
                                 f"{(title + '  ') if title else ''}{frac * 100:.0f}%  "
-                                f"({mt.format_clock(sec)} / {mt.format_clock(total)})",
+                                f"({mt.format_clock(sec)} / {mt.format_clock(total)})  {e}",
                             )
                     elif line.startswith(">>"):
+                        chunk = re.match(r">> chunk (\d+)/(\d+)", line)
+                        if chunk:  # parallel encode: ffmpeg prints no time= lines
+                            k, n = int(chunk.group(1)), int(chunk.group(2))
+                            e = eta(k / n)
+                            last = k / n
+                            self.after(
+                                0, self._set_progress, k / n,
+                                f"{(title + '  ') if title else ''}{k / n * 100:.0f}%  "
+                                f"(part {k} of {n})  {e}",
+                            )
+                            continue
                         note = line[2:].strip()
                         self.after(
                             0, self.set_status, f"{(title + '  ') if title else ''}{note}"[:140]
@@ -2145,7 +2166,7 @@ class EncodeGUI(tk.Tk):
             cmd.extend(["-o", outfile])
         if outdir:
             cmd.extend(["--outdir", outdir])
-        if fmt in ("mo", "moflex", "moflex3d", "vx"):
+        if fmt in ("mo", "moflex", "moflex3d", "mods", "vx"):
             kf = self.enc_keyframes_var.get().strip()
             if kf and kf != "0":
                 cmd.extend(["--keyframes", kf])

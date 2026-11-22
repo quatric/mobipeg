@@ -684,6 +684,18 @@ def format_clock(seconds):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+def eta_text(frac, elapsed, now=None):
+    """'ETA 12:34 (14:05)': time left and the clock time it finishes, or ''
+    while there is too little progress to say anything useful."""
+    import time
+
+    if frac < 0.01 or frac >= 1.0 or elapsed < 5:
+        return ""
+    left = elapsed * (1.0 - frac) / frac
+    done_at = time.strftime("%H:%M", time.localtime((now or time.time()) + left))
+    return f"ETA {format_clock(left)} ({done_at})"
+
+
 def popen_kwargs_new_group():
     """Popen options that put a child (and the ffmpeg it spawns) in its own group."""
     if os.name == "nt":

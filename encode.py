@@ -741,13 +741,23 @@ def encode_chunked(chunk_cmd, workdir, ext, n_chunks, jobs):
     os.makedirs(workdir, exist_ok=True)
     dsts = [os.path.join(workdir, f"chunk{i:05d}.{ext}") for i in range(n_chunks)]
 
+    import threading
+
+    lock, finished = threading.Lock(), [0]
+    step = max(1, n_chunks // 100)  # about 100 progress lines, however long the movie
+
     def run_chunk(i):
         r = subprocess.run(chunk_cmd(i, dsts[i]))
-        return (
+        good = (
             r.returncode == 0
             and os.path.isfile(dsts[i])
             and os.path.getsize(dsts[i]) > 0
         )
+        with lock:
+            finished[0] += 1
+            if finished[0] % step == 0 or finished[0] == n_chunks:
+                print(f">> chunk {finished[0]}/{n_chunks}", flush=True)
+        return good
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         ok = all(pool.map(run_chunk, range(n_chunks)))
@@ -2601,11 +2611,25 @@ def main():
         enc_opts.extend(["-c:v", cvc])
 
     if fmt == "mods":
-        enc_opts.extend(["-mobiclip", "2", "-moflex", "0", "-g", "100000"])
+        enc_opts.extend(["-mobiclip", "2", "-moflex", "0"])
         if vx_quant > 0 and not mobi_bitrate:
             enc_opts.extend(["-qp", str(vx_quant)])
         if audio == "fastaudio":
-            enc_opts.extend(["-sc_threshold", "0"])
+            # FastAudio .mods keeps a single keyframe, so no periodic ones.
+            enc_opts.extend(["-g", "100000", "-sc_threshold", "0"])
+        else:
+            # Same keyframe cadence as .mo and .moflex: evenly spaced, at most
+            # MOBICLIP_KEYINT_MAX frames apart, scene cuts kept on top.
+            out_fps = float(Fraction(fps_ovr)) if fps_ovr else probe_fps(inp)
+            kf = even_gop(inp, out_fps, n_keyframes, limit=MOBICLIP_KEYINT_MAX)
+            if kf:
+                enc_opts.extend(["-g", str(kf[0])])
+                print(
+                    f"   keyframes: ~{kf[1]} evenly spaced (-g {kf[0]}, scene cuts kept)"
+                )
+                chunk_unit = kf[0]
+            else:
+                enc_opts.extend(["-g", str(MOBICLIP_KEYINT_MAX)])
         enc_opts.extend(mobi_rc)
         vopt_end = len(enc_opts)
     elif fmt in [

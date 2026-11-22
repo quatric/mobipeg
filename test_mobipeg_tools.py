@@ -202,6 +202,14 @@ class Progress(unittest.TestCase):
         self.assertIsNone(mt.parse_progress_seconds("size=N/A time=N/A"))
         self.assertIsNone(mt.parse_progress_seconds(">> pass 1/2"))
 
+
+    def test_eta(self):
+        self.assertEqual(mt.eta_text(0.0, 100), "")        # no progress yet
+        self.assertEqual(mt.eta_text(0.5, 2), "")          # too early to say
+        self.assertEqual(mt.eta_text(1.0, 100), "")        # finished
+        text = mt.eta_text(0.25, 60, now=0)                # 60 s for 25% -> 180 s left
+        self.assertTrue(text.startswith("ETA 3:00 ("), text)
+
     def test_clock(self):
         self.assertEqual(mt.format_clock(65), "1:05")
         self.assertEqual(mt.format_clock(3725), "1:02:05")
