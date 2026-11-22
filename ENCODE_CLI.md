@@ -115,6 +115,48 @@ special to pass, just point it at the file.
 | `-o`, `--output FILE` | decode | Output filename. Default: input's basename + `.mp4` (stereo input appends `_left`/`_right`). |
 | `--ffmpeg-args '...'` | all | Extra args appended verbatim just before the output file, shell-word-parsed. Since ffmpeg lets the last occurrence of a flag win, this overrides the format preset: `--ffmpeg-args '-t 5 -af volume=0.5'`. The `--roundtrip` validation pass doesn't see it. |
 
+## Audio selection and correction (all encode formats with audio)
+
+| Flag | Meaning |
+|---|---|
+| `--list-audio-tracks` | Print the input's audio tracks, numbered for `--audio-track`, and exit. |
+| `--audio-track N` | Encode track `N` (0-based) instead of the container's default. Errors if the input has fewer tracks. |
+| `--audio-offset-ms N` | Shift the audio against the video: positive delays it, negative starts it earlier. |
+| `--normalize-audio` | Measure the chosen track and raise a quiet one so its peak reaches -1 dBFS (at most +24 dB; loud audio is never turned down). Adjusts peak level, not perceived loudness; adds an analysis pass. |
+
+The offset and gain are applied through an `-af` chain, so a format's own audio
+filters (for example Factor 5's padding) still run.
+
+## Size limit (`mo`, `moflex`, `moflex3d`, `mods`)
+
+`--max-size-mb N` keeps the output under `N` MiB. A video bitrate is derived from
+the input duration and the audio codec's rate, the movie is encoded, and if the
+file is still too big it is re-encoded at a proportionally lower bitrate (up to
+four attempts). The command fails, leaving the best attempt in place, if it
+cannot fit. It overrides `--bitrate`; `--multipass 2` is honoured. Any encode
+that comes out at 4 GiB or more prints a FAT32 warning (the 3DS SD card cannot
+store it); `--max-size-mb 4000` avoids that.
+
+## HDR sources
+
+`--hdr-mode auto|off|mobius|hable|reinhard|clip` tone-maps PQ and HLG sources to
+BT.709 SDR after the downscale. `auto` (the default) does nothing for SDR
+sources and uses Mobius for HDR ones; `off` never touches colour. It needs an
+ffmpeg built with libzimg (`zscale`); without it the encode continues untouched
+and says so.
+
+## `inspect` mode: MOFLEX preflight
+
+```sh
+python3 encode.py inspect movie.moflex [--decode-check] [--json]
+```
+
+Reads a `.moflex` without changing it and checks the block size, the 4C32 sync
+headers and their timestamps, the Super MOFLEX trailer, the streams (via
+ffprobe) and the FAT32 4 GiB limit. `--decode-check` also decodes the whole file
+and reports anything ffmpeg complains about. The exit status is 1 if any error
+was found (warnings and notes do not change it), so it can gate a script.
+
 ## Stereoscopic (`decode`/`play`)
 
 | Flag | Meaning |

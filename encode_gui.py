@@ -40,7 +40,11 @@ import shlex
 import subprocess
 import threading
 import os
+import re
 import sys
+
+import mobipeg_tools as mt
+from gui_extras import ScrollableFrame, PathListEditor, QueueTab, InspectTab
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -116,6 +120,7 @@ ENCODE_EXTENSIONS = {
     "gba_hydrogen": "mmstr",
     "wii_photo": "avi",
     "nintendo_channel": "3gp",
+    "moflex3d": "moflex",
     "topos": "mkv",
     "topos3d": "mkv",
     "topos_mpeg2": "mkv",
@@ -220,8 +225,11 @@ class EncodeGUI(tk.Tk):
         self.panes.add(self.notebook, weight=1)
 
         # --- ENCODE TAB ---
-        self.encode_frame = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.encode_frame, text="Encode")
+        # The form is taller than most screens, so it scrolls inside a fixed
+        # viewport (the scrollbar only appears when something is cut off).
+        self.encode_scroll = ScrollableFrame(self.notebook, height=520)
+        self.encode_frame = self.encode_scroll.inner
+        self.notebook.add(self.encode_scroll, text="Encode")
         self.setup_encode_tab()
 
         # --- DECODE TAB ---
@@ -236,10 +244,19 @@ class EncodeGUI(tk.Tk):
         self.notebook.add(self.cia_frame, text="Package CIA")
         self.setup_cia_tab()
 
+        # --- QUEUE TAB: batch conversions, one after another ---
+        self.queue_tab = QueueTab(self.notebook, self)
+        self.notebook.add(self.queue_tab, text="Queue")
+
+        # --- INSPECT TAB: read-only MOFLEX preflight ---
+        self.inspect_tab = InspectTab(self.notebook, self)
+        self.notebook.add(self.inspect_tab, text="Inspect")
+
         # --- CONSOLE ---
         console_box = ttk.Frame(self.panes)
         self.panes.add(console_box, weight=1)
-        ttk.Label(console_box, text="Console Output:").pack(anchor="w", pady=(10, 0))
+        self.build_status_bar(console_box)
+        ttk.Label(console_box, text="Console Output:").pack(anchor="w", pady=(6, 0))
         console_frame = ttk.Frame(console_box)
         console_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -266,6 +283,9 @@ class EncodeGUI(tk.Tk):
 
         self.after_idle(self._place_sash)
         self.panes.bind("<Configure>", lambda e: self._place_sash(keep_user=True))
+
+        self.load_settings()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # Height the console keeps however short the window gets: its label and
     # about five lines of output.
@@ -727,24 +747,32 @@ class EncodeGUI(tk.Tk):
         # every option this tab doesn't have a widget for, and it goes on the
         # ffmpeg command line last, so it overrides the format preset.
         ttk.Label(self.encode_frame, text="Extra FFmpeg parameters:").grid(
-            row=22, column=0, sticky="e", padx=5, pady=5
+            row=25, column=0, sticky="e", padx=5, pady=5
         )
         self.enc_ffargs_var = tk.StringVar(value="")
         ttk.Entry(self.encode_frame, textvariable=self.enc_ffargs_var).grid(
-            row=22, column=1, sticky="ew", padx=5, pady=5
+            row=25, column=1, sticky="ew", padx=5, pady=5
         )
         ttk.Label(
             self.encode_frame,
             foreground="grey",
             wraplength=440,
             text="passed to ffmpeg verbatim, after the settings above (e.g. -t 5 -af volume=0.5)",
-        ).grid(row=23, column=1, columnspan=2, sticky="w", padx=5)
+        ).grid(row=26, column=1, columnspan=2, sticky="w", padx=5)
 
         # Run Button
+        run_row = ttk.Frame(self.encode_frame)
+        run_row.grid(row=27, column=1, columnspan=2, pady=15, sticky="w")
         self.enc_run_btn = ttk.Button(
-            self.encode_frame, text="▶ Run Encoding", command=self.run_encoding
+            run_row, text="▶ Run Encoding", command=self.run_encoding
         )
-        self.enc_run_btn.grid(row=24, column=1, pady=15)
+        self.enc_run_btn.pack(side="left")
+        ttk.Button(run_row, text="Add to queue", command=self.add_current_to_queue).pack(
+            side="left", padx=(10, 0)
+        )
+        ttk.Button(run_row, text="Copy command", command=self.copy_command).pack(
+            side="left", padx=(10, 0)
+        )
 
         # Widgets that only appear for certain formats, keyed by the formats
         # that should show them. Hiding uses grid_remove() (not state=disabled)
@@ -837,6 +865,8 @@ class EncodeGUI(tk.Tk):
             ({"mo", "moflex", "moflex3d", "mods"}, (self.enc_adv_toggle_chk,)),
         ]
 
+        self.setup_extra_encode_controls()
+
         self.enc_input_var.trace_add(
             "write",
             lambda *a: self.on_input_changed(self.enc_input_var, self.enc_outdir_var),
@@ -853,6 +883,800 @@ class EncodeGUI(tk.Tk):
         ):
             var.trace_add("write", self.update_hq_state_from_fields)
         self.on_enc_format_change()
+
+    # ------------------------------------------------------------------
+    # Extra Encode-tab controls: source info, audio, size, HDR, parallel
+    # jobs, Super MOFLEX, more MobiClip tuning, presets, saved settings.
+    # ------------------------------------------------------------------
+
+    MOBI_SIZE_FORMATS = {"mo", "moflex", "moflex3d", "mods"}
+    JOBS_FORMATS = {
+        "mo", "moflex", "mods", "topos", "topos3d", "topos_mpeg2",
+        "topos3d_mpeg2", "mivf",
+    }
+    STEREO_FORMATS = {"moflex3d", "topos3d", "topos3d_mpeg2"}
+    SUPER_FORMATS = {"moflex", "moflex3d"}
+    NO_AUDIO_FORMATS = {"hvqm4", "gba_ads", "gba_hydrogen"}
+    STEREO_CHOICES = ["auto", "sbs", "sbs-r", "tb", "tb-r", "frameseq", "frameseq-r"]
+
+    def setup_extra_encode_controls(self):
+        f = self.encode_frame
+        self.src_info = None
+        self._src_job = None
+
+        # --- Presets: a menu button beside the format picker ---
+        self.preset_store = mt.JsonStore("presets.json")
+        self.preset_btn = ttk.Menubutton(f, text="Presets ▾")
+        self.preset_menu = tk.Menu(
+            self.preset_btn, tearoff=0, postcommand=self.rebuild_preset_menu
+        )
+        self.preset_btn["menu"] = self.preset_menu
+        self.preset_btn.grid(row=0, column=2, padx=5, pady=5)
+
+        # --- Source & audio ---
+        self.enc_src_frame = ttk.LabelFrame(f, text="Source and audio", padding=8)
+        self.enc_src_frame.grid(row=22, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        sf = self.enc_src_frame
+        sf.columnconfigure(1, weight=1)
+        ttk.Label(sf, text="Source:").grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        self.enc_src_label = ttk.Label(sf, text="choose an input file", foreground="grey", wraplength=470)
+        self.enc_src_label.grid(row=0, column=1, columnspan=2, sticky="w", padx=5, pady=2)
+
+        self.enc_track_label = ttk.Label(sf, text="Audio track:")
+        self.enc_track_label.grid(row=1, column=0, sticky="e", padx=5, pady=2)
+        self.enc_track_var = tk.StringVar(value="Default")
+        self.enc_track_cb = ttk.Combobox(sf, textvariable=self.enc_track_var, state="readonly", values=["Default"])
+        self.enc_track_cb.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+
+        self.enc_offset_label = ttk.Label(sf, text="Audio offset (ms):")
+        self.enc_offset_label.grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        self.enc_offset_var = tk.StringVar(value="0")
+        self.enc_offset_entry = ttk.Entry(sf, textvariable=self.enc_offset_var, width=8)
+        self.enc_offset_entry.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        self.enc_offset_hint = ttk.Label(sf, foreground="grey", text="+ delays the audio, − starts it earlier")
+        self.enc_offset_hint.grid(row=2, column=2, sticky="w", padx=5)
+
+        self.enc_normalize_var = tk.BooleanVar(value=False)
+        self.enc_normalize_chk = ttk.Checkbutton(
+            sf, text="Normalize audio peak to −1 dBFS (adds an analysis pass)",
+            variable=self.enc_normalize_var,
+        )
+        self.enc_normalize_chk.grid(row=3, column=1, columnspan=2, sticky="w", padx=5, pady=2)
+
+        self.enc_stereo_label = ttk.Label(sf, text="3D packing:")
+        self.enc_stereo_label.grid(row=4, column=0, sticky="e", padx=5, pady=2)
+        self.enc_stereo_var = tk.StringVar(value="auto")
+        self.enc_stereo_cb = ttk.Combobox(
+            sf, textvariable=self.enc_stereo_var, state="readonly", values=self.STEREO_CHOICES, width=10
+        )
+        self.enc_stereo_cb.grid(row=4, column=1, sticky="w", padx=5, pady=2)
+        self.enc_stereo_hint = ttk.Label(
+            sf, foreground="grey", text="only for one packed 3D file (side by side, top/bottom...)"
+        )
+        self.enc_stereo_hint.grid(row=4, column=2, sticky="w", padx=5)
+
+        # --- Output & size ---
+        self.enc_out_frame = ttk.LabelFrame(f, text="Output and speed", padding=8)
+        self.enc_out_frame.grid(row=23, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        of = self.enc_out_frame
+        of.columnconfigure(2, weight=1)
+
+        self.enc_maxsize_label = ttk.Label(of, text="Max size (MiB):")
+        self.enc_maxsize_label.grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        self.enc_maxsize_var = tk.StringVar(value="")
+        self.enc_maxsize_entry = ttk.Entry(of, textvariable=self.enc_maxsize_var, width=8)
+        self.enc_maxsize_entry.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        self.enc_fat32_btn = ttk.Button(
+            of, text="FAT32 limit (4000)", command=lambda: self.enc_maxsize_var.set("4000")
+        )
+        self.enc_fat32_btn.grid(row=0, column=2, sticky="w", padx=5, pady=2)
+        self.enc_est_label = ttk.Label(of, text="", foreground="grey", wraplength=470)
+        self.enc_est_label.grid(row=1, column=1, columnspan=2, sticky="w", padx=5)
+
+        self.enc_hdr_label = ttk.Label(of, text="HDR → SDR:")
+        self.enc_hdr_label.grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        self.enc_hdr_var = tk.StringVar(value="auto")
+        self.enc_hdr_cb = ttk.Combobox(
+            of, textvariable=self.enc_hdr_var, state="readonly", values=list(mt.HDR_MODES), width=10
+        )
+        self.enc_hdr_cb.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        self.enc_hdr_hint = ttk.Label(of, foreground="grey", text="auto tone-maps HDR sources only")
+        self.enc_hdr_hint.grid(row=2, column=2, sticky="w", padx=5)
+
+        self.enc_jobs_label = ttk.Label(of, text="Parallel jobs (0=auto):")
+        self.enc_jobs_label.grid(row=3, column=0, sticky="e", padx=5, pady=2)
+        self.enc_jobs_var = tk.StringVar(value="0")
+        self.enc_jobs_entry = ttk.Entry(of, textvariable=self.enc_jobs_var, width=8)
+        self.enc_jobs_entry.grid(row=3, column=1, sticky="w", padx=5, pady=2)
+        self.enc_jobs_hint = ttk.Label(of, foreground="grey", text="1 = encode in one piece")
+        self.enc_jobs_hint.grid(row=3, column=2, sticky="w", padx=5)
+
+        # --- Super MOFLEX ---
+        self.enc_super_frame = ttk.LabelFrame(f, text="Super MOFLEX", padding=8)
+        self.enc_super_frame.grid(row=24, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        sp = self.enc_super_frame
+        sp.columnconfigure(1, weight=1)
+        self.enc_super_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            sp, text="Write a Super MOFLEX trailer (second audio, subtitles, poster)",
+            variable=self.enc_super_var, command=self.refresh_super_state,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=5, pady=2)
+
+        ttk.Label(sp, text="Second audio:").grid(row=1, column=0, sticky="e", padx=5, pady=2)
+        self.enc_audio2_var = tk.StringVar(value="")
+        self.enc_audio2_entry = ttk.Entry(sp, textvariable=self.enc_audio2_var)
+        self.enc_audio2_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+        self.enc_audio2_btn = ttk.Button(
+            sp, text="Browse...", command=lambda: self.browse_file(self.enc_audio2_var)
+        )
+        self.enc_audio2_btn.grid(row=1, column=2, padx=5, pady=2)
+
+        ttk.Label(sp, text="Languages:").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        langs = ttk.Frame(sp)
+        langs.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        self.enc_lang_var = tk.StringVar(value="")
+        self.enc_lang2_var = tk.StringVar(value="")
+        self.enc_lang_entry = ttk.Entry(langs, textvariable=self.enc_lang_var, width=6)
+        self.enc_lang_entry.pack(side="left")
+        ttk.Label(langs, text=" first audio     ", foreground="grey").pack(side="left")
+        self.enc_lang2_entry = ttk.Entry(langs, textvariable=self.enc_lang2_var, width=6)
+        self.enc_lang2_entry.pack(side="left")
+        ttk.Label(langs, text=" second audio  (e.g. eng, jpn)", foreground="grey").pack(side="left")
+
+        ttk.Label(sp, text="Subtitles:").grid(row=3, column=0, sticky="ne", padx=5, pady=2)
+        self.enc_srt_list = PathListEditor(
+            sp, "Add subtitle files", [("SubRip", "*.srt"), ("All files", "*.*")]
+        )
+        self.enc_srt_list.grid(row=3, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+
+        ttk.Label(sp, text="Poster:").grid(row=4, column=0, sticky="e", padx=5, pady=2)
+        self.enc_poster_var = tk.StringVar(value="")
+        self.enc_poster_entry = ttk.Entry(sp, textvariable=self.enc_poster_var)
+        self.enc_poster_entry.grid(row=4, column=1, sticky="ew", padx=5, pady=2)
+        self.enc_poster_btn = ttk.Button(
+            sp, text="Browse...",
+            command=lambda: self.browse_file(
+                self.enc_poster_var, [("Image", "*.png *.jpg *.jpeg"), ("All files", "*.*")]
+            ),
+        )
+        self.enc_poster_btn.grid(row=4, column=2, padx=5, pady=2)
+
+        # --- more MobiClip tuning, inside the existing Advanced frame ---
+        af = self.enc_adv_frame
+        self.enc_minqp_var = tk.StringVar(value="")
+        self.enc_maxqp_var = tk.StringVar(value="")
+        self.enc_iboost_var = tk.StringVar(value="")
+        self.enc_ithresh_var = tk.StringVar(value="")
+        self.enc_bufsize_var = tk.StringVar(value="")
+        self.enc_me_var = tk.StringVar(value="default")
+        self.enc_dct8_var = tk.StringVar(value="default")
+        self.enc_block_var = tk.StringVar(value="auto")
+        rows = [
+            ("Min / max QP (12-48, blank = auto):", [(self.enc_minqp_var, 6), (self.enc_maxqp_var, 6)]),
+            ("I-frame boost % (blank = 40):", [(self.enc_iboost_var, 6)]),
+            ("Scene-cut sensitivity 0-100 (blank = 90):", [(self.enc_ithresh_var, 6)]),
+            ("Rate buffer (e.g. 400k):", [(self.enc_bufsize_var, 8)]),
+        ]
+        r = 5
+        for text, fields in rows:
+            ttk.Label(af, text=text).grid(row=r, column=0, sticky="e", padx=5, pady=2)
+            box = ttk.Frame(af)
+            box.grid(row=r, column=1, sticky="w", padx=5, pady=2)
+            for var, width in fields:
+                ttk.Entry(box, textvariable=var, width=width).pack(side="left", padx=(0, 6))
+            r += 1
+        for text, var, values in (
+            ("Motion search:", self.enc_me_var, ["default", "dia", "hex", "umh", "esa"]),
+            ("8x8 transform:", self.enc_dct8_var, ["default", "on", "off"]),
+            ("MOFLEX block size:", self.enc_block_var, ["auto", "2048", "4096"]),
+        ):
+            ttk.Label(af, text=text).grid(row=r, column=0, sticky="e", padx=5, pady=2)
+            ttk.Combobox(af, textvariable=var, values=values, state="readonly", width=10).grid(
+                row=r, column=1, sticky="w", padx=5, pady=2
+            )
+            r += 1
+
+        # Everything the Encode tab remembers between runs and saves in presets.
+        self.persist_vars = {
+            "fmt": self.enc_fmt_var, "audio": self.enc_audio_var,
+            "outdir": self.enc_outdir_var, "scale": self.enc_scale_var,
+            "keyframes": self.enc_keyframes_var, "quant": self.enc_quant_var,
+            "audio_rate": self.enc_audio_rate_var, "fps": self.enc_fps_var,
+            "hq": self.enc_hq_var, "roundtrip": self.enc_roundtrip_var,
+            "fast_audio": self.enc_fast_audio_var, "adv": self.enc_adv_toggle_var,
+            "bitrate": self.enc_bitrate_var, "multipass": self.enc_multipass_var,
+            "subme": self.enc_mobi_subme_var, "skip": self.enc_mobi_skip_var,
+            "intra": self.enc_mobi_intra_var,
+            "offset": self.enc_offset_var, "normalize": self.enc_normalize_var,
+            "stereo": self.enc_stereo_var, "max_size_mb": self.enc_maxsize_var,
+            "hdr": self.enc_hdr_var, "jobs": self.enc_jobs_var,
+            "super": self.enc_super_var, "lang": self.enc_lang_var,
+            "lang2": self.enc_lang2_var,
+            "min_qp": self.enc_minqp_var, "max_qp": self.enc_maxqp_var,
+            "i_boost": self.enc_iboost_var, "i_threshold": self.enc_ithresh_var,
+            "buffer": self.enc_bufsize_var, "me": self.enc_me_var,
+            "dct8": self.enc_dct8_var, "block": self.enc_block_var,
+        }
+        # Keys a preset may carry. Paths and per-file choices stay out of it.
+        self.preset_keys = [k for k in self.persist_vars if k not in ("outdir",)]
+
+        self.enc_input_var.trace_add("write", lambda *a: self.schedule_source_probe())
+        for var in (self.enc_maxsize_var, self.enc_bitrate_var, self.enc_audio_var,
+                    self.enc_hq_var, self.enc_quant_var):
+            var.trace_add("write", lambda *a: self.update_size_estimate())
+        self.enc_audio_var.trace_add("write", lambda *a: self.refresh_extra_controls())
+
+        # Rows hidden by format are tracked here, not in enc_conditional_widgets,
+        # because some depend on the chosen audio codec as well as the format.
+        self.refresh_super_state()
+
+    # ----- visibility ----------------------------------------------------
+
+    def refresh_extra_controls(self):
+        if not hasattr(self, "enc_src_frame"):
+            return
+        fmt = self.current_format()
+        audio_only = fmt in AUDIO_ONLY_FORMATS
+        has_audio = (
+            fmt not in self.NO_AUDIO_FORMATS
+            and self.enc_audio_var.get() != "none"
+            and self.audio_options.get(fmt, ["none"]) != ["none"]
+        )
+
+        def show(widgets, on):
+            for w in widgets:
+                w.grid() if on else w.grid_remove()
+
+        show((self.enc_track_label, self.enc_track_cb, self.enc_offset_label,
+              self.enc_offset_entry, self.enc_offset_hint, self.enc_normalize_chk), has_audio)
+        show((self.enc_stereo_label, self.enc_stereo_cb, self.enc_stereo_hint),
+             fmt in self.STEREO_FORMATS)
+        show((self.enc_maxsize_label, self.enc_maxsize_entry, self.enc_fat32_btn,
+              self.enc_est_label), fmt in self.MOBI_SIZE_FORMATS)
+        show((self.enc_hdr_label, self.enc_hdr_cb, self.enc_hdr_hint), not audio_only)
+        show((self.enc_jobs_label, self.enc_jobs_entry, self.enc_jobs_hint),
+             fmt in self.JOBS_FORMATS)
+        out_any = (fmt in self.MOBI_SIZE_FORMATS) or (not audio_only) or (fmt in self.JOBS_FORMATS)
+        self.enc_out_frame.grid() if out_any else self.enc_out_frame.grid_remove()
+        self.enc_super_frame.grid() if fmt in self.SUPER_FORMATS else self.enc_super_frame.grid_remove()
+        self.update_size_estimate()
+
+    def refresh_super_state(self):
+        on = self.enc_super_var.get()
+        state = "normal" if on else "disabled"
+        for w in (self.enc_audio2_entry, self.enc_audio2_btn, self.enc_lang_entry,
+                  self.enc_lang2_entry, self.enc_poster_entry, self.enc_poster_btn):
+            w.config(state=state)
+        self.enc_srt_list.set_enabled(on)
+
+    # ----- source probing ---------------------------------------------------
+
+    def schedule_source_probe(self):
+        if self._src_job is not None:
+            self.after_cancel(self._src_job)
+        self._src_job = self.after(400, self._start_source_probe)
+
+    def _start_source_probe(self):
+        self._src_job = None
+        path = self.enc_input_var.get().strip()
+        if not (path and os.path.isfile(path)):
+            self._apply_source(path, None)
+            return
+        self.enc_src_label.config(text="reading...")
+
+        def work():
+            info = None
+            try:
+                import encode as _enc
+
+                info = mt.probe_source(_enc.FFPROBE, path, _enc.input_fmt(path))
+            except Exception:
+                info = None
+            self.after(0, self._apply_source, path, info)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_source(self, path, info):
+        if path != self.enc_input_var.get().strip():
+            return  # the user has moved on
+        self.src_info = info
+        if info is None:
+            self.enc_src_label.config(
+                text="choose an input file" if not path else "could not read this file",
+                foreground="grey",
+            )
+            self.enc_track_cb.config(values=["Default"])
+            self.enc_track_var.set("Default")
+        else:
+            warn = ""
+            if info["hdr"]:
+                try:
+                    import encode as _enc
+
+                    if "zscale" not in mt.available_filters(_enc.FFENC):
+                        warn = "  — this ffmpeg cannot tone-map HDR (no zscale)"
+                except Exception:
+                    pass
+            self.enc_src_label.config(text=mt.describe_source(info) + warn, foreground="")
+            tracks = ["Default"] + [mt.describe_audio_track(t) for t in info["audio"]]
+            self.enc_track_cb.config(values=tracks)
+            if self.enc_track_var.get() not in tracks:
+                self.enc_track_var.set("Default")
+        self.update_size_estimate()
+
+    def selected_track(self):
+        """0-based audio track chosen in the dropdown, or -1 for the default."""
+        values = list(self.enc_track_cb.cget("values"))
+        cur = self.enc_track_var.get()
+        if cur in values and values.index(cur) > 0:
+            return values.index(cur) - 1
+        return -1
+
+    def update_size_estimate(self):
+        if not hasattr(self, "enc_est_label"):
+            return
+        text = ""
+        dur = (self.src_info or {}).get("duration") if self.src_info else None
+        limit = self.enc_maxsize_var.get().strip()
+        try:
+            limit_mb = float(limit) if limit else 0
+        except ValueError:
+            limit_mb = 0
+        if limit_mb and dur:
+            bps = mt.video_bps_for_budget(int(limit_mb * 1048576), dur, 0)
+            text = (f"{mt.format_clock(dur)} of video in {limit_mb:g} MiB ≈ "
+                    f"{mt.format_bps(bps)}b/s overall; re-encodes lower if it doesn't fit")
+        elif limit_mb:
+            text = f"output will be kept under {limit_mb:g} MiB"
+        else:
+            rate = self.enc_bitrate_var.get().strip().lower()
+            m = re.fullmatch(r"(\d+(?:\.\d+)?)([km]?)", rate)
+            if m and dur:
+                bps = float(m.group(1)) * {"": 1, "k": 1000, "m": 1_000_000}[m.group(2)]
+                text = f"≈ {bps * dur / 8 / 1048576:.1f} MiB of video at {rate}"
+        self.enc_est_label.config(text=text)
+
+    # ----- command flags ------------------------------------------------------
+
+    def add_extra_encode_flags(self, cmd, fmt, audio):
+        """Append the flags for the controls added by setup_extra_encode_controls."""
+        has_audio = (
+            fmt not in self.NO_AUDIO_FORMATS
+            and audio != "none"
+            and self.audio_options.get(fmt, ["none"]) != ["none"]
+        )
+        if has_audio:
+            track = self.selected_track()
+            if track >= 0:
+                cmd.extend(["--audio-track", str(track)])
+            off = self.enc_offset_var.get().strip()
+            if off and off not in ("0", "+0", "-0"):
+                try:
+                    cmd.extend(["--audio-offset-ms", str(int(off))])
+                except ValueError:
+                    pass
+            if self.enc_normalize_var.get():
+                cmd.append("--normalize-audio")
+        if fmt in self.STEREO_FORMATS and self.enc_stereo_var.get() != "auto":
+            cmd.extend(["--stereo", self.enc_stereo_var.get()])
+        if fmt in self.MOBI_SIZE_FORMATS:
+            size = self.enc_maxsize_var.get().strip()
+            if size:
+                try:
+                    if float(size) > 0:
+                        cmd.extend(["--max-size-mb", size])
+                except ValueError:
+                    pass
+        if fmt not in AUDIO_ONLY_FORMATS and self.enc_hdr_var.get() != "auto":
+            cmd.extend(["--hdr-mode", self.enc_hdr_var.get()])
+        if fmt in self.JOBS_FORMATS:
+            jobs = self.enc_jobs_var.get().strip()
+            if jobs and jobs != "0":
+                cmd.extend(["--jobs", jobs])
+        if fmt in self.SUPER_FORMATS and self.enc_super_var.get():
+            cmd.append("--super")
+            a2 = self.enc_audio2_var.get().strip()
+            if a2:
+                cmd.extend(["--audio2", a2])
+            for key, flag in (("lang", "--lang"), ("lang2", "--lang2")):
+                v = self.persist_vars[key].get().strip()
+                if v:
+                    cmd.extend([flag, v])
+            for srt in self.enc_srt_list.get():
+                cmd.extend(["--srt", srt])
+            poster = self.enc_poster_var.get().strip()
+            if poster:
+                cmd.extend(["--poster", poster])
+        if fmt in ("mo", "moflex", "moflex3d", "mods") and self.enc_adv_toggle_var.get():
+            for var, flag in (
+                (self.enc_minqp_var, "--min-qp"), (self.enc_maxqp_var, "--max-qp"),
+                (self.enc_iboost_var, "--i-boost"), (self.enc_ithresh_var, "--i-threshold"),
+                (self.enc_bufsize_var, "--buffer-size"),
+            ):
+                v = var.get().strip()
+                if v:
+                    cmd.extend([flag, v])
+            if self.enc_me_var.get() != "default":
+                cmd.extend(["--me", self.enc_me_var.get()])
+            if self.enc_dct8_var.get() != "default":
+                cmd.extend(["--8x8dct", "1" if self.enc_dct8_var.get() == "on" else "0"])
+            if fmt in ("moflex", "moflex3d") and self.enc_block_var.get() != "auto":
+                cmd.extend(["--mo-block", self.enc_block_var.get()])
+
+    # ----- saved settings and presets ------------------------------------------
+
+    def snapshot_settings(self, keys=None):
+        out = {}
+        for k in keys or self.persist_vars:
+            try:
+                out[k] = self.persist_vars[k].get()
+            except tk.TclError:
+                pass
+        out["srt"] = self.enc_srt_list.get()
+        out["audio2"] = self.enc_audio2_var.get()
+        out["poster"] = self.enc_poster_var.get()
+        return out
+
+    def apply_settings(self, data):
+        """Set the form from a dict of persist_vars keys; unknown keys are ignored."""
+        if not isinstance(data, dict):
+            return
+        # Format first: changing it resets the audio choice and shows/hides rows.
+        if "fmt" in data and data["fmt"] in self.formats_map:
+            self.enc_fmt_var.set(data["fmt"])
+            self.on_enc_format_change()
+        for k, v in data.items():
+            if k in ("fmt", "adv") or k not in self.persist_vars:
+                continue
+            var = self.persist_vars[k]
+            try:
+                if isinstance(var, tk.BooleanVar):
+                    var.set(bool(v))
+                else:
+                    var.set(str(v))
+            except tk.TclError:
+                pass
+        if "adv" in data:
+            self.enc_adv_toggle_var.set(bool(data["adv"]))
+        if "srt" in data and isinstance(data["srt"], list):
+            self.enc_srt_list.set([p for p in data["srt"] if isinstance(p, str)])
+        for key, var in (("audio2", self.enc_audio2_var), ("poster", self.enc_poster_var)):
+            if isinstance(data.get(key), str):
+                var.set(data[key])
+        self.on_toggle_advanced()
+        self.refresh_super_state()
+        self.refresh_extra_controls()
+
+    def load_settings(self):
+        store = mt.JsonStore("gui.json")
+        data = store.load()
+        # Remembered form state minus anything that points at a specific file
+        # that may be gone.
+        for k in ("audio2", "poster"):
+            if k in data and not os.path.isfile(str(data[k])):
+                data.pop(k)
+        if isinstance(data.get("srt"), list):
+            data["srt"] = [p for p in data["srt"] if os.path.isfile(str(p))]
+        self.apply_settings(data)
+
+    def save_settings(self):
+        mt.JsonStore("gui.json").save(self.snapshot_settings())
+
+    def on_close(self):
+        if self.busy():
+            if not messagebox.askyesno(
+                "mobipeg", "A job is still running. Stop it and quit?"
+            ):
+                return
+            self.stop_process()
+        try:
+            self.save_settings()
+            self.queue_tab.save()
+        finally:
+            self.destroy()
+
+    def rebuild_preset_menu(self):
+        m = self.preset_menu
+        m.delete(0, tk.END)
+        for name in mt.BUILTIN_PRESETS:
+            m.add_command(label=name, command=lambda n=name: self.apply_builtin_preset(n))
+        users = self.preset_store.load()
+        if users:
+            m.add_separator()
+            for name in sorted(users):
+                m.add_command(label=name, command=lambda n=name: self.apply_user_preset(n))
+        m.add_separator()
+        m.add_command(label="Save current settings as preset...", command=self.save_user_preset)
+        if users:
+            sub = tk.Menu(m, tearoff=0)
+            for name in sorted(users):
+                sub.add_command(label=name, command=lambda n=name: self.delete_user_preset(n))
+            m.add_cascade(label="Delete preset", menu=sub)
+
+    def apply_builtin_preset(self, name):
+        p = dict(mt.BUILTIN_PRESETS[name])
+        data = {
+            "hq": p["hq"], "quant": p["quant"], "subme": p["subme"], "skip": p["skip"],
+            "bitrate": p["bitrate"], "multipass": p["multipass"],
+            "max_size_mb": p["max_size_mb"],
+        }
+        # subme/skip/bitrate are only sent with the Advanced section on.
+        data["adv"] = bool(p["bitrate"] or p["subme"] or p["skip"] != "512") and not p["hq"]
+        # Fields first, then hq, so a preset that is not HQ stays that way.
+        self.apply_settings({k: v for k, v in data.items() if k != "hq"})
+        self.enc_hq_var.set(bool(p["hq"]))
+        self.set_status(f"Preset: {name}")
+
+    def apply_user_preset(self, name):
+        data = self.preset_store.load().get(name)
+        if data:
+            self.apply_settings(data)
+            self.set_status(f"Preset: {name}")
+
+    def save_user_preset(self):
+        from tkinter import simpledialog
+
+        name = simpledialog.askstring("Save preset", "Preset name:", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if name in mt.BUILTIN_PRESETS:
+            messagebox.showwarning("Preset", "That name is used by a built-in preset.")
+            return
+        users = self.preset_store.load()
+        snap = self.snapshot_settings(self.preset_keys)
+        # A preset describes encoder settings, not which files were chosen.
+        for k in ("srt", "audio2", "poster"):
+            snap.pop(k, None)
+        users[name] = snap
+        if self.preset_store.save(users):
+            self.set_status(f"Saved preset: {name}")
+        else:
+            messagebox.showerror("Preset", "Could not write the preset file.")
+
+    def delete_user_preset(self, name):
+        users = self.preset_store.load()
+        if name in users and messagebox.askyesno("Delete preset", f'Delete "{name}"?'):
+            users.pop(name)
+            self.preset_store.save(users)
+
+    # ------------------------------------------------------------------
+    # Running processes: progress, Stop, follow-up buttons
+    # ------------------------------------------------------------------
+
+    def build_status_bar(self, parent):
+        bar = ttk.Frame(parent)
+        bar.pack(fill=tk.X, pady=(8, 0))
+        bar.columnconfigure(1, weight=1)
+        self.progress = ttk.Progressbar(bar, mode="determinate", maximum=100, length=160)
+        self.progress.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(bar, textvariable=self.status_var).grid(row=0, column=1, sticky="ew")
+        self.after_btns = ttk.Frame(bar)
+        self.after_btns.grid(row=0, column=2, sticky="e")
+        self.stop_btn = ttk.Button(self.after_btns, text="■ Stop", command=self.stop_process)
+        self.stop_btn.pack(side="left", padx=2)
+        self.stop_btn.state(["disabled"])
+        self.show_btn = ttk.Button(self.after_btns, text="Show output", command=self.show_last_output)
+        self.inspect_out_btn = ttk.Button(self.after_btns, text="Inspect", command=self.inspect_last_output)
+        self.cia_out_btn = ttk.Button(self.after_btns, text="Package CIA", command=self.cia_last_output)
+        self._proc = None
+        self._stopped = False
+        self.last_output = ""
+        self._pending_run = None
+
+    def set_status(self, text):
+        self.status_var.set(text)
+
+    def busy(self):
+        return self._proc is not None
+
+    def _set_progress(self, frac, text=None):
+        self.progress.config(mode="determinate")
+        self.progress["value"] = max(0.0, min(frac, 1.0)) * 100
+        if text:
+            self.set_status(text)
+
+    def stop_process(self):
+        if self._proc is not None:
+            self._stopped = True
+            self.append_console("\nStopping...\n")
+            mt.terminate_tree(self._proc)
+
+    def script_cmd(self):
+        return (
+            [sys.executable, "--encode-script"]
+            if getattr(sys, "frozen", False)
+            else [sys.executable, ENCODE_SCRIPT]
+        )
+
+    def select_tab(self, frame):
+        try:
+            self.notebook.select(frame)
+        except tk.TclError:
+            pass
+
+    def _hide_followups(self):
+        for b in (self.show_btn, self.inspect_out_btn, self.cia_out_btn):
+            b.pack_forget()
+
+    def offer_followups(self, path):
+        """After a successful encode: reveal / inspect / package buttons."""
+        self._hide_followups()
+        self.last_output = path
+        if not path or not os.path.exists(path):
+            return
+        self.show_btn.pack(side="left", padx=2)
+        if path.lower().endswith(".moflex"):
+            self.inspect_out_btn.pack(side="left", padx=2)
+            self.cia_out_btn.pack(side="left", padx=2)
+
+    def show_last_output(self):
+        path = self.last_output
+        if not path or not os.path.exists(path):
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", path])
+            elif os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(path)])
+        except OSError as e:
+            messagebox.showerror("Show output", str(e))
+
+    def inspect_last_output(self):
+        self.inspect_tab.set_input(self.last_output)
+        self.select_tab(self.inspect_tab)
+        self.inspect_tab.run()
+
+    def cia_last_output(self):
+        self.cia_input_var.set(self.last_output)
+        self.select_tab(self.cia_frame)
+
+    def start_process(self, cmd, buttons=None, on_done=None, clear=True, title="",
+                      duration=None, probe_input=None, separator=False):
+        """Run `cmd` in the background, streaming its output to the console.
+
+        buttons    widgets disabled while it runs
+        on_done    callback(returncode, stopped) on the Tk thread
+        duration   seconds of media, for the progress bar (or probe_input to
+                   have it read from a file once the job starts)
+        """
+        if self._proc is not None:
+            messagebox.showinfo("mobipeg", "Another job is already running.")
+            return False
+        buttons = list(buttons or [])
+        for b in buttons:
+            b.config(state="disabled")
+        self.stop_btn.state(["!disabled"])
+        self._hide_followups()
+        self._stopped = False
+        self._set_progress(0.0, title or "Working...")
+        self.console.config(state="normal")
+        if clear:
+            self.console.delete(1.0, tk.END)
+        elif separator:
+            self.console.insert(tk.END, "\n" + "-" * 60 + "\n")
+        self.console.config(state="disabled")
+        self.append_console(f"$ {shlex.join(cmd)}\n\n")
+
+        def run_thread():
+            code = -1
+            total = duration
+            # --windowed builds have no console, so on Linux/Windows/macOS an
+            # uncaught exception here (e.g. a bundled binary that lost its
+            # executable bit, or the frozen re-exec failing) would otherwise
+            # vanish silently: the thread dies, the Run button never
+            # re-enables, and the user sees the GUI simply do nothing.
+            try:
+                if total is None and probe_input:
+                    try:
+                        import encode as _enc
+
+                        total = _enc.probe_duration(probe_input)
+                    except Exception:
+                        total = None
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    # The child's stdout is a pipe, so Python would otherwise
+                    # block-buffer it and the console would stay empty until
+                    # the encode finished; also pin its encoding to match.
+                    env=dict(
+                        os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8"
+                    ),
+                    **mt.popen_kwargs_new_group(),
+                )
+                self._proc = process
+                last = 0.0
+                for line in process.stdout:
+                    self.after(0, self.append_console, line)
+                    sec = mt.parse_progress_seconds(line)
+                    if sec is not None and total:
+                        frac = min(sec / total, 1.0)
+                        if abs(frac - last) >= 0.005 or frac in (0.0, 1.0):
+                            last = frac
+                            self.after(
+                                0, self._set_progress, frac,
+                                f"{(title + '  ') if title else ''}{frac * 100:.0f}%  "
+                                f"({mt.format_clock(sec)} / {mt.format_clock(total)})",
+                            )
+                    elif line.startswith(">>"):
+                        note = line[2:].strip()
+                        self.after(
+                            0, self.set_status, f"{(title + '  ') if title else ''}{note}"[:140]
+                        )
+
+                process.wait()
+                code = process.returncode
+                self.after(
+                    0,
+                    self.append_console,
+                    f"\nProcess finished with exit code {process.returncode}\n",
+                )
+            except Exception as e:
+                self.after(0, self.append_console, f"\nFailed to run command: {e}\n")
+            finally:
+                self.after(0, finish, code)
+
+        def finish(code):
+            stopped = self._stopped
+            self._proc = None
+            self._stopped = False
+            for b in buttons:
+                b.config(state="normal")
+            self.stop_btn.state(["disabled"])
+            if stopped:
+                self.set_status("Stopped")
+            elif code == 0:
+                self._set_progress(1.0, "Done")
+            else:
+                self.set_status(f"Failed (exit code {code})")
+            if on_done:
+                on_done(code, stopped)
+
+        threading.Thread(target=run_thread, daemon=True).start()
+        return True
+
+    # ------------------------------------------------------------------
+    # Command building shared by Run, Copy command and the queue
+    # ------------------------------------------------------------------
+
+    def current_format(self):
+        return self.formats_map.get(self.enc_fmt_var.get())
+
+    def derived_output_for(self, inp):
+        """Default output path for `inp` with the current format/outdir, or None
+        when the format cannot be queued (it needs a second input)."""
+        fmt = self.current_format()
+        if fmt in ("3ds_camera3d",):
+            return None
+        ext = ENCODE_EXTENSIONS.get(fmt, fmt)
+        outdir = self.enc_outdir_var.get().strip() or os.path.dirname(inp)
+        return os.path.join(outdir, os.path.splitext(os.path.basename(inp))[0] + "." + ext)
+
+    def copy_command(self):
+        inp1 = self.enc_input_var.get().strip()
+        if not inp1:
+            messagebox.showwarning("Warning", "Please select an input file.")
+            return
+        cmd = self.build_encode_cmd(
+            inp1, self.enc_input2_var.get(), self.enc_output_var.get().strip()
+        )
+        if cmd:
+            self.clipboard_clear()
+            self.clipboard_append(shlex.join(cmd))
+            self.set_status("Command copied to the clipboard")
+
+    def add_current_to_queue(self):
+        self.queue_tab.add_current()
+        self.select_tab(self.queue_tab)
 
     def on_toggle_hq(self):
         if self.enc_hq_var.get():
@@ -1042,6 +1866,7 @@ class EncodeGUI(tk.Tk):
         self.enc_audio_cb.config(values=options)
         if self.enc_audio_var.get() not in options:
             self.enc_audio_var.set(options[0])
+        self.refresh_extra_controls()
 
     def browse_file(self, var, filetypes=None):
         filename = filedialog.askopenfilename(
@@ -1174,49 +1999,22 @@ class EncodeGUI(tk.Tk):
         self.console.config(state="disabled")
 
     def execute_cmd(self, cmd, btn):
-        btn.config(state="disabled")
-        self.console.config(state="normal")
-        self.console.delete(1.0, tk.END)
-        self.console.config(state="disabled")
-        self.append_console(f"$ {shlex.join(cmd)}\n\n")
+        """Run `cmd` with `btn` disabled meanwhile (Decode, Play, CIA, Encode)."""
+        ctx, self._pending_run = self._pending_run, None
+        ctx = ctx or {}
+        output = ctx.get("output", "")
 
-        def run_thread():
-            # --windowed builds have no console, so on Linux/Windows/macOS an
-            # uncaught exception here (e.g. a bundled binary that lost its
-            # executable bit, or the frozen re-exec failing) would otherwise
-            # vanish silently: the thread dies, the Run button never
-            # re-enables, and the user sees the GUI simply do nothing.
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                    # The child's stdout is a pipe, so Python would otherwise
-                    # block-buffer it and the console would stay empty until
-                    # the encode finished; also pin its encoding to match.
-                    env=dict(
-                        os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8"
-                    ),
-                )
-                for line in process.stdout:
-                    self.after(0, self.append_console, line)
+        def done(code, stopped):
+            if code == 0 and not stopped and output:
+                self.offer_followups(output)
 
-                process.wait()
-                self.after(
-                    0,
-                    self.append_console,
-                    f"\nProcess finished with exit code {process.returncode}\n",
-                )
-            except Exception as e:
-                self.after(0, self.append_console, f"\nFailed to run command: {e}\n")
-            finally:
-                self.after(0, lambda: btn.config(state="normal"))
-
-        threading.Thread(target=run_thread, daemon=True).start()
+        self.start_process(
+            cmd,
+            buttons=[btn],
+            on_done=done,
+            title=ctx.get("title", ""),
+            duration=ctx.get("duration"),
+        )
 
     def run_encoding(self):
         if not getattr(sys, "frozen", False) and not os.path.exists(ENCODE_SCRIPT):
@@ -1225,23 +2023,36 @@ class EncodeGUI(tk.Tk):
             )
             return
 
-        fmt = self.formats_map.get(self.enc_fmt_var.get())
-        audio = self.enc_audio_var.get()
         inp1 = self.enc_input_var.get()
-        inp2 = self.enc_input2_var.get()
-        scale = self.enc_scale_var.get()
-        outdir = self.enc_outdir_var.get()
-        outfile = self.enc_output_var.get().strip()
-
         if not inp1:
             messagebox.showwarning("Warning", "Please select an input file.")
             return
+        outfile = self.enc_output_var.get().strip()
 
-        cmd = (
-            [sys.executable, "--encode-script"]
-            if getattr(sys, "frozen", False)
-            else [sys.executable, ENCODE_SCRIPT]
-        )
+        cmd = self.build_encode_cmd(inp1, self.enc_input2_var.get(), outfile)
+        if cmd is None:
+            return
+        fmt = self.current_format()
+        # The container extension comes from the format, not from the field.
+        shown = outfile or self.derived_output_for(inp1) or ""
+        if shown:
+            shown = os.path.splitext(shown)[0] + "." + ENCODE_EXTENSIONS.get(fmt, fmt)
+        duration = (self.src_info or {}).get("duration") if self.src_info else None
+        self._pending_run = {
+            "output": shown,
+            "duration": duration,
+            "title": os.path.basename(inp1),
+        }
+        self.execute_cmd(cmd, self.enc_run_btn)
+
+    def build_encode_cmd(self, inp1, inp2, outfile):
+        """The encode.py command line for the Encode tab's current settings."""
+        fmt = self.formats_map.get(self.enc_fmt_var.get())
+        audio = self.enc_audio_var.get()
+        scale = self.enc_scale_var.get()
+        outdir = self.enc_outdir_var.get()
+
+        cmd = self.script_cmd()
         cmd.extend([fmt, audio, inp1])
 
         if fmt in ("moflex3d", "topos3d", "topos3d_mpeg2", "3ds_camera3d"):
@@ -1380,9 +2191,9 @@ class EncodeGUI(tk.Tk):
             if self.enc_flip_loop_var.get():
                 cmd.append("--flipnote-loop")
 
+        self.add_extra_encode_flags(cmd, fmt, audio)
         self.add_ffargs(cmd, self.enc_ffargs_var)
-
-        self.execute_cmd(cmd, self.enc_run_btn)
+        return cmd
 
     @staticmethod
     def add_ffargs(cmd, var):
@@ -1540,6 +2351,28 @@ class EncodeGUI(tk.Tk):
         )
         self.cia_run_btn.grid(row=0, column=0)
 
+        more = CollapsibleSection(self.cia_frame, "More options")
+        more.grid(row=9, column=0, columnspan=3, sticky="ew", padx=5)
+        more.body.columnconfigure(1, weight=1)
+        self.cia_long_title_var = tk.StringVar()
+        self.cia_unique_id_var = tk.StringVar()
+        self.cia_product_code_var = tk.StringVar(value="VDIJ")
+        for r, (text, var, hint) in enumerate(
+            (
+                ("Long title:", self.cia_long_title_var,
+                 "title bar of the video applet; blank = the title above"),
+                ("Title ID (hex):", self.cia_unique_id_var,
+                 "unique part, C0000-EFFFF; blank = random"),
+                ("Product code:", self.cia_product_code_var,
+                 "four letters, default VDIJ"),
+            )
+        ):
+            ttk.Label(more.body, text=text).grid(row=r, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(more.body, textvariable=var).grid(row=r, column=1, sticky="ew", padx=5, pady=2)
+            ttk.Label(more.body, text=hint, foreground="grey").grid(
+                row=r, column=2, sticky="w", padx=5
+            )
+
         self.cia_input_var.trace_add("write", lambda *a: self.on_cia_input_changed())
 
     def on_cia_input_changed(self):
@@ -1600,9 +2433,18 @@ class EncodeGUI(tk.Tk):
         title = self.cia_title_var.get().strip()
         if title:
             cmd.extend(["--cia-title", title])
+        long_title = self.cia_long_title_var.get().strip()
+        if long_title:
+            cmd.extend(["--cia-long-title", long_title])
         publisher = self.cia_publisher_var.get().strip()
         if publisher:
             cmd.extend(["--cia-publisher", publisher])
+        unique_id = self.cia_unique_id_var.get().strip()
+        if unique_id:
+            cmd.extend(["--cia-unique-id", unique_id])
+        code = self.cia_product_code_var.get().strip()
+        if code and code != "VDIJ":
+            cmd.extend(["--cia-product-code", code])
         icon = self.cia_icon_var.get().strip()
         if icon:
             cmd.extend(["--cia-icon", icon])

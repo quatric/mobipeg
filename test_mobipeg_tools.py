@@ -193,6 +193,93 @@ class Store(unittest.TestCase):
             self.assertEqual(set(p), keys, name)
 
 
+class Progress(unittest.TestCase):
+    def test_parse_progress(self):
+        self.assertAlmostEqual(
+            mt.parse_progress_seconds("frame= 10 fps=0 time=00:01:02.50 bitrate=1"), 62.5
+        )
+        self.assertEqual(mt.parse_progress_seconds("time=01:00:00.00"), 3600.0)
+        self.assertIsNone(mt.parse_progress_seconds("size=N/A time=N/A"))
+        self.assertIsNone(mt.parse_progress_seconds(">> pass 1/2"))
+
+    def test_clock(self):
+        self.assertEqual(mt.format_clock(65), "1:05")
+        self.assertEqual(mt.format_clock(3725), "1:02:05")
+        self.assertEqual(mt.format_clock(None), "?")
+
+    def test_describe_source(self):
+        info = {"duration": 3725.0, "width": 1920, "height": 1080, "fps": 23.976,
+                "hdr": "pq", "audio": [{}, {}]}
+        text = mt.describe_source(info)
+        for part in ("1920x1080", "23.976 fps", "1:02:05", "HDR (PQ)", "2 audio tracks"):
+            self.assertIn(part, text)
+
+
+class QueueModel(unittest.TestCase):
+    def make(self):
+        q = mt.JobQueue()
+        for n in "abc":
+            q.add(["cmd", n], n, output=n + ".out")
+        return q
+
+    def test_order_and_status(self):
+        q = self.make()
+        self.assertEqual(q.next_pending()["label"], "a")
+        q.set_status(1, mt.QUEUE_RUNNING)
+        self.assertEqual(q.next_pending()["label"], "b")
+        q.set_status(1, mt.QUEUE_DONE)
+        q.set_status(2, mt.QUEUE_FAILED, "exit 1")
+        self.assertEqual(q.counts(), {"done": 1, "failed": 1, "pending": 1})
+        q.retry_failed()
+        self.assertEqual(q.get(2)["status"], mt.QUEUE_PENDING)
+        q.clear_finished()
+        self.assertEqual([j["label"] for j in q.jobs], ["b", "c"])
+
+    def test_move_and_remove(self):
+        q = self.make()
+        q.move([3], -1)
+        self.assertEqual([j["label"] for j in q.jobs], ["a", "c", "b"])
+        q.move([1], -1)  # already first: no change
+        self.assertEqual([j["label"] for j in q.jobs], ["a", "c", "b"])
+        q.move([1, 2], 1)  # a moves down; b is already last
+        self.assertEqual([j["label"] for j in q.jobs][-1], "b")
+        q.set_status(1, mt.QUEUE_RUNNING)
+        q.remove([1, 2])  # a is running so it stays; b goes
+        self.assertEqual({j["label"] for j in q.jobs}, {"a", "c"})
+
+    def test_persistence(self):
+        q = self.make()
+        q.set_status(1, mt.QUEUE_RUNNING)
+        q.set_status(2, mt.QUEUE_DONE)
+        r = mt.JobQueue.from_list(json.loads(json.dumps(q.to_list())))
+        self.assertEqual(r.get(1)["status"], mt.QUEUE_PENDING)  # was running
+        self.assertEqual(r.get(2)["status"], mt.QUEUE_DONE)
+        self.assertEqual(r.add(["x"], "d")["id"], 4)
+        self.assertEqual(mt.JobQueue.from_list("garbage").jobs, [])
+        self.assertEqual(mt.JobQueue.from_list([{"id": "x"}, 5]).jobs, [])
+
+
+@unittest.skipUnless(HAVE_BINARIES, "needs the repo's ffprobe")
+class ProbeSource(unittest.TestCase):
+    def test_probe_clip(self):
+        with tempfile.TemporaryDirectory() as d:
+            clip = os.path.join(d, "c.mkv")
+            subprocess.run(
+                [REAL_FFMPEG, "-nostdin", "-y", "-v", "error",
+                 "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=2",
+                 "-f", "lavfi", "-i", "sine=duration=2",
+                 "-c:v", "mpeg4", "-c:a", "aac", clip],
+                check=True,
+            )
+            info = mt.probe_source(REAL_FFPROBE, clip)
+            self.assertEqual((info["width"], info["height"]), (320, 180))
+            self.assertAlmostEqual(info["fps"], 25.0, places=1)
+            self.assertAlmostEqual(info["duration"], 2.0, delta=0.3)
+            self.assertEqual(len(info["audio"]), 1)
+            self.assertIsNone(info["hdr"])
+        self.assertIsNone(mt.probe_source(REAL_FFPROBE, "/nonexistent")["hdr"])
+
+
 STUB = textwrap.dedent(
     """\
     #!/usr/bin/env python3

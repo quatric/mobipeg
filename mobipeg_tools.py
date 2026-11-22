@@ -260,6 +260,88 @@ def hdr_tonemap_chain(mode, filters):
     return chain, None
 
 
+def _fps_value(text):
+    try:
+        if "/" in text:
+            a, b = text.split("/")
+            return float(a) / float(b) if float(b) else 0.0
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def probe_source(ffprobe, path, input_args=()):
+    """One ffprobe call summarising an input for the GUI.
+
+    Returns {"duration", "width", "height", "fps", "hdr", "audio": [track...]}
+    with None/empty values for anything that could not be read.
+    """
+    info = {"duration": None, "width": 0, "height": 0, "fps": 0.0, "hdr": None,
+            "video_codec": "", "audio": []}
+    try:
+        p = _run(
+            [ffprobe, "-v", "error"]
+            + list(input_args)
+            + [
+                "-show_entries",
+                "format=duration:stream=index,codec_type,codec_name,width,height,"
+                "avg_frame_rate,color_transfer,channels,sample_rate:"
+                "stream_tags=language,title",
+                "-of",
+                "json",
+                path,
+            ]
+        )
+        data = json.loads(p.stdout or "{}")
+    except (OSError, ValueError):
+        return info
+    try:
+        info["duration"] = float((data.get("format") or {}).get("duration"))
+    except (TypeError, ValueError):
+        pass
+    n_audio = 0
+    for s in data.get("streams", []):
+        kind = s.get("codec_type")
+        if kind == "video" and not info["width"]:
+            info["width"] = int(s.get("width") or 0)
+            info["height"] = int(s.get("height") or 0)
+            info["fps"] = _fps_value(s.get("avg_frame_rate", ""))
+            info["video_codec"] = s.get("codec_name", "")
+            trc = s.get("color_transfer")
+            info["hdr"] = {"smpte2084": "pq", "arib-std-b67": "hlg"}.get(trc)
+        elif kind == "audio":
+            tags = s.get("tags") or {}
+            info["audio"].append(
+                {
+                    "track": n_audio,
+                    "stream_index": s.get("index"),
+                    "codec": s.get("codec_name", "?"),
+                    "channels": s.get("channels") or 0,
+                    "sample_rate": int(s.get("sample_rate") or 0),
+                    "language": tags.get("language", ""),
+                    "title": tags.get("title", ""),
+                }
+            )
+            n_audio += 1
+    return info
+
+
+def describe_source(info):
+    """One-line summary of probe_source() output."""
+    if not info or not info.get("width"):
+        return "no video stream found" if info is not None else "unreadable"
+    bits = [f"{info['width']}x{info['height']}"]
+    if info["fps"]:
+        bits.append(f"{info['fps']:.3f}".rstrip("0").rstrip(".") + " fps")
+    if info["duration"]:
+        bits.append(format_clock(info["duration"]))
+    if info["hdr"]:
+        bits.append("HDR (" + ("PQ" if info["hdr"] == "pq" else "HLG") + ")")
+    n = len(info["audio"])
+    bits.append(f"{n} audio track{'s' if n != 1 else ''}")
+    return "  ·  ".join(bits)
+
+
 # --------------------------------------------------------------------------
 # Output size budget
 # --------------------------------------------------------------------------
@@ -576,3 +658,175 @@ BUILTIN_PRESETS = {
         "bitrate": "", "multipass": False, "max_size_mb": "4000",
     },
 }
+
+
+# --------------------------------------------------------------------------
+# Progress parsing and process control (GUI)
+# --------------------------------------------------------------------------
+
+_TIME_RE = re.compile(r"\btime=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def parse_progress_seconds(line):
+    """Seconds of media encoded so far, from an ffmpeg status line, or None."""
+    m = _TIME_RE.search(line)
+    if not m:
+        return None
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def format_clock(seconds):
+    """H:MM:SS (or M:SS) for a duration in seconds."""
+    if seconds is None or seconds < 0:
+        return "?"
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def popen_kwargs_new_group():
+    """Popen options that put a child (and the ffmpeg it spawns) in its own group."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def terminate_tree(proc):
+    """Stop `proc` and everything it started (encode.py launches ffmpeg)."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+            )
+        else:
+            import signal
+
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+
+
+# --------------------------------------------------------------------------
+# Batch queue model
+# --------------------------------------------------------------------------
+
+QUEUE_PENDING, QUEUE_RUNNING, QUEUE_DONE, QUEUE_FAILED, QUEUE_STOPPED = (
+    "pending", "running", "done", "failed", "stopped")
+
+
+class JobQueue:
+    """An ordered list of encode jobs, each a ready-to-run argv.
+
+    The GUI snapshots the Encode tab's settings into `cmd` when a job is added,
+    so later edits to the form do not change queued work. Jobs survive a restart
+    through to_list()/from_list(); one that was running when the app closed
+    comes back as pending.
+    """
+
+    def __init__(self):
+        self.jobs = []
+        self._next_id = 1
+
+    def add(self, cmd, label, output="", duration=None, fmt=""):
+        job = {
+            "id": self._next_id,
+            "cmd": list(cmd),
+            "label": label,
+            "output": output,
+            "duration": duration,
+            "fmt": fmt,
+            "status": QUEUE_PENDING,
+            "detail": "",
+        }
+        self._next_id += 1
+        self.jobs.append(job)
+        return job
+
+    def get(self, job_id):
+        for j in self.jobs:
+            if j["id"] == job_id:
+                return j
+        return None
+
+    def next_pending(self):
+        for j in self.jobs:
+            if j["status"] == QUEUE_PENDING:
+                return j
+        return None
+
+    def set_status(self, job_id, status, detail=""):
+        j = self.get(job_id)
+        if j:
+            j["status"] = status
+            j["detail"] = detail
+        return j
+
+    def remove(self, ids):
+        ids = set(ids)
+        self.jobs = [j for j in self.jobs
+                     if j["id"] not in ids or j["status"] == QUEUE_RUNNING]
+
+    def clear_finished(self):
+        self.jobs = [j for j in self.jobs
+                     if j["status"] in (QUEUE_PENDING, QUEUE_RUNNING)]
+
+    def retry_failed(self):
+        for j in self.jobs:
+            if j["status"] in (QUEUE_FAILED, QUEUE_STOPPED):
+                j["status"], j["detail"] = QUEUE_PENDING, ""
+
+    def move(self, ids, delta):
+        """Shift the selected, not-running jobs up (delta<0) or down (delta>0)."""
+        ids = set(ids)
+        order = range(len(self.jobs)) if delta < 0 else range(len(self.jobs) - 1, -1, -1)
+        for i in order:
+            j = self.jobs[i]
+            k = i + (-1 if delta < 0 else 1)
+            if j["id"] in ids and j["status"] != QUEUE_RUNNING and 0 <= k < len(self.jobs):
+                other = self.jobs[k]
+                if other["id"] in ids or other["status"] == QUEUE_RUNNING:
+                    continue
+                self.jobs[i], self.jobs[k] = other, j
+
+    def counts(self):
+        out = {}
+        for j in self.jobs:
+            out[j["status"]] = out.get(j["status"], 0) + 1
+        return out
+
+    def to_list(self):
+        return [dict(j) for j in self.jobs]
+
+    @classmethod
+    def from_list(cls, data):
+        q = cls()
+        if not isinstance(data, list):
+            return q
+        for raw in data:
+            try:
+                j = {
+                    "id": int(raw["id"]),
+                    "cmd": [str(x) for x in raw["cmd"]],
+                    "label": str(raw.get("label", "")),
+                    "output": str(raw.get("output", "")),
+                    "duration": raw.get("duration"),
+                    "fmt": str(raw.get("fmt", "")),
+                    "status": raw.get("status", QUEUE_PENDING),
+                    "detail": str(raw.get("detail", "")),
+                }
+            except (KeyError, TypeError, ValueError):
+                continue
+            if j["status"] == QUEUE_RUNNING:
+                j["status"] = QUEUE_PENDING
+            if j["status"] not in (QUEUE_PENDING, QUEUE_DONE, QUEUE_FAILED, QUEUE_STOPPED):
+                j["status"] = QUEUE_PENDING
+            q.jobs.append(j)
+        q._next_id = max([j["id"] for j in q.jobs] + [0]) + 1
+        return q

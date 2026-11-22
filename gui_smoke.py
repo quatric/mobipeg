@@ -302,10 +302,237 @@ def check_decoder_families(gui):
     )
 
 
+def pump(app, until, timeout=20.0):
+    """Run the real Tk main loop until `until()` is true; False on timeout.
+
+    The GUI's worker threads hand results back with app.after(), which Tk only
+    accepts while the main loop is running, so update() polling is not enough.
+    """
+    import time
+
+    state = {"ok": False}
+    end = time.time() + timeout
+
+    def tick():
+        if until():
+            state["ok"] = True
+            app.quit()
+        elif time.time() > end:
+            app.quit()
+        else:
+            app.after(20, tick)
+
+    app.after(20, tick)
+    app.mainloop()
+    return state["ok"]
+
+
+def build(app, fmt_label, **overrides):
+    """The encode command for a format, with the form set by `overrides`."""
+    app.enc_fmt_var.set(fmt_label)
+    app.on_enc_format_change()
+    for key, value in overrides.items():
+        app.persist_vars[key].set(value)
+    probe = os.path.abspath(__file__)
+    return app.build_encode_cmd(probe, "", "")
+
+
+def check_extras(gui):
+    """Controls added on top of the original form: they must reach the argv."""
+    app = gui.app
+    if "execute_cmd" in vars(app):
+        del app.execute_cmd  # check_ffargs stubbed it; restore the real one
+
+    # --- audio / size / HDR / jobs flags (MobiClip 2D) ---
+    app.enc_track_cb.config(values=["Default", "track 0", "track 1"])
+    app.enc_track_var.set("track 1")
+    cmd = build(app, "3DS Mobiclip .moflex (2D)", offset="-120", normalize=True,
+                max_size_mb="64", hdr="hable", jobs="2")
+    for flag, value in (("--audio-track", "1"), ("--audio-offset-ms", "-120"),
+                        ("--max-size-mb", "64"), ("--hdr-mode", "hable"),
+                        ("--jobs", "2")):
+        if check(flag in cmd, "moflex: %s missing from %s" % (flag, cmd)):
+            check(cmd[cmd.index(flag) + 1] == value,
+                  "moflex: %s carried %r" % (flag, cmd[cmd.index(flag) + 1]))
+    check("--normalize-audio" in cmd, "moflex: --normalize-audio missing")
+
+    # Defaults must stay off the command line.
+    app.enc_track_var.set("Default")
+    cmd = build(app, "3DS Mobiclip .moflex (2D)", offset="0", normalize=False,
+                max_size_mb="", hdr="auto", jobs="0")
+    for flag in ("--audio-track", "--audio-offset-ms", "--normalize-audio",
+                 "--max-size-mb", "--hdr-mode", "--jobs", "--super"):
+        check(flag not in cmd, "moflex defaults: %s should not be passed (%s)" % (flag, cmd))
+
+    # Audio controls vanish, and their flags with them, when there is no audio.
+    cmd = build(app, "3DS Mobiclip .moflex (2D)", audio="none", offset="250", normalize=True)
+    check("--audio-offset-ms" not in cmd and "--normalize-audio" not in cmd,
+          "audio none: audio flags still passed: %s" % cmd)
+    check(not is_shown(app.enc_offset_entry), "audio none: offset field still shown")
+
+    # --max-size-mb is MobiClip-only; HDR is video-only.
+    cmd = build(app, "DS ActImagine .vx", max_size_mb="10")
+    check("--max-size-mb" not in cmd, "vx must not pass --max-size-mb")
+    app.enc_fmt_var.set("Nintendo DSP-ADPCM .dsp")
+    app.on_enc_format_change()
+    check(not is_shown(app.enc_hdr_cb), "audio-only format shows the HDR control")
+    check(not is_shown(app.enc_out_frame) or not is_shown(app.enc_maxsize_entry),
+          "audio-only format shows size controls")
+
+    # --- Super MOFLEX ---
+    app.enc_super_var.set(True)
+    app.enc_audio2_var.set("/tmp/second.wav")
+    app.enc_lang_var.set("eng")
+    app.enc_lang2_var.set("jpn")
+    app.enc_srt_list.set(["/tmp/a.eng.srt", "/tmp/b.jpn.srt"])
+    app.enc_poster_var.set("/tmp/poster.png")
+    cmd = build(app, "3DS Mobiclip .moflex (2D)")
+    check("--super" in cmd, "super: flag missing")
+    check(cmd.count("--srt") == 2, "super: expected two --srt in %s" % cmd)
+    for flag, value in (("--audio2", "/tmp/second.wav"), ("--lang", "eng"),
+                        ("--lang2", "jpn"), ("--poster", "/tmp/poster.png")):
+        if check(flag in cmd, "super: %s missing" % flag):
+            check(cmd[cmd.index(flag) + 1] == value, "super: %s wrong" % flag)
+    cmd = build(app, "DS Mobiclip .mods")
+    check("--super" not in cmd, "mods must not pass --super")
+    app.enc_super_var.set(False)
+
+    # --- advanced MobiClip options only with the section open ---
+    app.enc_minqp_var.set("14")
+    app.enc_me_var.set("umh")
+    app.enc_dct8_var.set("off")
+    app.enc_block_var.set("2048")
+    app.enc_adv_toggle_var.set(False)
+    cmd = build(app, "3DS Mobiclip .moflex (2D)")
+    check("--min-qp" not in cmd, "advanced closed: --min-qp still passed")
+    app.enc_adv_toggle_var.set(True)
+    cmd = build(app, "3DS Mobiclip .moflex (2D)")
+    for flag, value in (("--min-qp", "14"), ("--me", "umh"), ("--8x8dct", "0"),
+                        ("--mo-block", "2048")):
+        if check(flag in cmd, "advanced: %s missing from %s" % (flag, cmd)):
+            check(cmd[cmd.index(flag) + 1] == value, "advanced: %s wrong" % flag)
+    app.enc_adv_toggle_var.set(False)
+    app.enc_minqp_var.set("")
+    app.enc_me_var.set("default")
+    app.enc_dct8_var.set("default")
+    app.enc_block_var.set("auto")
+
+    # --- presets and saved settings ---
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    app.apply_builtin_preset("Small (700k two-pass)")
+    check(app.enc_bitrate_var.get() == "700k" and app.enc_multipass_var.get(),
+          "preset: bitrate/multipass not applied")
+    check(not app.enc_hq_var.get(), "preset: Highest Quality should be off")
+    cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
+    check("--bitrate" in cmd and "--multipass" in cmd,
+          "preset: advanced flags not sent (%s)" % cmd)
+    app.apply_builtin_preset("Fit 3DS SD (under 4 GiB)")
+    check(app.enc_maxsize_var.get() == "4000", "preset: max size not applied")
+    app.apply_builtin_preset("Best quality (largest file)")
+    check(app.enc_hq_var.get() and app.enc_quant_var.get() == "12",
+          "preset: best quality not applied")
+
+    app.enc_offset_var.set("77")
+    snap = app.snapshot_settings()
+    app.enc_offset_var.set("0")
+    app.apply_settings(snap)
+    check(app.enc_offset_var.get() == "77", "settings: round trip lost the offset")
+    app.apply_settings({"fmt": "no such format", "bogus": 1, "quant": "20"})
+    check(app.enc_quant_var.get() == "20", "settings: unknown keys broke apply")
+    app.enc_offset_var.set("0")
+
+    # --- processes: progress, exit code, stop ---
+    import sys as _sys
+    result = {}
+    ok = app.start_process(
+        [_sys.executable, "-c",
+         "print('>> pass 1/1'); print('frame=1 time=00:00:01.00 bitrate=1')"],
+        buttons=[app.enc_run_btn], duration=2.0, title="t",
+        on_done=lambda code, stopped: result.update(code=code, stopped=stopped),
+    )
+    check(ok, "start_process refused to start")
+    check(pump(app, lambda: "code" in result), "start_process never finished")
+    check(result.get("code") == 0, "start_process exit code %r" % result.get("code"))
+    check(not app.busy(), "start_process left the app busy")
+    check(str(app.enc_run_btn.cget("state")) == "normal", "run button not re-enabled")
+    check(abs(float(app.progress["value"]) - 100.0) < 0.01, "progress should end at 100")
+
+    result.clear()
+    app.start_process(
+        [_sys.executable, "-c", "import time; time.sleep(60)"],
+        on_done=lambda code, stopped: result.update(code=code, stopped=stopped),
+    )
+    pump(app, lambda: app.busy(), 3)
+    import tkinter.messagebox as _mb
+    _info = _mb.showinfo
+    _mb.showinfo = lambda *a, **k: None  # the "already running" notice is modal
+    try:
+        check(not app.start_process([_sys.executable, "-c", "pass"]),
+              "a second job started while one was running")
+    finally:
+        _mb.showinfo = _info
+    app.stop_process()
+    check(pump(app, lambda: "code" in result, 10), "stop_process did not end the job")
+    check(result.get("stopped") is True, "stopped job not reported as stopped")
+
+    # --- queue ---
+    clip = os.path.abspath(__file__)
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    q = app.queue_tab
+    q.queue.jobs[:] = []
+    n = q.add_paths([clip, clip])
+    check(n == 2 and len(q.queue.jobs) == 2, "queue: expected two jobs, got %d" % n)
+    outs = [j["output"] for j in q.queue.jobs]
+    check(len(set(outs)) == 2, "queue: duplicate output names %s" % outs)
+    check(all(j["cmd"][-0 or 0] for j in q.queue.jobs), "queue: empty command")
+    app.enc_fmt_var.set("Nintendo 3DS Camera 3D .avi")
+    app.on_enc_format_change()
+    before = len(q.queue.jobs)
+    import tkinter.messagebox as mb
+    shown = []
+    orig = mb.showwarning
+    mb.showwarning = lambda *a, **k: shown.append(a)
+    try:
+        q.add_paths([clip])
+    finally:
+        mb.showwarning = orig
+    check(len(q.queue.jobs) == before, "queue: a two-input format was queued")
+    q.queue.jobs[:] = []
+    q.refresh()
+
+    # --- inspect tab ---
+    import struct, tempfile
+    d = tempfile.mkdtemp()
+    mo = os.path.join(d, "x.moflex")
+    with open(mo, "wb") as f:
+        for i in range(4):
+            b = bytearray(2048)
+            if i % 2 == 0:
+                b[0:2] = b"\x4c\x32"
+                b[4:12] = struct.pack(">Q", i * 1_000_000)
+                b[12:14] = struct.pack(">H", 2047)
+            f.write(b)
+    os.environ["FFPROBE"] = "/nonexistent/ffprobe"
+    try:
+        app.inspect_tab.set_input(mo)
+        app.inspect_tab.run()
+        check(pump(app, lambda: not app.busy()), "inspect never finished")
+    finally:
+        os.environ.pop("FFPROBE", None)
+    check("OK" in app.inspect_tab.result.cget("text"),
+          "inspect result: %r" % app.inspect_tab.result.cget("text"))
+    check("disabled" not in app.inspect_tab.cia_btn.state(), "CIA hand-off not enabled")
+
+
 def main():
     dump = "--dump" in sys.argv
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, here)
+    # Never read or write the real settings/queue/presets.
+    import tempfile
+    os.environ["MOBIPEG_CONFIG_DIR"] = tempfile.mkdtemp(prefix="mobipeg-smoke-")
 
     try:
         import encode_gui as gui
@@ -334,6 +561,7 @@ def main():
     check_ffargs(gui)
     check_flipnote(gui)
     check_decoder_families(gui)
+    check_extras(gui)
 
     gui.app.destroy()
 
