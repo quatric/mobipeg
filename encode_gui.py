@@ -492,7 +492,7 @@ class EncodeGUI(tk.Tk):
 
         # Row 6: Scale
         self.enc_scale_label = ttk.Label(
-            self.encode_frame, text="Scale (e.g. 384x288; MobiClip uses multiples of 16):"
+            self.encode_frame, text="Scale (e.g. 384x288):"
         )
         self.enc_scale_label.grid(row=7, column=0, sticky="e", padx=5, pady=5)
         self.enc_scale_var = tk.StringVar()
