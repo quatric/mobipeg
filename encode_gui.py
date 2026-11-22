@@ -573,7 +573,7 @@ class EncodeGUI(tk.Tk):
         )
         self.enc_roundtrip_chk.grid(row=14, column=1, sticky="w", padx=5, pady=2)
 
-        # MIVF only, where Highest Quality is hidden, so it takes that row.
+        # MIVF only.
         self.enc_m2y2_var = tk.BooleanVar(value=False)
         self.enc_m2y2_chk = ttk.Checkbutton(
             self.encode_frame,
