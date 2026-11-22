@@ -12,6 +12,8 @@ import tempfile
 import atexit
 from fractions import Fraction
 
+import mobipeg_tools as mt
+
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1060,6 +1062,73 @@ def package_cia(parsed):
     report_outputs(out_cia)
 
 
+def run_inspect(path, parsed):
+    """`inspect` mode: print a MOFLEX preflight report. Returns the exit code."""
+    if not path or not os.path.isfile(path):
+        print(f"input not found: {path or '(none)'}")
+        return 2
+    info = mt.inspect_moflex(
+        path, ffprobe=FFPROBE, ffmpeg=FFENC, decode_check=parsed.decode_check
+    )
+    if parsed.json_out:
+        import json
+
+        print(json.dumps(info, indent=2))
+    else:
+        print(mt.format_inspection(info))
+    return 1 if info["errors"] else 0
+
+
+def audio_plan(inp, parsed, audio, mode_label=""):
+    """Work out the audio track selection and -af chain for one encode.
+
+    Returns (map_spec_or_None, af_chain). Prints what it decided so the GUI
+    console shows it. Nothing is returned for audio='none'.
+    """
+    if audio == "none":
+        return None, ""
+    track = parsed.audio_track
+    sel = None
+    if track >= 0:
+        tracks = mt.list_audio_tracks(FFPROBE, inp, input_fmt(inp))
+        if track >= len(tracks):
+            print(
+                f"error: --audio-track {track} but {inp} has {len(tracks)} audio track(s)"
+            )
+            sys.exit(2)
+        sel = f"0:a:{track}?"
+        print(f"   audio track: {mt.describe_audio_track(tracks[track])}")
+    gain = 0.0
+    if parsed.normalize_audio:
+        peak = mt.measure_peak_db(FFENC, inp, track if track >= 0 else None, input_fmt(inp))
+        gain = mt.normalize_gain_db(peak)
+        if peak is None:
+            print("   normalize: could not measure the audio peak, leaving level alone")
+        else:
+            print(f"   normalize: peak {peak:.1f} dB, applying {gain:+.1f} dB")
+    chain = mt.audio_filter_chain(parsed.audio_offset_ms, gain)
+    if parsed.audio_offset_ms:
+        print(f"   audio offset: {parsed.audio_offset_ms:+d} ms")
+    return sel, chain
+
+
+def hdr_plan(inp, parsed):
+    """Tone-map filter string for `inp`, or '' when none is needed/possible."""
+    if parsed.hdr_mode == "off":
+        return ""
+    kind = mt.detect_hdr(FFPROBE, inp, input_fmt(inp))
+    if not kind and parsed.hdr_mode == "auto":
+        return ""
+    if not kind:
+        print("   (--hdr-mode given, but the source is not tagged HDR; applying anyway)")
+    chain, warning = mt.hdr_tonemap_chain(parsed.hdr_mode, mt.available_filters(FFENC))
+    if warning:
+        print(f"   warning: {warning}")
+        return ""
+    print(f"   HDR ({kind or 'forced'}) -> SDR tone mapping: {parsed.hdr_mode}")
+    return chain
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Encode video/audio for Nintendo formats."
@@ -1068,7 +1137,7 @@ def main():
         "fmt",
         nargs="?",
         default="mo",
-        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, topos, topos3d, topos_mpeg2, topos3d_mpeg2, mivf, bink, bink2, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
+        help="Format (mo, moflex, moflex3d, mods, vx, ty, gba_ads, gba_hydrogen, wii_photo, wii_photo_m4a, nintendo_channel, topos, topos3d, topos_mpeg2, topos3d_mpeg2, mivf, bink, bink2, 3ds_camera, 3ds_camera3d, 3ds_sound, thp, rvid, dpg, hvqm4, fastvideo, factor5, flipnote, flipnote3d) — use 'decode' to decode any supported file including .gba/.mmstr/.3gp/.m4a/.rvid/.h4m/.vid/.ty, 'play' to play one back without writing a file, 'inspect' to run a read-only MOFLEX preflight check on a .moflex, or 'cia' to package an already-encoded .moflex into a 3DS video CIA (see --cia-* flags)",
     )
     parser.add_argument(
         "audio",
@@ -1295,6 +1364,61 @@ def main():
         choices=[0, 1],
         help="MobiClip: allow the 8x8 luma transform (default on). 0 forces 4x4-only.",
     )
+    # --- Audio selection / correction (all video formats and the audio-only ones) ---
+    parser.add_argument(
+        "--list-audio-tracks",
+        dest="list_audio_tracks",
+        action="store_true",
+        help="Print the input's audio tracks (numbered for --audio-track) and exit.",
+    )
+    parser.add_argument(
+        "--audio-track",
+        dest="audio_track",
+        type=int,
+        default=-1,
+        help="Encode this audio track (0-based, as shown by --list-audio-tracks) instead of the container's default. For movies with several languages.",
+    )
+    parser.add_argument(
+        "--audio-offset-ms",
+        dest="audio_offset_ms",
+        type=int,
+        default=0,
+        help="Shift the audio against the video: positive delays it, negative starts it earlier. Use to fix lip-sync.",
+    )
+    parser.add_argument(
+        "--normalize-audio",
+        dest="normalize_audio",
+        action="store_true",
+        help="Scan the chosen audio track and raise quiet audio so its peak reaches -1 dBFS (at most +24 dB). Adjusts peak level, not perceived loudness; adds an analysis pass.",
+    )
+
+    # --- Size and colour ---
+    parser.add_argument(
+        "--max-size-mb",
+        dest="max_size_mb",
+        type=float,
+        default=0,
+        help="MobiClip formats: keep the output under this many MiB. Derives a video bitrate from the duration, then re-encodes at a lower one (up to 4 attempts) until the file fits; fails if it cannot. Overrides --bitrate.",
+    )
+    parser.add_argument(
+        "--hdr-mode",
+        dest="hdr_mode",
+        default="auto",
+        choices=list(mt.HDR_MODES),
+        help="Tone-map HDR (PQ / HLG) sources to BT.709 SDR. auto (default) uses Mobius when the source is HDR and this ffmpeg has zscale; off never tone-maps; the others force that operator. Needs an ffmpeg built with libzimg.",
+    )
+    parser.add_argument(
+        "--decode-check",
+        dest="decode_check",
+        action="store_true",
+        help="inspect mode only: also decode the whole file and report any error ffmpeg prints.",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_out",
+        action="store_true",
+        help="inspect mode only: print the result as JSON.",
+    )
     parser.add_argument(
         "--ffmpeg-args",
         dest="ffmpeg_args",
@@ -1471,6 +1595,19 @@ def main():
         package_cia(parsed)
         return
 
+    if fmt == "inspect":
+        # Read-only MOFLEX preflight; the file is the 'audio' positional, like
+        # decode/play.
+        sys.exit(run_inspect(audio, parsed))
+
+    if parsed.list_audio_tracks:
+        target = input_file if input_file and os.path.isfile(input_file) else audio
+        if not os.path.isfile(target):
+            print(f"input not found: {target}")
+            sys.exit(2)
+        print(mt.format_audio_tracks(mt.list_audio_tracks(FFPROBE, target, input_fmt(target))))
+        return
+
     scale_ovr = parsed.scale
     roundtrip = parsed.roundtrip
     mo_block = parsed.mo_block
@@ -1543,7 +1680,7 @@ def main():
     if parsed.mobi_skip != 512:
         os.environ["MOBI_SKIP"] = str(parsed.mobi_skip)
 
-    if parsed.multipass == 2 and not parsed.bitrate:
+    if parsed.multipass == 2 and not parsed.bitrate and not parsed.max_size_mb:
         parser.error(
             "--multipass 2 needs --bitrate; a constant quantizer has nothing to redistribute"
         )
@@ -1964,6 +2101,10 @@ def main():
                 )
                 sys.exit(2)
 
+        a_sel, af_chain = audio_plan(inp, parsed, audio)
+        hdr_chain = hdr_plan(inp, parsed)
+        hdr3d = ("," + hdr_chain) if hdr_chain else ""
+
         layout = layout_arg
         topos = fmt in TOPOS_FORMATS
         stem = resolve_output_stem(
@@ -1986,6 +2127,8 @@ def main():
             desc = (
                 f"{eyew}x{eyeh} per eye, side-by-side, layout={layout}, audio={audio}"
             )
+
+        eye += hdr3d  # tone-map each eye after its scale (empty unless HDR)
 
         if dual_file:
             print(f">> encoding 3D  L={inp}  R={inp2}  ->  {container}  ({desc})")
@@ -2011,7 +2154,9 @@ def main():
 
         if topos:
             tv, ta = topos_codec_opts(fmt, audio, mobi_bitrate, vx_quant)
-            aud_opts = ([] if audio == "none" else ["-map", "0:a:0?"]) + ta
+            aud_opts = (
+                [] if audio == "none" else mt.merge_af(["-map", a_sel or "0:a:0?"], af_chain)
+            ) + ta
             codec_opts = ["-c:v", cvc] + tv
         else:
             kf_opts = []
@@ -2027,7 +2172,9 @@ def main():
             if audio == "none":
                 aud_opts = ["-an"]
             else:
-                aud_opts = ["-map", "0:a:0?", "-mo_audio", audio]
+                aud_opts = mt.merge_af(
+                    ["-map", a_sel or "0:a:0?", "-mo_audio", audio], af_chain
+                )
             codec_opts = ["-c:v", cvc, "-mo_layout", str(layout)] + kf_opts
         cmd = (
             [FFENC, "-nostdin", "-y"]
@@ -2059,7 +2206,54 @@ def main():
         if chunk_list:
             join_chunks_copy(chunk_list, container, run_cmd) or sys.exit(1)
         else:
-            run_cmd(cmd) or sys.exit(1)
+            max_bytes = (
+                int(parsed.max_size_mb * 1048576) if parsed.max_size_mb > 0 else 0
+            )
+            if max_bytes and topos:
+                print("   warning: --max-size-mb does not apply to Topos output; ignored")
+                max_bytes = 0
+            if max_bytes:
+                dur = probe_duration(inp)
+                if not dur:
+                    print("error: --max-size-mb needs a readable input duration")
+                    sys.exit(2)
+                est_audio = mt.audio_bps_estimate(
+                    audio, audio_rate or probe_audio_rate(inp) or 32000, 2
+                )
+
+                def build_cmd3d(bps):
+                    return (
+                        [FFENC, "-nostdin", "-y"]
+                        + in_args
+                        + ["-filter_complex", filter_str, "-map", "[v]"]
+                        + aud_opts
+                        + codec_opts
+                        + ["-b:v", mt.format_bps(bps)]
+                        + extra_args
+                        + [container]
+                    )
+
+                ok, final_size, _ = mt.fit_to_size(
+                    lambda bps: run_cmd(build_cmd3d(bps)),
+                    container,
+                    max_bytes,
+                    mt.video_bps_for_budget(max_bytes, dur, est_audio),
+                    log=print,
+                )
+                if not ok:
+                    if final_size:
+                        print(
+                            f"error: could not get the output under {parsed.max_size_mb:g} MiB "
+                            f"(best attempt {final_size / 1048576:.2f} MiB)"
+                        )
+                    sys.exit(1)
+            else:
+                run_cmd(cmd) or sys.exit(1)
+        if os.path.isfile(container) and os.path.getsize(container) > mt.FAT32_MAX_BYTES:
+            print(
+                f"warning: {container} is over 4 GiB; FAT32 (the 3DS SD card) cannot "
+                "store it. Re-encode with --max-size-mb 4000."
+            )
 
         if roundtrip:
             print(f">> decoding  {container}  ->  {watch}  (single SBS video, mpeg4)")
@@ -2227,6 +2421,10 @@ def main():
         watch = f"{stem}.wav"
 
         enc_opts = ["-vn"] + list(codecs[choice])
+        a_sel, af_chain = audio_plan(inp, parsed, choice)
+        if a_sel:
+            enc_opts += ["-map", a_sel]
+        enc_opts = mt.merge_af(enc_opts, af_chain)
         # -ar after the codec so it overrides a rate the format pins itself.
         if audio_rate > 0:
             enc_opts.extend(["-ar", str(audio_rate)])
@@ -2293,6 +2491,37 @@ def main():
         sys.exit(2)
     inp = preprocess_input(inp, OUTDIR)
 
+    # Formats whose muxer takes no audio at all must not pay for an analysis
+    # pass or claim a track.
+    no_audio_fmt = fmt in ("hvqm4", "gba_ads", "gba_hydrogen")
+    a_sel, af_chain = audio_plan(inp, parsed, "none" if no_audio_fmt else audio)
+    hdr_chain = hdr_plan(inp, parsed)
+
+    max_bytes = int(parsed.max_size_mb * 1048576) if parsed.max_size_mb > 0 else 0
+    if max_bytes and fmt not in ("mo", "moflex", "smoflex", "super_moflex", "mods"):
+        print("   warning: --max-size-mb only applies to the MobiClip formats; ignored")
+        max_bytes = 0
+    if max_bytes:
+        dur = probe_duration(inp)
+        if not dur:
+            print("error: --max-size-mb needs a readable input duration")
+            sys.exit(2)
+        est_audio = mt.audio_bps_estimate(
+            audio, audio_rate or probe_audio_rate(inp) or 32000, 2
+        )
+        start_bps = mt.video_bps_for_budget(max_bytes, dur, est_audio)
+        mobi_bitrate = mt.format_bps(start_bps)
+        # The size budget decides the bitrate; drop any --bitrate given too.
+        cleaned, skip_next = [], False
+        for tok in mobi_rc:
+            if skip_next:
+                skip_next = False
+            elif tok == "-b:v":
+                skip_next = True
+            else:
+                cleaned.append(tok)
+        mobi_rc[:] = cleaned + ["-b:v", mobi_bitrate]
+
     stem = resolve_output_stem(parsed.output, f"roundtrip_{fmt}_{audio}", OUTDIR)
     # The hvqm4 muxer's registered extension is .h4m (the retail extension),
     # not .hvqm4, and the fastvideo muxer is named "fv" not "fastvideo" --
@@ -2350,9 +2579,9 @@ def main():
                 "super_moflex3d",
             ):
                 if not has_super or not (parsed.audio2 or parsed.srt or parsed.poster):
-                    enc_opts.extend(["-map", "0:v", "-map", "0:a?"])
+                    enc_opts.extend(["-map", "0:v", "-map", a_sel or "0:a?"])
                 else:
-                    enc_opts.extend(["-map", "0:v", "-map", "0:a:0?"])
+                    enc_opts.extend(["-map", "0:v", "-map", a_sel or "0:a:0?"])
             # SX/codebook audio: the mods muxer runs the vx_audio encoder over
             # the PCM itself, in its trailer.  It trains a codebook over the
             # whole stream anyway, and by then the muxer has seen every video
@@ -2518,7 +2747,7 @@ def main():
             enc_opts.extend(
                 [
                     "-map",
-                    "0:a:0?",
+                    a_sel or "0:a:0?",
                     "-c:a",
                     audio,
                     "-b:a",
@@ -2782,6 +3011,15 @@ def main():
         else:
             enc_opts.extend(["-c:a", "adpcm_ima_wav", "-ar", "16000", "-ac", "1"])
 
+    # A chosen audio track on a format whose branch above did not map streams
+    # itself: map the first video stream and the track explicitly.
+    if a_sel and "-map" not in enc_opts and "-an" not in enc_opts:
+        enc_opts.extend(["-map", "0:v:0", "-map", a_sel])
+    # Offset / normalisation gain go through -af (merged with any the format
+    # already carries, e.g. Factor 5's apad).
+    if af_chain and "-an" not in enc_opts:
+        enc_opts = mt.merge_af(enc_opts, af_chain)
+
     # --fps applies to every format: the output frame rate generally has to match
     # the clip being replaced.  A DS VX player clocks video off the audio, so a
     # mismatch plays too slow/fast; .mods DS slots are ~30 fps and a 60 fps stream
@@ -2818,6 +3056,10 @@ def main():
         filters.append(mivf_picture_filter(scale))
     elif scale:
         filters.append(f"scale={scale}")
+    # Tone-map after the downscale: at the 3DS's resolution the float RGB
+    # round trip costs almost nothing, and scale keeps the colour tags.
+    if hdr_chain:
+        filters.append(hdr_chain)
     if fps_filter:
         filters.append(fps_filter)
     if fmt == "flipnote":
@@ -2841,39 +3083,70 @@ def main():
     fps_disp = f", {fps_filter}" if fps_filter else ""
     scale_disp = scale if scale else "source"
 
-    base = (
-        [FFENC, "-nostdin", "-y"]
-        + input_fmt(inp)
-        + ["-i", inp]
-        + extra_inputs
-        + vf
-        + enc_opts
-    )
-    if mobi_passes == 2:
-        # libx264 keeps its own statistics file (x264's psz_stat_out); ffmpeg's
-        # -passlogfile drives avctx->stats_out, which this encoder never fills,
-        # so the file has to be named through -x264-params.
-        statfile = mobi_passlog or (container + ".pass")
-        print(f">> pass 1/2  analysis  ->  {statfile}")
-        run_cmd(
-            base
-            + ["-pass", "1", "-x264-params", f"stats={statfile}"]
-            + extra_args
-            + [container]
-        ) or sys.exit(1)
-        print(">> pass 2/2  encode")
-        run_cmd(
-            base
-            + ["-pass", "2", "-x264-params", f"stats={statfile}"]
-            + extra_args
-            + [container]
-        ) or sys.exit(1)
-        for leftover in (statfile, statfile + ".mbtree", statfile + ".temp"):
-            try:
-                os.remove(leftover)
-            except OSError:
-                pass
+    def base_cmd():
+        return (
+            [FFENC, "-nostdin", "-y"]
+            + input_fmt(inp)
+            + ["-i", inp]
+            + extra_inputs
+            + vf
+            + enc_opts
+        )
+
+    def encode_container():
+        """One whole-file encode of the 2D movie (one or two passes); True on success."""
+        base = base_cmd()
+        if mobi_passes == 2:
+            # libx264 keeps its own statistics file (x264's psz_stat_out); ffmpeg's
+            # -passlogfile drives avctx->stats_out, which this encoder never fills,
+            # so the file has to be named through -x264-params.
+            statfile = mobi_passlog or (container + ".pass")
+            print(f">> pass 1/2  analysis  ->  {statfile}")
+            ok = run_cmd(
+                base
+                + ["-pass", "1", "-x264-params", f"stats={statfile}"]
+                + extra_args
+                + [container]
+            )
+            if ok:
+                print(">> pass 2/2  encode")
+                ok = run_cmd(
+                    base
+                    + ["-pass", "2", "-x264-params", f"stats={statfile}"]
+                    + extra_args
+                    + [container]
+                )
+            for leftover in (statfile, statfile + ".mbtree", statfile + ".temp"):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+            return ok
+        return run_cmd(base + extra_args + [container])
+
+    if max_bytes:
+
+        def encode_at(bps):
+            # mobi_rc put exactly one "-b:v <rate>" pair into enc_opts.
+            i = enc_opts.index("-b:v")
+            enc_opts[i + 1] = mt.format_bps(bps)
+            return encode_container()
+
+        ok, final_size, _ = mt.fit_to_size(
+            encode_at, container, max_bytes, start_bps, log=print
+        )
+        if not ok:
+            if final_size:
+                print(
+                    f"error: could not get the output under {parsed.max_size_mb:g} MiB "
+                    f"(best attempt {final_size / 1048576:.2f} MiB); raise the limit "
+                    "or shorten/scale down the source"
+                )
+            sys.exit(1)
+    elif mobi_passes == 2:
+        encode_container() or sys.exit(1)
     else:
+        base = base_cmd()
         chunk_list = None
         jobs = parsed.jobs if parsed.jobs > 0 else default_jobs(fmt)
         shape = chunk_shape(fmt)
@@ -2915,7 +3188,7 @@ def main():
             k = 1 + extra_inputs.count("-i")
             fo = enc_opts[:vopt_start] + enc_opts[vopt_end:]
             for i in range(len(fo) - 1):
-                if fo[i] == "-map" and fo[i + 1] == "0:v":
+                if fo[i] == "-map" and fo[i + 1] in ("0:v", "0:v:0"):
                     fo[i + 1] = f"{k}:v"
             if "-map" not in fo:
                 fo = (
@@ -2936,6 +3209,13 @@ def main():
             shutil.rmtree(os.path.dirname(chunk_list), True)
         else:
             run_cmd(base + extra_args + [container]) or sys.exit(1)
+
+    if os.path.isfile(container) and os.path.getsize(container) > mt.FAT32_MAX_BYTES:
+        print(
+            f"warning: {container} is {os.path.getsize(container) / 1073741824:.2f} GiB; "
+            "FAT32 (the 3DS SD card) cannot store files of 4 GiB or more. "
+            "Re-encode with --max-size-mb 4000."
+        )
 
     if roundtrip:
         print(f">> decoding  {container}  ->  {watch}  (single binary, mpeg4)")
