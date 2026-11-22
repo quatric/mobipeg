@@ -101,7 +101,11 @@ class ScrollableFrame(ttk.Frame):
 
     def __init__(self, parent, height=560):
         super().__init__(parent)
-        self.canvas = tk.Canvas(self, highlightthickness=0, height=height, borderwidth=0)
+        # yscrollincrement=1 makes scroll "units" pixels, so wheel notches and
+        # trackpad deltas are in the same currency.
+        self.canvas = tk.Canvas(
+            self, highlightthickness=0, height=height, borderwidth=0, yscrollincrement=1
+        )
         self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vbar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -115,6 +119,12 @@ class ScrollableFrame(ttk.Frame):
         # switch two-finger scrolling off over every label and entry.
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.canvas.bind_all(seq, self._on_wheel, add="+")
+        # Tk 9 reports macOS trackpad two-finger scrolling as <TouchpadScroll>,
+        # not <MouseWheel>; older Tk versions simply never fire it.
+        try:
+            self.canvas.bind_all("<TouchpadScroll>", self._on_touchpad, add="+")
+        except tk.TclError:
+            pass
 
     def _on_inner(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -151,11 +161,21 @@ class ScrollableFrame(ttk.Frame):
         elif event.num == 5:
             step = 1
         else:
-            # Trackpads send many small deltas; keep their size, and give a
-            # classic wheel notch (120 on Windows) a sensible step.
             d = event.delta
-            step = -d / 120 if abs(d) >= 120 else (-1 if d > 0 else 1) * max(1, abs(d))
-        self.canvas.yview_scroll(int(step * 3) or (1 if step > 0 else -1), "units")
+            step = -d / 120 if abs(d) >= 120 else (-1 if d > 0 else 1)
+        self.canvas.yview_scroll(int(step * 40) or (1 if step > 0 else -1), "units")
+
+    def _on_touchpad(self, event):
+        if not self.vbar.winfo_ismapped() or not self._pointer_inside(event):
+            return
+        try:
+            _dx, dy = self.tk.splitlist(self.tk.call("tk::PreciseScrollDeltas", event.delta))
+            dy = int(float(dy))
+        except (tk.TclError, ValueError):
+            return
+        if dy:
+            # Positive dy is a finger moving down, which reveals what is above.
+            self.canvas.yview_scroll(-dy, "units")
 
 
 class PathListEditor(ttk.Frame):

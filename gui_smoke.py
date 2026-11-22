@@ -633,6 +633,13 @@ def check_scroll(gui):
     for _ in range(5):
         sc._on_wheel(Ev)
     check(sc.canvas.yview()[0] < before, "scrolling back up did nothing")
+    # Tk 9 trackpad events: a packed delta, positive = fingers down = content up.
+    top = sc.canvas.yview()[0]
+    sc._on_touchpad(type("T", (), {"delta": (-20) & 0xFFFF, "x_root": 0, "y_root": 0})())
+    check(sc.canvas.yview()[0] > top, "trackpad scroll down did nothing")
+    here = sc.canvas.yview()[0]
+    sc._on_touchpad(type("T", (), {"delta": 12, "x_root": 0, "y_root": 0})())
+    check(sc.canvas.yview()[0] < here, "trackpad scroll up did nothing")
     sc.winfo_containing = lambda x, y: app.console  # pointer outside the form
     before = sc.canvas.yview()[0]
     Ev.delta = -2
