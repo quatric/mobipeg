@@ -593,6 +593,39 @@ def check_presets_and_drop(gui):
     check(isinstance(gui.enable_file_drop(app, []), bool), "enable_file_drop must not raise")
 
 
+def check_scroll(gui):
+    """Two-finger / wheel scrolling must work with the pointer over any child."""
+    app = gui.app
+    app.deiconify()
+    app.update()
+    sc = app.encode_scroll
+    check(sc.canvas.yview() != (0.0, 1.0), "Encode form should be taller than its viewport")
+    child = app.enc_input_var and app.enc_run_btn  # a widget deep inside the form
+    sc.winfo_containing = lambda x, y: child
+
+    class Ev:
+        num = 0
+        delta = -2  # macOS trackpad: small deltas
+        x_root = y_root = 0
+
+    top = sc.canvas.yview()[0]
+    for _ in range(5):
+        sc._on_wheel(Ev)
+    check(sc.canvas.yview()[0] > top, "scrolling over a child widget did nothing")
+    Ev.delta = 3
+    before = sc.canvas.yview()[0]
+    for _ in range(5):
+        sc._on_wheel(Ev)
+    check(sc.canvas.yview()[0] < before, "scrolling back up did nothing")
+    sc.winfo_containing = lambda x, y: app.console  # pointer outside the form
+    before = sc.canvas.yview()[0]
+    Ev.delta = -2
+    sc._on_wheel(Ev)
+    check(sc.canvas.yview()[0] == before, "scrolled while the pointer was elsewhere")
+    del sc.winfo_containing
+    app.withdraw()
+
+
 def main():
     dump = "--dump" in sys.argv
     here = os.path.dirname(os.path.abspath(__file__))
@@ -632,6 +665,7 @@ def main():
     check_extras(gui)
     check_levels(gui)
     check_presets_and_drop(gui)
+    check_scroll(gui)
 
     gui.app.destroy()
 

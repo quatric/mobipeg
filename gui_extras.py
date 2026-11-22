@@ -110,9 +110,11 @@ class ScrollableFrame(ttk.Frame):
         self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.inner.bind("<Configure>", self._on_inner)
         self.canvas.bind("<Configure>", self._on_canvas)
-        for w in (self.canvas, self.inner):
-            w.bind("<Enter>", self._bind_wheel)
-            w.bind("<Leave>", self._unbind_wheel)
+        # One app-wide binding, not Enter/Leave on the frame: moving the pointer
+        # onto any child widget fires <Leave> for the frame, which used to
+        # switch two-finger scrolling off over every label and entry.
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.canvas.bind_all(seq, self._on_wheel, add="+")
 
     def _on_inner(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -135,27 +137,25 @@ class ScrollableFrame(ttk.Frame):
             self.vbar.pack_forget()
             self.canvas.yview_moveto(0)
 
-    def _bind_wheel(self, _event=None):
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
-        self.canvas.bind_all("<Button-4>", self._on_wheel)
-        self.canvas.bind_all("<Button-5>", self._on_wheel)
-
-    def _unbind_wheel(self, _event=None):
-        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.canvas.unbind_all(seq)
+    def _pointer_inside(self, event):
+        w = self.winfo_containing(event.x_root, event.y_root)
+        while w is not None and w is not self:
+            w = w.master
+        return w is self
 
     def _on_wheel(self, event):
-        if not self.vbar.winfo_ismapped():
+        if not self.vbar.winfo_ismapped() or not self._pointer_inside(event):
             return
         if event.num == 4:
             step = -1
         elif event.num == 5:
             step = 1
-        elif sys.platform == "darwin":
-            step = -1 if event.delta > 0 else 1
         else:
-            step = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(step * 2, "units")
+            # Trackpads send many small deltas; keep their size, and give a
+            # classic wheel notch (120 on Windows) a sensible step.
+            d = event.delta
+            step = -d / 120 if abs(d) >= 120 else (-1 if d > 0 else 1) * max(1, abs(d))
+        self.canvas.yview_scroll(int(step * 3) or (1 if step > 0 else -1), "units")
 
 
 class PathListEditor(ttk.Frame):
