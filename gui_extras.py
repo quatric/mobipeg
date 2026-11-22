@@ -23,7 +23,8 @@ class ScrollableFrame(ttk.Frame):
     """A frame whose `inner` child scrolls vertically inside a fixed viewport."""
 
     def __init__(self, parent, height=560):
-        super().__init__(parent)
+        # Padding keeps the canvas inside the notebook page's rounded border (aqua).
+        super().__init__(parent, padding=8)
         self.canvas = tk.Canvas(self, highlightthickness=0, height=height, borderwidth=0)
         self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vbar.set)
