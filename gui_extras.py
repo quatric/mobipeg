@@ -19,6 +19,43 @@ from tkinter import ttk, filedialog, messagebox
 import mobipeg_tools as mt
 
 
+def enable_file_drop(root, targets):
+    """Let files be dropped on pages: targets = [(page, callback(paths), skip)].
+
+    Every widget inside a page except the `skip` subtrees accepts the drop, and
+    only existing files are passed on. Needs the optional tkinterdnd2 package;
+    without it (or if it cannot load) nothing happens and False is returned.
+    """
+    try:
+        from tkinterdnd2 import TkinterDnD, DND_FILES
+
+        TkinterDnD._require(root)
+    except Exception:
+        return False
+
+    def register(widget, callback, skip):
+        if widget in skip:
+            return
+
+        def on_drop(event):
+            paths = [p for p in root.tk.splitlist(event.data) if os.path.isfile(p)]
+            if paths:
+                callback(paths)
+            return event.action
+
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", on_drop)
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            register(child, callback, skip)
+
+    for page, callback, skip in targets:
+        register(page, callback, skip)
+    return True
+
+
 class FlatTabs(ttk.Frame):
     """Tab strip with square, flat tabs and an underline on the selected one.
 
@@ -42,7 +79,7 @@ class FlatTabs(ttk.Frame):
     def add(self, page, text=""):
         cell = ttk.Frame(self.bar)
         cell.pack(side="left")
-        label = ttk.Label(cell, text=text, padding=(14, 6), cursor="hand2")
+        label = ttk.Label(cell, text=text, padding=(14, 6))
         label.pack()
         line = tk.Frame(cell, height=3, bg=self._bg)
         line.pack(fill="x")

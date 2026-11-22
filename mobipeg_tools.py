@@ -640,23 +640,22 @@ class JsonStore:
 
 
 # Presets that ship with the GUI. Keys match the Encode tab's setting names.
+# The four Q-based ones follow the quality ladder of the Mobipeg-MOFLEX Studio
+# (quantizer, search depth, motion search); the others are size-oriented.
+def _preset(hq=False, quant="0", subme="7", skip="512", me="default",
+            bitrate="", multipass=False, max_size_mb=""):
+    return {"hq": hq, "quant": quant, "subme": subme, "skip": skip, "me": me,
+            "bitrate": bitrate, "multipass": multipass, "max_size_mb": max_size_mb}
+
+
 BUILTIN_PRESETS = {
-    "Best quality (largest file)": {
-        "hq": True, "quant": "12", "subme": "9", "skip": "0",
-        "bitrate": "", "multipass": False, "max_size_mb": "",
-    },
-    "Balanced": {
-        "hq": False, "quant": "22", "subme": "7", "skip": "512",
-        "bitrate": "", "multipass": False, "max_size_mb": "",
-    },
-    "Small (700k two-pass)": {
-        "hq": False, "quant": "0", "subme": "7", "skip": "512",
-        "bitrate": "700k", "multipass": True, "max_size_mb": "",
-    },
-    "Fit 3DS SD (under 4 GiB)": {
-        "hq": False, "quant": "0", "subme": "7", "skip": "512",
-        "bitrate": "", "multipass": False, "max_size_mb": "4000",
-    },
+    "Best quality (largest file)": _preset(hq=True, quant="12", subme="9", skip="0"),
+    "Best (Q27, wide search)": _preset(quant="27", subme="9", skip="0", me="umh"),
+    "Quality (Q30)": _preset(quant="30", subme="9", skip="0", me="hex"),
+    "Balanced (Q32)": _preset(quant="32", subme="7", skip="0", me="hex"),
+    "Small (Q36)": _preset(quant="36", subme="7", skip="0", me="hex"),
+    "Small (700k two-pass)": _preset(bitrate="700k", multipass=True),
+    "Fit 3DS SD (under 4 GiB)": _preset(max_size_mb="4000"),
 }
 
 

@@ -563,6 +563,36 @@ def check_levels(gui):
     app.enc_level_var.set("Advanced")
 
 
+def check_presets_and_drop(gui):
+    """Q-ladder presets work at the Simple level; dropped paths reach the form."""
+    app = gui.app
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    app.enc_level_var.set("Simple")
+    app.apply_builtin_preset("Quality (Q30)")
+    check(app.enc_level_var.get() == "Simple", "a Q preset must not raise the level")
+    cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
+    for flag, value in (("--quantizer", "30"), ("--mobi-subme", "9"),
+                        ("--mobi-skip", "0"), ("--me", "hex")):
+        if check(flag in cmd, "Q30 preset: %s missing from %s" % (flag, cmd)):
+            check(cmd[cmd.index(flag) + 1] == value, "Q30 preset: %s wrong" % flag)
+    check("--hq" not in cmd, "Q30 preset: Highest Quality should be off")
+    app.enc_level_var.set("Advanced")
+
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (3D)")
+    app.on_enc_format_change()
+    app.drop_encode(["/tmp/left.mkv", "/tmp/right.mkv"])
+    check(app.enc_input_var.get() == "/tmp/left.mkv" and
+          app.enc_input2_var.get() == "/tmp/right.mkv", "drop: both eyes not filled")
+    app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
+    app.on_enc_format_change()
+    app.enc_input2_var.set("")
+    app.drop_encode(["/tmp/a.mkv", "/tmp/b.mkv"])
+    check(app.enc_input_var.get() == "/tmp/a.mkv" and not app.enc_input2_var.get(),
+          "drop: a 2D format must ignore the second file")
+    check(isinstance(gui.enable_file_drop(app, []), bool), "enable_file_drop must not raise")
+
+
 def main():
     dump = "--dump" in sys.argv
     here = os.path.dirname(os.path.abspath(__file__))
@@ -601,6 +631,7 @@ def main():
     check_decoder_families(gui)
     check_extras(gui)
     check_levels(gui)
+    check_presets_and_drop(gui)
 
     gui.app.destroy()
 

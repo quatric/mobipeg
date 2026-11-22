@@ -44,7 +44,7 @@ import re
 import sys
 
 import mobipeg_tools as mt
-from gui_extras import FlatTabs, ScrollableFrame, PathListEditor, QueueTab, InspectTab
+from gui_extras import enable_file_drop, FlatTabs, ScrollableFrame, PathListEditor, QueueTab, InspectTab
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -283,6 +283,18 @@ class EncodeGUI(tk.Tk):
 
         self.after_idle(self._place_sash)
         self.panes.bind("<Configure>", lambda e: self._place_sash(keep_user=True))
+
+        # Drop files anywhere on a tab (not on the Super MOFLEX subtitle list).
+        enable_file_drop(
+            self,
+            [
+                (self.encode_scroll, self.drop_encode, [self.enc_super_frame]),
+                (self.decode_frame, lambda ps: self.dec_input_var.set(ps[0]), []),
+                (self.cia_frame, lambda ps: self.cia_input_var.set(ps[0]), []),
+                (self.queue_tab, self.queue_tab.add_paths, []),
+                (self.inspect_tab, lambda ps: self.inspect_tab.set_input(ps[0]), []),
+            ],
+        )
 
         self.load_settings()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -762,7 +774,7 @@ class EncodeGUI(tk.Tk):
 
         # Run Button
         run_row = ttk.Frame(self.encode_frame)
-        run_row.grid(row=27, column=1, columnspan=2, pady=15, sticky="w")
+        run_row.grid(row=27, column=0, columnspan=3, pady=15)
         self.enc_run_btn = ttk.Button(
             run_row, text="▶ Run Encoding", command=self.run_encoding
         )
@@ -1351,8 +1363,6 @@ class EncodeGUI(tk.Tk):
                 v = var.get().strip()
                 if v:
                     cmd.extend([flag, v])
-            if self.enc_me_var.get() != "default":
-                cmd.extend(["--me", self.enc_me_var.get()])
             if self.enc_dct8_var.get() != "default":
                 cmd.extend(["--8x8dct", "1" if self.enc_dct8_var.get() == "on" else "0"])
             if fmt in ("moflex", "moflex3d") and self.enc_block_var.get() != "auto":
@@ -1453,7 +1463,7 @@ class EncodeGUI(tk.Tk):
         data = {
             "hq": p["hq"], "quant": p["quant"], "subme": p["subme"], "skip": p["skip"],
             "bitrate": p["bitrate"], "multipass": p["multipass"],
-            "max_size_mb": p["max_size_mb"],
+            "max_size_mb": p["max_size_mb"], "me": p["me"],
         }
         # subme/skip/bitrate are only sent with the Advanced section on.
         data["adv"] = bool(p["bitrate"]) and not p["hq"]
@@ -1702,6 +1712,14 @@ class EncodeGUI(tk.Tk):
     # ------------------------------------------------------------------
     # Command building shared by Run, Copy command and the queue
     # ------------------------------------------------------------------
+
+    TWO_EYE_FORMATS = {"moflex3d", "3ds_camera3d", "topos3d", "topos3d_mpeg2"}
+
+    def drop_encode(self, paths):
+        """Files dropped on the Encode tab: input, plus the right eye for 3D."""
+        self.enc_input_var.set(paths[0])
+        if len(paths) > 1 and self.current_format() in self.TWO_EYE_FORMATS:
+            self.enc_input2_var.set(paths[1])
 
     def current_format(self):
         return self.formats_map.get(self.enc_fmt_var.get())
@@ -2215,14 +2233,19 @@ class EncodeGUI(tk.Tk):
                 cmd.extend(["--bitrate", bitrate])
                 if self.enc_multipass_var.get():
                     cmd.extend(["--multipass", "2"])
+            if self.enc_mobi_intra_var.get():
+                cmd.append("--mobi-intra-only")
+        # Search depth, skip threshold and motion search come from presets, so
+        # they apply at every level (the fields are only visible in Advanced).
+        if fmt in ("mo", "moflex", "moflex3d", "mods"):
             subme = self.enc_mobi_subme_var.get().strip()
             if subme:
                 cmd.extend(["--mobi-subme", subme])
-            if self.enc_mobi_intra_var.get():
-                cmd.append("--mobi-intra-only")
             skip = self.enc_mobi_skip_var.get().strip()
             if skip and skip != "512":
                 cmd.extend(["--mobi-skip", skip])
+            if self.enc_me_var.get() != "default":
+                cmd.extend(["--me", self.enc_me_var.get()])
         if fmt == "rvid":
             rmode = self.enc_rvid_mode_var.get()
             if rmode and rmode != "rgb555":
