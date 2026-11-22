@@ -650,8 +650,8 @@ def _preset(hq=False, quant="0", subme="7", skip="512", me="default",
 
 BUILTIN_PRESETS = {
     "Best quality (largest file)": _preset(hq=True, quant="12", subme="9", skip="0"),
-    "Best (Q27, wide search)": _preset(quant="27", subme="9", skip="0", me="umh"),
-    "Quality (Q30)": _preset(quant="30", subme="9", skip="0", me="hex"),
+    "Best — wide search (Q27)": _preset(quant="27", subme="9", skip="0", me="umh"),
+    "Quality — the sweet spot (Q30)": _preset(quant="30", subme="9", skip="0", me="hex"),
     "Balanced (Q32)": _preset(quant="32", subme="7", skip="0", me="hex"),
     "Small (Q36)": _preset(quant="36", subme="7", skip="0", me="hex"),
     "Small (700k two-pass)": _preset(bitrate="700k", multipass=True),

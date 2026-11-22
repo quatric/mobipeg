@@ -533,7 +533,7 @@ def check_levels(gui):
     expect = {
         # widget: lowest level index that shows it
         "enc_audio_cb": 0, "enc_hq_chk": 0, "enc_maxsize_entry": 0,
-        "enc_scale_entry": 1, "enc_offset_entry": 1, "enc_hdr_cb": 1,
+        "enc_scale_entry": 0, "enc_profile_cb": 0, "enc_speed_cb": 0, "enc_fps_entry": 1, "enc_offset_entry": 1, "enc_hdr_cb": 1,
         "enc_super_frame": 1, "enc_jobs_entry": 2, "enc_layout_entry": None,
     }
     for index, name in enumerate(app.LEVELS):
@@ -569,7 +569,7 @@ def check_presets_and_drop(gui):
     app.enc_fmt_var.set("3DS Mobiclip .moflex (2D)")
     app.on_enc_format_change()
     app.enc_level_var.set("Simple")
-    app.apply_builtin_preset("Quality (Q30)")
+    app.apply_builtin_preset("Quality — the sweet spot (Q30)")
     check(app.enc_level_var.get() == "Simple", "a Q preset must not raise the level")
     cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
     for flag, value in (("--quantizer", "30"), ("--mobi-subme", "9"),
@@ -577,6 +577,22 @@ def check_presets_and_drop(gui):
         if check(flag in cmd, "Q30 preset: %s missing from %s" % (flag, cmd)):
             check(cmd[cmd.index(flag) + 1] == value, "Q30 preset: %s wrong" % flag)
     check("--hq" not in cmd, "Q30 preset: Highest Quality should be off")
+
+    # Encoding speed: Fast lowers the search depth and picks the diamond search.
+    app.enc_speed_var.set(app.SPEED_CHOICES[1])
+    app.apply_builtin_preset("Best \u2014 wide search (Q27)")  # subme 9, me umh
+    cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
+    check(cmd[cmd.index("--mobi-subme") + 1] == "6", "Fast: search depth not capped at 6")
+    check(cmd[cmd.index("--me") + 1] == "umh", "Fast: an explicit motion search was overridden")
+    app.enc_me_var.set("default")
+    cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
+    check(cmd[cmd.index("--me") + 1] == "dia", "Fast: diamond search not used")
+    app.enc_speed_var.set(app.SPEED_CHOICES[0])
+    cmd = app.build_encode_cmd(os.path.abspath(__file__), "", "")
+    check(cmd[cmd.index("--mobi-subme") + 1] == "9" and "--me" not in cmd,
+          "Standard speed changed the search settings: %s" % cmd)
+    app.apply_profile("Quality \u2014 the sweet spot (Q30)")
+    check(app.enc_quant_var.get() == "30", "profile dropdown did not apply the preset")
     app.enc_level_var.set("Advanced")
 
     app.enc_fmt_var.set("3DS Mobiclip .moflex (3D)")

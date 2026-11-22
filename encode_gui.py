@@ -911,11 +911,26 @@ class EncodeGUI(tk.Tk):
     SUPER_FORMATS = {"moflex", "moflex3d"}
     NO_AUDIO_FORMATS = {"hvqm4", "gba_ads", "gba_hydrogen"}
     LEVELS = ["Simple", "Intermediate", "Advanced"]
+    SPEED_CHOICES = [
+        "Standard — full motion search",
+        "Fast — less motion search (quality and size can change)",
+    ]
+
+    def profile_names(self):
+        store = getattr(self, "preset_store", None)
+        users = sorted(store.load()) if store else []
+        return list(mt.BUILTIN_PRESETS) + users
+
+    def apply_profile(self, name):
+        if name in mt.BUILTIN_PRESETS:
+            self.apply_builtin_preset(name)
+        else:
+            self.apply_user_preset(name)
     # (lowest level that shows them, widget attributes). Applied on top of the
     # per-format visibility, so a control is shown only if both allow it.
     # The old "Show Advanced" checkbox is replaced by the Advanced level.
     LEVEL_GATES = (
-        (1, ("enc_scale_label", "enc_scale_entry", "enc_fps_label", "enc_fps_entry",
+        (1, ("enc_fps_label", "enc_fps_entry",
              "enc_keyframes_label", "enc_keyframes_entry", "enc_arate_label",
              "enc_arate_entry", "enc_roundtrip_chk", "enc_fast_audio_chk",
              "enc_quant_label", "enc_quant_entry", "enc_offset_label",
@@ -1026,35 +1041,55 @@ class EncodeGUI(tk.Tk):
         of = self.enc_out_frame
         of.columnconfigure(2, weight=1)
 
+        self.enc_profile_label = ttk.Label(of, text="Quality profile:")
+        self.enc_profile_label.grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        self.enc_profile_var = tk.StringVar(value="Choose a profile...")
+        self.enc_profile_cb = ttk.Combobox(
+            of, textvariable=self.enc_profile_var, state="readonly",
+            values=self.profile_names(),
+        )
+        self.enc_profile_cb.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+        self.enc_profile_cb.bind(
+            "<<ComboboxSelected>>", lambda e: self.apply_profile(self.enc_profile_var.get())
+        )
+
+        self.enc_speed_label = ttk.Label(of, text="Encoding speed:")
+        self.enc_speed_label.grid(row=1, column=0, sticky="e", padx=5, pady=2)
+        self.enc_speed_var = tk.StringVar(value=self.SPEED_CHOICES[0])
+        self.enc_speed_cb = ttk.Combobox(
+            of, textvariable=self.enc_speed_var, state="readonly", values=self.SPEED_CHOICES
+        )
+        self.enc_speed_cb.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=2)
+
         self.enc_maxsize_label = ttk.Label(of, text="Max size (MiB):")
-        self.enc_maxsize_label.grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        self.enc_maxsize_label.grid(row=2, column=0, sticky="e", padx=5, pady=2)
         self.enc_maxsize_var = tk.StringVar(value="")
         self.enc_maxsize_entry = ttk.Entry(of, textvariable=self.enc_maxsize_var, width=8)
-        self.enc_maxsize_entry.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        self.enc_maxsize_entry.grid(row=2, column=1, sticky="w", padx=5, pady=2)
         self.enc_fat32_btn = ttk.Button(
             of, text="FAT32 limit (4000)", command=lambda: self.enc_maxsize_var.set("4000")
         )
-        self.enc_fat32_btn.grid(row=0, column=2, sticky="w", padx=5, pady=2)
+        self.enc_fat32_btn.grid(row=2, column=2, sticky="w", padx=5, pady=2)
         self.enc_est_label = ttk.Label(of, text="", foreground="grey", wraplength=470)
-        self.enc_est_label.grid(row=1, column=1, columnspan=2, sticky="w", padx=5)
+        self.enc_est_label.grid(row=3, column=1, columnspan=2, sticky="w", padx=5)
 
         self.enc_hdr_label = ttk.Label(of, text="HDR → SDR:")
-        self.enc_hdr_label.grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        self.enc_hdr_label.grid(row=4, column=0, sticky="e", padx=5, pady=2)
         self.enc_hdr_var = tk.StringVar(value="auto")
         self.enc_hdr_cb = ttk.Combobox(
             of, textvariable=self.enc_hdr_var, state="readonly", values=list(mt.HDR_MODES), width=10
         )
-        self.enc_hdr_cb.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        self.enc_hdr_cb.grid(row=4, column=1, sticky="w", padx=5, pady=2)
         self.enc_hdr_hint = ttk.Label(of, foreground="grey", text="auto tone-maps HDR sources only")
-        self.enc_hdr_hint.grid(row=2, column=2, sticky="w", padx=5)
+        self.enc_hdr_hint.grid(row=4, column=2, sticky="w", padx=5)
 
         self.enc_jobs_label = ttk.Label(of, text="Parallel jobs (0=auto):")
-        self.enc_jobs_label.grid(row=3, column=0, sticky="e", padx=5, pady=2)
+        self.enc_jobs_label.grid(row=5, column=0, sticky="e", padx=5, pady=2)
         self.enc_jobs_var = tk.StringVar(value="0")
         self.enc_jobs_entry = ttk.Entry(of, textvariable=self.enc_jobs_var, width=8)
-        self.enc_jobs_entry.grid(row=3, column=1, sticky="w", padx=5, pady=2)
+        self.enc_jobs_entry.grid(row=5, column=1, sticky="w", padx=5, pady=2)
         self.enc_jobs_hint = ttk.Label(of, foreground="grey", text="1 = encode in one piece")
-        self.enc_jobs_hint.grid(row=3, column=2, sticky="w", padx=5)
+        self.enc_jobs_hint.grid(row=5, column=2, sticky="w", padx=5)
 
         # --- Super MOFLEX ---
         self.enc_super_frame = ttk.LabelFrame(f, text="Super MOFLEX", padding=8)
@@ -1144,6 +1179,7 @@ class EncodeGUI(tk.Tk):
         # Everything the Encode tab remembers between runs and saves in presets.
         self.persist_vars = {
             "fmt": self.enc_fmt_var, "level": self.enc_level_var,
+            "speed": self.enc_speed_var, "profile": self.enc_profile_var,
             "audio": self.enc_audio_var,
             "outdir": self.enc_outdir_var, "scale": self.enc_scale_var,
             "keyframes": self.enc_keyframes_var, "quant": self.enc_quant_var,
@@ -1198,7 +1234,8 @@ class EncodeGUI(tk.Tk):
         show((self.enc_stereo_label, self.enc_stereo_cb, self.enc_stereo_hint),
              fmt in self.STEREO_FORMATS)
         show((self.enc_maxsize_label, self.enc_maxsize_entry, self.enc_fat32_btn,
-              self.enc_est_label), fmt in self.MOBI_SIZE_FORMATS)
+              self.enc_est_label, self.enc_profile_label, self.enc_profile_cb,
+              self.enc_speed_label, self.enc_speed_cb), fmt in self.MOBI_SIZE_FORMATS)
         show((self.enc_hdr_label, self.enc_hdr_cb, self.enc_hdr_hint), not audio_only)
         show((self.enc_jobs_label, self.enc_jobs_entry, self.enc_jobs_hint),
              fmt in self.JOBS_FORMATS)
@@ -1443,6 +1480,7 @@ class EncodeGUI(tk.Tk):
             self.destroy()
 
     def rebuild_preset_menu(self):
+        self.enc_profile_cb.config(values=self.profile_names())
         m = self.preset_menu
         m.delete(0, tk.END)
         for name in mt.BUILTIN_PRESETS:
@@ -1497,6 +1535,8 @@ class EncodeGUI(tk.Tk):
             snap.pop(k, None)
         users[name] = snap
         if self.preset_store.save(users):
+            self.enc_profile_cb.config(values=self.profile_names())
+            self.enc_profile_var.set(name)
             self.set_status(f"Saved preset: {name}")
         else:
             messagebox.showerror("Preset", "Could not write the preset file.")
@@ -2261,13 +2301,23 @@ class EncodeGUI(tk.Tk):
         # they apply at every level (the fields are only visible in Advanced).
         if fmt in ("mo", "moflex", "moflex3d", "mods"):
             subme = self.enc_mobi_subme_var.get().strip()
+            me = self.enc_me_var.get()
+            if self.enc_speed_var.get().startswith("Fast"):
+                # Less motion search: cheaper sub-pixel refinement (6 keeps RD
+                # mode decision) and the diamond search.
+                try:
+                    subme = str(min(int(subme or 7), 6))
+                except ValueError:
+                    subme = "6"
+                if me == "default":
+                    me = "dia"
             if subme:
                 cmd.extend(["--mobi-subme", subme])
             skip = self.enc_mobi_skip_var.get().strip()
             if skip and skip != "512":
                 cmd.extend(["--mobi-skip", skip])
-            if self.enc_me_var.get() != "default":
-                cmd.extend(["--me", self.enc_me_var.get()])
+            if me != "default":
+                cmd.extend(["--me", me])
         if fmt == "rvid":
             rmode = self.enc_rvid_mode_var.get()
             if rmode and rmode != "rgb555":
