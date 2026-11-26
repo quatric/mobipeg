@@ -1,7 +1,7 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
-version <next>:
+version 4.2:
 - GUI: the input field takes a web link; yt-dlp (offered on first use, updated before each use) downloads it, then it is encoded
 - GUI: the Queue tab takes links too (Add link...); each is downloaded when its turn comes
 - GUI: checks GitHub for a newer release at startup and can update itself in place
