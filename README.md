@@ -453,6 +453,9 @@ with the current settings:
 - The video is saved to the Output Dir (or your Downloads folder) as
   `Title [id].ext`, and the field switches to that file, so it can be
   re-encoded later without downloading again.
+- Links work in the Queue tab too (**Add link...**, or **Add to queue** with a
+  link in the input field): each one is downloaded when its turn comes, then
+  encoded with the settings it was queued with.
 
 Only download videos you have the right to use. Some YouTube videos need a
 JavaScript runtime such as [Deno](https://deno.com) installed for yt-dlp to

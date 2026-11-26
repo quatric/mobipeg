@@ -14,7 +14,7 @@ processes stays EncodeGUI.
 import os
 import sys
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import mobipeg_tools as mt
 
@@ -249,7 +249,8 @@ class QueueTab(ttk.Frame):
             foreground="grey",
             wraplength=640,
             text="Each file is converted with the Encode tab's settings as they are when "
-            "you add it. Files run one at a time; the queue is kept if you close the app.",
+            "you add it. Files run one at a time; the queue is kept if you close the app. "
+            "Links are downloaded with yt-dlp when their turn comes.",
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
 
         cols = ("file", "format", "status", "output")
@@ -271,6 +272,7 @@ class QueueTab(ttk.Frame):
         bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.add_btn = ttk.Button(bar, text="Add files...", command=self.add_files)
         self.add_btn.pack(side="left")
+        ttk.Button(bar, text="Add link...", command=self.add_link).pack(side="left", padx=(4, 0))
         ttk.Button(bar, text="Remove", command=self.remove_selected).pack(side="left", padx=4)
         ttk.Button(bar, text="Up", width=4, command=lambda: self.move(-1)).pack(side="left")
         ttk.Button(bar, text="Down", width=5, command=lambda: self.move(1)).pack(side="left", padx=(2, 4))
@@ -333,7 +335,12 @@ class QueueTab(ttk.Frame):
             if out is None:
                 skipped.append(p)
                 continue
-            out = self._unique_output(out, taken)
+            if mt.is_url(p):
+                # The name comes from the video's title, known only after the
+                # download; encode.py then derives the output from it.
+                p, out = p.strip(), ""
+            else:
+                out = self._unique_output(out, taken)
             cmd = self.app.build_encode_cmd(p, "", out)
             if cmd is None:
                 skipped.append(p)
@@ -355,9 +362,17 @@ class QueueTab(ttk.Frame):
         if paths:
             self.add_paths(list(paths))
 
+    def add_link(self):
+        url = simpledialog.askstring("Add link", "Video link (downloaded with yt-dlp):", parent=self)
+        if url and url.strip():
+            if mt.is_url(url):
+                self.add_paths([url.strip()])
+            else:
+                messagebox.showwarning("Queue", "That is not an http(s) link.")
+
     def add_current(self):
         p = self.app.enc_input_var.get().strip()
-        if not p or not os.path.isfile(p):
+        if not p or not (os.path.isfile(p) or mt.is_url(p)):
             self.add_files()  # nothing chosen on the Encode tab: pick files here
             return
         self.add_paths([p])
@@ -423,6 +438,27 @@ class QueueTab(ttk.Frame):
             self.refresh()
             self.after(50, self._run_next)
 
+        if mt.is_url(job["label"]):
+            cmd = job["cmd"]
+            outdir = cmd[cmd.index("--outdir") + 1] if "--outdir" in cmd else ""
+
+            def got(path):
+                # From now on the job is an ordinary file job, so a retry does
+                # not download again.
+                out = self._unique_output(
+                    self.app.derived_output_for(path, job["fmt"], outdir),
+                    {j["output"] for j in self.queue.jobs},
+                )
+                job["cmd"] = [path if a == job["label"] else a for a in cmd] + ["-o", out]
+                job["label"], job["output"] = path, out
+                self.refresh()
+                self._encode(job, n_left, done, first=False)
+
+            self.app.fetch_url(job["label"], outdir, got, done, clear=first)
+            return
+        self._encode(job, n_left, done, first)
+
+    def _encode(self, job, n_left, done, first):
         self.app.start_process(
             job["cmd"],
             buttons=[],

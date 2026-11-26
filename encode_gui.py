@@ -1787,14 +1787,17 @@ class EncodeGUI(tk.Tk):
     def current_format(self):
         return self.formats_map.get(self.enc_fmt_var.get())
 
-    def derived_output_for(self, inp):
-        """Default output path for `inp` with the current format/outdir, or None
-        when the format cannot be queued (it needs a second input)."""
-        fmt = self.current_format()
+    def derived_output_for(self, inp, fmt=None, outdir=None):
+        """Default output path for `inp` with the current (or given) format and
+        outdir, or None when the format cannot be queued (it needs a second
+        input)."""
+        fmt = fmt or self.current_format()
         if fmt in ("3ds_camera3d",):
             return None
         ext = ENCODE_EXTENSIONS.get(fmt, fmt)
-        outdir = self.enc_outdir_var.get().strip() or os.path.dirname(inp)
+        if outdir is None:
+            outdir = self.enc_outdir_var.get().strip()
+        outdir = outdir or os.path.dirname(inp)
         return os.path.join(outdir, os.path.splitext(os.path.basename(inp))[0] + "." + ext)
 
     def copy_command(self):
@@ -2155,8 +2158,18 @@ class EncodeGUI(tk.Tk):
     # --- Links: download with yt-dlp, then encode ----------------------------
 
     def fetch_url_then_encode(self, url):
-        """Download `url` with yt-dlp (offering to install it the first time and
-        updating it before every use), then encode the downloaded file."""
+        def got(path):
+            self.enc_input_var.set(path)
+            self.run_encoding()
+
+        self.fetch_url(url, self.enc_outdir_var.get().strip(), got,
+                       buttons=[self.enc_run_btn])
+
+    def fetch_url(self, url, outdir, on_file, on_fail=None, buttons=(), clear=True):
+        """Download `url` with yt-dlp into `outdir` (Downloads when empty),
+        offering to install yt-dlp the first time and updating it before every
+        use. Calls on_file(path) when done, else on_fail(code, stopped)."""
+        on_fail = on_fail or (lambda code, stopped: None)
         ytdlp = mt.ytdlp_path()
         if not os.path.isfile(ytdlp):
             if not messagebox.askyesno(
@@ -2164,13 +2177,16 @@ class EncodeGUI(tk.Tk):
                 "Encoding from a link uses yt-dlp, which is not installed yet.\n\n"
                 "Download it now from github.com/yt-dlp/yt-dlp?",
             ):
+                on_fail(1, True)
                 return
 
             def installed(_path, err):
                 if err is None:
-                    self.fetch_url_then_encode(url)
-                elif not isinstance(err, InterruptedError):
+                    self.fetch_url(url, outdir, on_file, on_fail, buttons, clear)
+                    return
+                if not isinstance(err, InterruptedError):
                     messagebox.showerror("yt-dlp", f"Could not download yt-dlp:\n{err}")
+                on_fail(1, isinstance(err, InterruptedError))
 
             self.background_job(
                 "Downloading yt-dlp", lambda p, c: mt.install_ytdlp(p, c), installed
@@ -2179,18 +2195,17 @@ class EncodeGUI(tk.Tk):
 
         def updated(code, stopped):
             # A failed check (offline, say) still lets the installed copy run.
-            if not stopped:
-                self.ytdlp_download(ytdlp, url)
+            if stopped:
+                on_fail(code, True)
+            else:
+                self._ytdlp_download(ytdlp, url, outdir, on_file, on_fail, buttons)
 
         self.start_process(
-            [ytdlp, "-U"],
-            buttons=[self.enc_run_btn],
-            on_done=updated,
-            title="Checking yt-dlp for updates",
+            [ytdlp, "-U"], buttons=buttons, on_done=updated, clear=clear,
+            separator=True, title="Checking yt-dlp for updates",
         )
 
-    def ytdlp_download(self, ytdlp, url):
-        outdir = self.enc_outdir_var.get().strip()
+    def _ytdlp_download(self, ytdlp, url, outdir, on_file, on_fail, buttons):
         if not outdir:
             outdir = os.path.expanduser("~/Downloads")
             if not os.path.isdir(outdir):
@@ -2226,11 +2241,12 @@ class EncodeGUI(tk.Tk):
                     pass
             path = lines[-1] if lines else ""
             if code == 0 and not stopped and os.path.isfile(path):
-                self.enc_input_var.set(path)
-                self.run_encoding()
+                on_file(path)
+            else:
+                on_fail(code or 1, stopped)
 
         self.start_process(
-            cmd, buttons=[self.enc_run_btn], on_done=done, clear=False,
+            cmd, buttons=buttons, on_done=done, clear=False,
             separator=True, title="Downloading",
         )
 
