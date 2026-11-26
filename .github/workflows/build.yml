@@ -928,7 +928,11 @@ jobs:
             # x264
             [ ! -d x264-$ARCH ] && git clone --depth=1 https://github.com/quatric/x264.git x264-$ARCH
             cd x264-$ARCH
-            ./configure --prefix="$PREFIX" $HOST_FLAG --extra-cflags="$TARGET_FLAG" --extra-asflags="$TARGET_FLAG" --extra-ldflags="$TARGET_FLAG" --enable-static --enable-pic --disable-cli --disable-opencl
+            # arm64 assembles with clang, which needs the target; x86_64 uses
+            # nasm, which rejects it.
+            X264_AS=()
+            [ "$ARCH" = arm64 ] && X264_AS=(--extra-asflags="$TARGET_FLAG")
+            ./configure --prefix="$PREFIX" $HOST_FLAG --extra-cflags="$TARGET_FLAG" "${X264_AS[@]}" --extra-ldflags="$TARGET_FLAG" --enable-static --enable-pic --disable-cli --disable-opencl
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
