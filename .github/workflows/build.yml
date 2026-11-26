@@ -776,10 +776,11 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────
-  # macOS — arm64 natively and x86_64 cross-built on macos-15, then lipo into universal
+  # macOS — x86_64 natively and arm64 cross-built on macos-15-intel, then lipo
+  # into universal2. (The arm64 runners kept failing to pick jobs up.)
   # ─────────────────────────────────────────────────────────────────────────
   build-macos:
-    runs-on: macos-15
+    runs-on: macos-15-intel
 
     steps:
       - uses: actions/checkout@v5
@@ -791,9 +792,9 @@ jobs:
           # A stale openssl@1.1 owns the openssl symlinks and makes the
           # openssl@3 upgrade (pulled in by meson) fail at `brew link`.
           brew unlink openssl@1.1 2>/dev/null || true
-          brew install yasm pkg-config nasm sdl2 meson ninja || {
+          brew install yasm pkg-config nasm meson ninja automake || {
             brew link --overwrite openssl@3
-            brew install yasm pkg-config nasm sdl2 meson ninja
+            brew install yasm pkg-config nasm meson ninja automake
           }
 
       # This cache holds x264 too, so it has to track the upstream x264 commit
@@ -807,13 +808,19 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/deps
-          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-dav1d1.5.1-sentry${{ env.SENTRY_VERSION }}-v2-x264-${{ steps.x264-rev.outputs.sha }}
+          key: deps-macos-universal-vorbis1.3.7-opus1.5.2-lame3.100-speex1.2.1-theora1.1.1-webp1.4.0-dav1d1.5.1-sdl2.30.0-sentry${{ env.SENTRY_VERSION }}-v3-x264-${{ steps.x264-rev.outputs.sha }}
 
       - name: Build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           DEPS="${GITHUB_WORKSPACE}/deps"
           
+          # Old tarballs' config.sub predates aarch64-apple-darwin.
+          fresh_config() {
+            cp "$(brew --prefix automake)"/share/automake-*/config.sub \
+               "$(brew --prefix automake)"/share/automake-*/config.guess .
+          }
+
           build_arch() {
             local ARCH=$1
             local TARGET_FLAG=$2
@@ -847,6 +854,7 @@ jobs:
             # libmp3lame
             [ ! -d lame-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | tar -xz && mv lame-3.100 lame-$ARCH
             cd lame-$ARCH
+            fresh_config
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --enable-static --disable-shared --disable-frontend
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
@@ -861,6 +869,7 @@ jobs:
             # libtheora
             [ ! -d libtheora-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://downloads.xiph.org/releases/theora/libtheora-1.1.1.tar.gz | tar -xz && mv libtheora-1.1.1 libtheora-$ARCH
             cd libtheora-$ARCH
+            fresh_config
             ./configure --prefix="$PREFIX" $HOST_FLAG CFLAGS="$TARGET_FLAG" --with-ogg-includes="$PREFIX/include" --with-ogg-libraries="$PREFIX/lib" --enable-static --disable-shared --disable-examples --disable-oggtest --disable-vorbistest
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
@@ -889,6 +898,18 @@ jobs:
             cmake --install build
             cd ..
 
+            # SDL2, static and per arch: Homebrew's is the runner's arch
+            # only, which left ffplay single-arch.
+            [ ! -d SDL2-2.30.0 ] && curl -fsSL --retry 5 --retry-connrefused https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-2.30.0.tar.gz | tar -xz
+            cmake -S SDL2-2.30.0 -B sdl2-build-$ARCH \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+              -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF
+            cmake --build sdl2-build-$ARCH -j$(sysctl -n hw.logicalcpu)
+            cmake --install sdl2-build-$ARCH
+
             mkdir -p "$PREFIX/lib/pkgconfig"
             printf '%s\n' \
               'prefix=${pcfiledir}/../..' \
@@ -907,7 +928,7 @@ jobs:
             # x264
             [ ! -d x264-$ARCH ] && git clone --depth=1 https://github.com/quatric/x264.git x264-$ARCH
             cd x264-$ARCH
-            ./configure --prefix="$PREFIX" $HOST_FLAG --extra-cflags="$TARGET_FLAG" --extra-ldflags="$TARGET_FLAG" --enable-static --enable-pic --disable-cli --disable-opencl
+            ./configure --prefix="$PREFIX" $HOST_FLAG --extra-cflags="$TARGET_FLAG" --extra-asflags="$TARGET_FLAG" --extra-ldflags="$TARGET_FLAG" --enable-static --enable-pic --disable-cli --disable-opencl
             make -j$(sysctl -n hw.logicalcpu) && make install
             cd ..
 
@@ -915,18 +936,18 @@ jobs:
             [ ! -d dav1d-$ARCH ] && curl -fsSL --retry 5 --retry-connrefused https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz | tar -xz && mv dav1d-1.5.1 dav1d-$ARCH
             cd dav1d-$ARCH
             MESON_CROSS_ARGS=()
-            if [ "$ARCH" = "x86_64" ]; then
+            if [ "$ARCH" = "arm64" ]; then
               printf '%s\n' \
                 "[binaries]" \
-                "c = ['clang', '-target', 'x86_64-apple-macos11.0']" \
+                "c = ['clang', '-target', 'arm64-apple-macos11.0']" \
                 "" \
                 "[host_machine]" \
                 "system = 'darwin'" \
-                "cpu_family = 'x86_64'" \
-                "cpu = 'x86_64'" \
+                "cpu_family = 'aarch64'" \
+                "cpu = 'aarch64'" \
                 "endian = 'little'" \
-                > cross-x86_64.txt
-              MESON_CROSS_ARGS=(--cross-file cross-x86_64.txt)
+                > cross-arm64.txt
+              MESON_CROSS_ARGS=(--cross-file cross-arm64.txt)
             fi
             meson setup build --prefix="$PREFIX" --default-library=static --buildtype=release -Denable_tools=false -Denable_tests=false "${MESON_CROSS_ARGS[@]}"
             ninja -C build
@@ -934,8 +955,8 @@ jobs:
             cd ..
           }
 
-          build_arch "arm64" "" ""
-          build_arch "x86_64" "-target x86_64-apple-macos11.0" "--host=x86_64-apple-darwin"
+          build_arch "x86_64" "-target x86_64-apple-macos11.0" ""
+          build_arch "arm64" "-target arm64-apple-macos11.0" "--host=aarch64-apple-darwin"
 
       - name: Build FFmpeg
         run: |
@@ -944,6 +965,7 @@ jobs:
           build_ffmpeg() {
             local ARCH=$1
             local TARGET_FLAG=$2
+            local CROSS_FLAGS=$3
             local PREFIX="$DEPS/$ARCH"
             local OUTDIR="$PWD/dist/$ARCH"
             
@@ -954,6 +976,7 @@ jobs:
             ../configure \
               --prefix="$OUTDIR" \
               --arch=$ARCH \
+              $CROSS_FLAGS \
               --enable-gpl \
               --enable-version3 \
               --enable-libx264 \
@@ -977,8 +1000,9 @@ jobs:
             cd ..
           }
           
-          build_ffmpeg "arm64" ""
-          build_ffmpeg "x86_64" "-target x86_64-apple-macos11.0"
+          build_ffmpeg "x86_64" "-target x86_64-apple-macos11.0" ""
+          # An Intel runner cannot run arm64 test programs.
+          build_ffmpeg "arm64" "-target arm64-apple-macos11.0" "--enable-cross-compile --target-os=darwin"
 
       - name: lipo into universal binaries
         run: |
@@ -990,14 +1014,20 @@ jobs:
               chmod +x "$arm" "$x64"
               lipo -create -output "dist/universal/$bin" "$arm" "$x64"
               echo "Created universal $bin: $(lipo -info dist/universal/$bin)"
-            elif [[ -f "$arm" ]]; then
-              cp "$arm" "dist/universal/$bin"
+            elif [[ "$bin" == ffplay ]]; then
+              # Never ship a single-arch binary in the universal package.
+              echo "::warning::ffplay was not built for both arm64 and x86_64; leaving it out"
+            else
+              echo "::error::$bin is missing for arm64 or x86_64"; exit 1
             fi
           done
 
       - name: Package
         run: |
           cd dist/universal
+          for bin in ffmpeg ffprobe ffplay; do
+            [ -f "$bin" ] && lipo "$bin" -verify_arch arm64 x86_64
+          done
           FILES="ffmpeg ffprobe"
           [ -f ffplay ] && FILES="$FILES ffplay"
           tar -czf "../../mobipeg-macos-universal.tar.gz" $FILES
@@ -1052,7 +1082,7 @@ jobs:
             python_arch: arm64
 
           - target: macos-universal
-            os: macos-15
+            os: macos-15-intel
             ext: tar.gz
             python_arch: x64
 
