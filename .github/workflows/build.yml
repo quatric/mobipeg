@@ -995,6 +995,7 @@ jobs:
               --disable-doc \
               --disable-debug \
               --disable-outdev=sdl2 \
+              --disable-libxcb --disable-xlib --disable-lzma \
               --pkg-config-flags="--static" \
               --extra-cflags="-I$PREFIX/include $TARGET_FLAG" \
               --extra-ldflags="-L$PREFIX/lib $TARGET_FLAG" || { cat ffbuild/config.log; exit 1; }
@@ -1030,7 +1031,16 @@ jobs:
         run: |
           cd dist/universal
           for bin in ffmpeg ffprobe ffplay; do
-            [ -f "$bin" ] && lipo "$bin" -verify_arch arm64 x86_64
+            [ -f "$bin" ] || continue
+            lipo "$bin" -verify_arch arm64 x86_64
+            # Only macOS's own libraries: the runner's Homebrew ones (X11,
+            # liblzma, SDL2) are missing on users' Macs.
+            for a in arm64 x86_64; do
+              bad=$(otool -arch $a -L "$bin" | tail -n +2 | awk '{print $1}' | grep -v '^/usr/lib/\|^/System/' || true)
+              if [ -n "$bad" ]; then
+                echo "::error::$bin ($a) links libraries users do not have: $bad"; exit 1
+              fi
+            done
           done
           FILES="ffmpeg ffprobe"
           [ -f ffplay ] && FILES="$FILES ffplay"
