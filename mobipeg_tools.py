@@ -11,8 +11,10 @@ Contents:
   - size-budget maths for --max-size-mb
   - read-only MOFLEX preflight diagnostics
   - a small JSON settings/preset/queue store for the GUI
+  - GitHub release checks, the GUI's self-update and the yt-dlp download
 """
 
+import hashlib
 import json
 import os
 import re
@@ -848,3 +850,245 @@ class JobQueue:
             q.jobs.append(j)
         q._next_id = max([j["id"] for j in q.jobs] + [0]) + 1
         return q
+
+
+# --------------------------------------------------------------------------
+# Updates: GitHub releases, the GUI's self-update, and yt-dlp
+# --------------------------------------------------------------------------
+
+UPDATE_REPO = "quatric/mobipeg"
+YTDLP_REPO = "yt-dlp/yt-dlp"
+
+
+def version_tuple(tag):
+    """(4, 1, 1) for "v4.1.1" / "4.1.1"; None for anything else (e.g. "latest")."""
+    m = re.fullmatch(r"v?(\d+(?:\.\d+)*)", (tag or "").strip())
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
+
+
+def newest_release(releases):
+    """The highest numbered release that is neither a draft nor a prerelease,
+    from a GitHub /releases listing, or None. Rolling tags are ignored."""
+    best = None
+    for r in releases or []:
+        if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
+            continue
+        v = version_tuple(r.get("tag_name"))
+        if v and (best is None or v > best[0]):
+            best = (v, r)
+    return best[1] if best else None
+
+
+def is_url(text):
+    return bool(re.match(r"https?://\S+$", (text or "").strip(), re.I))
+
+
+def _ssl_context():
+    import ssl
+
+    try:
+        import certifi  # comes with sentry-sdk; frozen builds lack system roots
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def http_get(url, timeout=15, user_agent="mobipeg"):
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
+
+
+def fetch_json(url, timeout=15):
+    with http_get(url, timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def download(url, dest, progress=None, cancelled=None, timeout=30):
+    """Stream `url` to `dest` (via dest + ".part") and return its SHA-256.
+    progress(done, total) is called per chunk; cancelled() aborts."""
+    h = hashlib.sha256()
+    part = dest + ".part"
+    try:
+        with http_get(url, timeout) as r, open(part, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                if cancelled and cancelled():
+                    raise InterruptedError("download cancelled")
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+        os.replace(part, dest)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    return h.hexdigest()
+
+
+def parse_sha256sums(text):
+    """{filename: hexdigest} from a sha256sum-style listing."""
+    out = {}
+    for line in (text or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            out[parts[1].lstrip("*").strip()] = parts[0].lower()
+    return out
+
+
+def check_sha256(sums_url, name, digest):
+    """Raise ValueError unless `name` is listed in sums_url with `digest`."""
+    with http_get(sums_url) as r:
+        expected = parse_sha256sums(r.read().decode("utf-8", "replace")).get(name)
+    if expected != digest:
+        raise ValueError(f"checksum mismatch for {name}")
+
+
+def _machine():
+    import platform
+
+    return platform.machine().lower()
+
+
+def gui_asset_name(platform_=None, machine=None):
+    """This platform's mobipeg-gui release archive, or None if there is none."""
+    plat = platform_ or sys.platform
+    m = machine or _machine()
+    if plat == "darwin":
+        return "mobipeg-gui-macos-universal.zip"
+    if plat.startswith("win"):
+        arch = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "arm64",
+                "x86": "x86", "i386": "x86", "i686": "x86"}.get(m)
+        return f"mobipeg-gui-windows-{arch}.zip" if arch else None
+    if plat.startswith("linux"):
+        arch = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "arm64",
+                "arm64": "arm64", "armv7l": "armhf", "armv6l": "armhf",
+                "i386": "x86", "i686": "x86"}.get(m)
+        return f"mobipeg-gui-linux-{arch}.tar.gz" if arch else None
+    return None
+
+
+def install_root(executable=None, platform_=None):
+    """The folder (or .app bundle) a frozen GUI was installed as: what the
+    release archive unpacks to."""
+    exe = os.path.abspath(executable or sys.executable)
+    if (platform_ or sys.platform) == "darwin" and ".app/Contents/MacOS/" in exe:
+        return exe[: exe.index(".app/Contents/MacOS/") + 4]
+    return os.path.dirname(exe)
+
+
+def extract_archive(archive, dest):
+    """Unpack a release archive into `dest`, keeping symlinks and modes."""
+    if sys.platform == "darwin" and archive.endswith(".zip"):
+        # ditto keeps the .app's symlinks, modes and code signature intact.
+        subprocess.run(["ditto", "-x", "-k", archive, dest], check=True)
+    elif archive.endswith(".zip"):
+        import zipfile
+
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(dest)  # zipfile drops "..", absolute names
+    else:
+        import tarfile
+
+        with tarfile.open(archive) as t:
+            if hasattr(tarfile, "data_filter"):
+                t.extractall(dest, filter="data")
+            else:
+                for m in t.getmembers():
+                    target = os.path.realpath(os.path.join(dest, m.name))
+                    if not target.startswith(os.path.realpath(dest) + os.sep):
+                        raise ValueError(f"unsafe path in archive: {m.name}")
+                t.extractall(dest)
+
+
+def swap_in(root, staged):
+    """Replace the folder `root` with `staged` (on the same disk); the old copy
+    goes to root + ".old" and comes back if the swap fails."""
+    old = root + ".old"
+    if os.path.lexists(old):
+        remove_tree(old)
+    os.rename(root, old)
+    try:
+        os.rename(staged, root)
+    except OSError:
+        os.rename(old, root)
+        raise
+    remove_tree(old)
+
+
+def remove_tree(path):
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def windows_swap_script(pid, root, staged, relaunch, cleanup):
+    """A .bat that waits for `pid` to exit (its files are locked until then),
+    swaps `staged` in for `root`, restores it on failure, deletes the folder
+    `cleanup` and relaunches."""
+    return (
+        "@echo off\r\n"
+        ":wait\r\n"
+        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && '
+        "(timeout /t 1 /nobreak >nul & goto wait)\r\n"
+        f'if exist "{root}.old" rmdir /s /q "{root}.old"\r\n'
+        f'move "{root}" "{root}.old" >nul || goto end\r\n'
+        f'move "{staged}" "{root}" >nul || (move "{root}.old" "{root}" >nul & goto end)\r\n'
+        f'rmdir /s /q "{root}.old"\r\n'
+        ":end\r\n"
+        f'rmdir /s /q "{cleanup}"\r\n'
+        f'start "" "{relaunch}"\r\n'
+        '(goto) 2>nul & del "%~f0"\r\n'
+    )
+
+
+def ytdlp_asset_name(platform_=None, machine=None):
+    """The standalone yt-dlp build for this platform (the plain "yt-dlp"
+    zipapp, which needs python3, where there is none)."""
+    plat = platform_ or sys.platform
+    m = machine or _machine()
+    if plat == "darwin":
+        return "yt-dlp_macos"
+    if plat.startswith("win"):
+        return {"arm64": "yt-dlp_arm64.exe", "x86": "yt-dlp_x86.exe",
+                "i386": "yt-dlp_x86.exe", "i686": "yt-dlp_x86.exe"}.get(m, "yt-dlp.exe")
+    if plat.startswith("linux"):
+        return {"x86_64": "yt-dlp_linux", "amd64": "yt-dlp_linux",
+                "aarch64": "yt-dlp_linux_aarch64", "arm64": "yt-dlp_linux_aarch64",
+                "armv7l": "yt-dlp_linux_armv7l"}.get(m, "yt-dlp")
+    return "yt-dlp"
+
+
+def ytdlp_path():
+    """Where the GUI keeps its own copy of yt-dlp."""
+    name = "yt-dlp.exe" if os.name == "nt" else "yt-dlp"
+    return os.path.join(config_dir(), "bin", name)
+
+
+def install_ytdlp(progress=None, cancelled=None):
+    """Download the latest yt-dlp for this platform, check it against the
+    release's SHA2-256SUMS and make it executable. Returns its path."""
+    path = ytdlp_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    asset = ytdlp_asset_name()
+    base = f"https://github.com/{YTDLP_REPO}/releases/latest/download/"
+    tmp = path + ".new"
+    try:
+        digest = download(base + asset, tmp, progress, cancelled)
+        check_sha256(base + "SHA2-256SUMS", asset, digest)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return path

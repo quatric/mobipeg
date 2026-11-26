@@ -436,6 +436,38 @@ only built when the tree is configured with SDL2 (`--enable-sdl2`, the default
 when SDL2 is installed); without it, `play` says so rather than falling back to
 a system player that cannot read these formats.
 
+### Encoding from a link (GUI)
+
+The GUI's **Input File or URL** field also takes a web link (YouTube and
+[every other site yt-dlp supports](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)).
+Press Encode and mobipeg downloads the video with
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), then encodes the downloaded file
+with the current settings:
+
+- The first time, it offers to download yt-dlp from its GitHub releases (the
+  file is checked against the release's SHA-256 list) into mobipeg's settings
+  folder (`~/Library/Application Support/mobipeg/bin` on macOS,
+  `%APPDATA%\mobipeg\bin` on Windows, `~/.config/mobipeg/bin` on Linux).
+- Before every download it runs `yt-dlp -U`, so sites that changed keep
+  working; if that check cannot reach the network the installed copy is used.
+- The video is saved to the Output Dir (or your Downloads folder) as
+  `Title [id].ext`, and the field switches to that file, so it can be
+  re-encoded later without downloading again.
+
+Only download videos you have the right to use. Some YouTube videos need a
+JavaScript runtime such as [Deno](https://deno.com) installed for yt-dlp to
+reach every format; see yt-dlp's documentation.
+
+### Updates (GUI)
+
+At startup the GUI asks GitHub whether a newer mobipeg release is out. If one
+is, it offers to update: the release archive for your platform is downloaded,
+checked against `SHA256SUMS.txt`, unpacked next to the installed copy and
+swapped in, then mobipeg restarts. A failed download or unpack leaves the
+installed copy untouched. When running from source it offers the release page
+instead. No network simply means no notice; set `MOBIPEG_NO_UPDATE_CHECK=1` to
+turn the check off.
+
 ## Tools
 
 * [ffmpeg](https://ffmpeg.org/ffmpeg.html) is a command line toolbox to

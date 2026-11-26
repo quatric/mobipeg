@@ -456,5 +456,104 @@ class EncodeCli(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
 
 
+class Updates(unittest.TestCase):
+    def test_version_tuple(self):
+        self.assertEqual(mt.version_tuple("v4.1.1"), (4, 1, 1))
+        self.assertEqual(mt.version_tuple("4.10"), (4, 10))
+        self.assertIsNone(mt.version_tuple("latest"))
+        self.assertGreater(mt.version_tuple("v4.10"), mt.version_tuple("v4.9.9"))
+
+    def test_newest_release_skips_drafts_prereleases_and_rolling_tags(self):
+        rels = [
+            {"tag_name": "latest"},
+            {"tag_name": "v4.2", "prerelease": True},
+            {"tag_name": "v5.0", "draft": True},
+            {"tag_name": "v4.1.1"},
+            {"tag_name": "v4.0"},
+        ]
+        self.assertEqual(mt.newest_release(rels)["tag_name"], "v4.1.1")
+        self.assertIsNone(mt.newest_release([{"tag_name": "latest"}]))
+
+    def test_is_url(self):
+        self.assertTrue(mt.is_url("https://www.youtube.com/watch?v=x"))
+        self.assertTrue(mt.is_url(" HTTP://a.b/c "))
+        self.assertFalse(mt.is_url("/Users/me/https://x.mp4"))
+        self.assertFalse(mt.is_url("C:\\video.mp4"))
+
+    def test_asset_names(self):
+        self.assertEqual(mt.gui_asset_name("darwin", "arm64"), "mobipeg-gui-macos-universal.zip")
+        self.assertEqual(mt.gui_asset_name("win32", "amd64"), "mobipeg-gui-windows-x86_64.zip")
+        self.assertEqual(mt.gui_asset_name("linux", "aarch64"), "mobipeg-gui-linux-arm64.tar.gz")
+        self.assertEqual(mt.gui_asset_name("linux", "armv7l"), "mobipeg-gui-linux-armhf.tar.gz")
+        self.assertIsNone(mt.gui_asset_name("linux", "riscv64"))
+        self.assertEqual(mt.ytdlp_asset_name("win32", "arm64"), "yt-dlp_arm64.exe")
+        self.assertEqual(mt.ytdlp_asset_name("linux", "x86_64"), "yt-dlp_linux")
+        self.assertEqual(mt.ytdlp_asset_name("linux", "i686"), "yt-dlp")
+        self.assertEqual(mt.ytdlp_asset_name("darwin", "x86_64"), "yt-dlp_macos")
+
+    def test_install_root(self):
+        self.assertEqual(
+            mt.install_root("/Applications/mobipeg-gui.app/Contents/MacOS/mobipeg-gui", "darwin"),
+            "/Applications/mobipeg-gui.app",
+        )
+        self.assertEqual(mt.install_root("/opt/mobipeg-gui/mobipeg-gui", "linux"), "/opt/mobipeg-gui")
+
+    def test_parse_sha256sums(self):
+        h = "ab" * 32
+        self.assertEqual(mt.parse_sha256sums(f"{h}  a.zip\n{h.upper()} *b.exe\njunk\n"),
+                         {"a.zip": h, "b.exe": h})
+
+    def test_swap_in_and_tar_extract(self):
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "build", "mobipeg-gui")
+            os.makedirs(src)
+            with open(os.path.join(src, "app"), "w") as f:
+                f.write("new")
+            os.chmod(os.path.join(src, "app"), 0o755)
+            arc = os.path.join(d, "a.tar.gz")
+            with tarfile.open(arc, "w:gz") as t:
+                t.add(src, "mobipeg-gui")
+            mt.extract_archive(arc, os.path.join(d, "stage"))
+            staged = os.path.join(d, "stage", "mobipeg-gui")
+            self.assertTrue(os.access(os.path.join(staged, "app"), os.X_OK))
+
+            root = os.path.join(d, "install")
+            os.makedirs(root)
+            with open(os.path.join(root, "app"), "w") as f:
+                f.write("old")
+            mt.swap_in(root, staged)
+            with open(os.path.join(root, "app")) as f:
+                self.assertEqual(f.read(), "new")
+            self.assertFalse(os.path.exists(root + ".old"))
+            # A staged copy that is missing leaves the install as it was.
+            with self.assertRaises(OSError):
+                mt.swap_in(root, os.path.join(d, "missing"))
+            with open(os.path.join(root, "app")) as f:
+                self.assertEqual(f.read(), "new")
+
+    def test_tar_extract_rejects_escaping_paths(self):
+        import io
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as d:
+            arc = os.path.join(d, "bad.tar")
+            with tarfile.open(arc, "w") as t:
+                info = tarfile.TarInfo("../evil")
+                info.size = 1
+                t.addfile(info, io.BytesIO(b"x"))
+            with self.assertRaises(Exception):
+                mt.extract_archive(arc, os.path.join(d, "out"))
+            self.assertFalse(os.path.exists(os.path.join(d, "evil")))
+
+    def test_windows_swap_script_restores_on_failure(self):
+        bat = mt.windows_swap_script(42, r"C:\a\mobipeg-gui", r"C:\a\.u\new\mobipeg-gui",
+                                     r"C:\a\mobipeg-gui\mobipeg-gui.exe", r"C:\a\.u")
+        self.assertIn('PID eq 42', bat)
+        self.assertIn('|| (move "C:\\a\\mobipeg-gui.old" "C:\\a\\mobipeg-gui"', bat)
+        self.assertTrue(bat.endswith("\r\n"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -43,6 +43,8 @@ import time
 import os
 import re
 import sys
+import tempfile
+import webbrowser
 
 import mobipeg_tools as mt
 from gui_extras import enable_file_drop, FlatTabs, ScrollableFrame, PathListEditor, QueueTab, InspectTab
@@ -300,6 +302,8 @@ class EncodeGUI(tk.Tk):
         self.load_settings()
         self.warm_up_encode_columns()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        if not os.environ.get("MOBIPEG_NO_UPDATE_CHECK"):
+            self.after(1500, self.start_update_check)
 
     # Height the console keeps however short the window gets: its label and
     # about five lines of output.
@@ -434,7 +438,7 @@ class EncodeGUI(tk.Tk):
         self.enc_audio_cb.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
 
         # Row 2: Input 1
-        ttk.Label(self.encode_frame, text="Input File:").grid(
+        ttk.Label(self.encode_frame, text="Input File or URL:").grid(
             row=2, column=0, sticky="e", padx=5, pady=5
         )
         self.enc_input_var = tk.StringVar()
@@ -1292,7 +1296,9 @@ class EncodeGUI(tk.Tk):
         self.src_info = info
         if info is None:
             self.enc_src_label.config(
-                text="choose an input file" if not path else "could not read this file",
+                text="choose an input file" if not path
+                else "a link: downloaded with yt-dlp when you press Encode" if mt.is_url(path)
+                else "could not read this file",
                 foreground="grey",
             )
             self.enc_track_cb.config(values=["Default"])
@@ -2110,6 +2116,7 @@ class EncodeGUI(tk.Tk):
             on_done=done,
             title=ctx.get("title", ""),
             duration=ctx.get("duration"),
+            probe_input=ctx.get("probe_input"),
         )
 
     def run_encoding(self):
@@ -2122,6 +2129,9 @@ class EncodeGUI(tk.Tk):
         inp1 = self.enc_input_var.get()
         if not inp1:
             messagebox.showwarning("Warning", "Please select an input file.")
+            return
+        if mt.is_url(inp1):
+            self.fetch_url_then_encode(inp1.strip())
             return
         outfile = self.enc_output_var.get().strip()
 
@@ -2138,8 +2148,226 @@ class EncodeGUI(tk.Tk):
             "output": shown,
             "duration": duration,
             "title": os.path.basename(inp1),
+            "probe_input": None if duration else inp1,
         }
         self.execute_cmd(cmd, self.enc_run_btn)
+
+    # --- Links: download with yt-dlp, then encode ----------------------------
+
+    def fetch_url_then_encode(self, url):
+        """Download `url` with yt-dlp (offering to install it the first time and
+        updating it before every use), then encode the downloaded file."""
+        ytdlp = mt.ytdlp_path()
+        if not os.path.isfile(ytdlp):
+            if not messagebox.askyesno(
+                "yt-dlp",
+                "Encoding from a link uses yt-dlp, which is not installed yet.\n\n"
+                "Download it now from github.com/yt-dlp/yt-dlp?",
+            ):
+                return
+
+            def installed(_path, err):
+                if err is None:
+                    self.fetch_url_then_encode(url)
+                elif not isinstance(err, InterruptedError):
+                    messagebox.showerror("yt-dlp", f"Could not download yt-dlp:\n{err}")
+
+            self.background_job(
+                "Downloading yt-dlp", lambda p, c: mt.install_ytdlp(p, c), installed
+            )
+            return
+
+        def updated(code, stopped):
+            # A failed check (offline, say) still lets the installed copy run.
+            if not stopped:
+                self.ytdlp_download(ytdlp, url)
+
+        self.start_process(
+            [ytdlp, "-U"],
+            buttons=[self.enc_run_btn],
+            on_done=updated,
+            title="Checking yt-dlp for updates",
+        )
+
+    def ytdlp_download(self, ytdlp, url):
+        outdir = self.enc_outdir_var.get().strip()
+        if not outdir:
+            outdir = os.path.expanduser("~/Downloads")
+            if not os.path.isdir(outdir):
+                outdir = os.path.expanduser("~")
+        fd, listfile = tempfile.mkstemp(prefix="mobipeg-ytdlp-", suffix=".txt")
+        os.close(fd)
+        cmd = [
+            ytdlp, "--no-playlist", "--newline",
+            # Lines starting ">>" show in the status bar (see start_process).
+            "--progress-template", "download:>> downloading %(progress._percent_str)s",
+            "-P", outdir, "-o", "%(title).150B [%(id)s].%(ext)s",
+            "--print-to-file", "after_move:filepath", listfile,
+        ]
+        try:
+            import encode as _enc
+
+            if os.path.isfile(_enc.FFENC):
+                cmd += ["--ffmpeg-location", os.path.dirname(os.path.abspath(_enc.FFENC))]
+        except Exception:
+            pass
+        cmd += ["--", url]
+
+        def done(code, stopped):
+            try:
+                with open(listfile, encoding="utf-8") as f:
+                    lines = [l for l in f.read().splitlines() if l.strip()]
+            except OSError:
+                lines = []
+            finally:
+                try:
+                    os.remove(listfile)
+                except OSError:
+                    pass
+            path = lines[-1] if lines else ""
+            if code == 0 and not stopped and os.path.isfile(path):
+                self.enc_input_var.set(path)
+                self.run_encoding()
+
+        self.start_process(
+            cmd, buttons=[self.enc_run_btn], on_done=done, clear=False,
+            separator=True, title="Downloading",
+        )
+
+    def background_job(self, title, work, on_done):
+        """Run work(progress, cancelled) off the Tk thread as a job that the
+        Stop button cancels; on_done(result, error) then runs on the Tk thread."""
+        if self._proc is not None:
+            messagebox.showinfo("mobipeg", "Another job is already running.")
+            return
+        self._proc = "download"  # a str: busy(), but nothing for Stop to kill
+        self._stopped = False
+        self.stop_btn.state(["!disabled"])
+        self._set_progress(0.0, title)
+
+        def progress(done, total):
+            if total:
+                self.after(0, self._set_progress, done / total,
+                           f"{title}  {done * 100 // total}%")
+
+        def run():
+            try:
+                res, err = work(progress, lambda: self._stopped), None
+            except Exception as e:
+                res, err = None, e
+            self.after(0, finish, res, err)
+
+        def finish(res, err):
+            self._proc = None
+            self._stopped = False
+            self.stop_btn.state(["disabled"])
+            if isinstance(err, InterruptedError):
+                self.set_status("Stopped")
+            elif err is not None:
+                self.set_status(f"{title} failed", self.FAIL_COLOR)
+            else:
+                self._set_progress(1.0, f"{title}: done")
+            on_done(res, err)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # --- Self-update: a newer GitHub release replaces this install ----------
+
+    def start_update_check(self):
+        """Ask GitHub for a newer release in the background; failures are quiet."""
+
+        def work():
+            try:
+                rel = mt.newest_release(mt.fetch_json(
+                    f"https://api.github.com/repos/{mt.UPDATE_REPO}/releases?per_page=30"
+                ))
+            except Exception:
+                return
+            if rel and mt.version_tuple(rel["tag_name"]) > mt.version_tuple(MOBIPEG_VERSION):
+                self.after(0, self.offer_update, rel)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def offer_update(self, rel):
+        if self.busy():  # never interrupt a job; ask once it is done
+            self.after(5000, self.offer_update, rel)
+            return
+        tag = rel["tag_name"]
+        assets = {a.get("name"): a.get("browser_download_url") for a in rel.get("assets") or []}
+        name = mt.gui_asset_name()
+        page = rel.get("html_url") or f"https://github.com/{mt.UPDATE_REPO}/releases/latest"
+        head = f"mobipeg {tag} is out (you have v{MOBIPEG_VERSION})."
+        if not (getattr(sys, "frozen", False) and name in assets):
+            # Running from source, or no build for this platform.
+            if messagebox.askyesno("Update available", head + "\n\nOpen the download page?"):
+                webbrowser.open(page)
+            return
+        if messagebox.askyesno(
+            "Update available", head + "\n\nUpdate now? mobipeg restarts when it is done."
+        ):
+            self.install_update(name, assets, page)
+
+    def install_update(self, name, assets, page):
+        root = mt.install_root()
+        staging = os.path.join(os.path.dirname(root), ".mobipeg-update")
+        top = "mobipeg-gui.app" if sys.platform == "darwin" else "mobipeg-gui"
+
+        def work(progress, cancelled):
+            # Everything is unpacked next to the install first, so a failed
+            # download or unpack leaves the installed copy untouched.
+            mt.remove_tree(staging)
+            os.makedirs(staging)
+            archive = os.path.join(staging, name)
+            digest = mt.download(assets[name], archive, progress, cancelled)
+            if "SHA256SUMS.txt" in assets:
+                mt.check_sha256(assets["SHA256SUMS.txt"], name, digest)
+            mt.extract_archive(archive, os.path.join(staging, "new"))
+            staged = os.path.join(staging, "new", top)
+            if not os.path.isdir(staged):
+                raise ValueError(f"{name} has no {top} inside")
+            return staged
+
+        def done(staged, err):
+            if err is None:
+                try:
+                    self.apply_update(root, staged, staging)
+                    return
+                except Exception as e:
+                    err = e
+            mt.remove_tree(staging)
+            if isinstance(err, InterruptedError):
+                return
+            if messagebox.askyesno(
+                "Update failed",
+                f"Could not update mobipeg:\n{err}\n\nOpen the download page instead?",
+            ):
+                webbrowser.open(page)
+
+        self.background_job("Downloading update", work, done)
+
+    def apply_update(self, root, staged, staging):
+        exe_name = os.path.basename(sys.executable)
+        if os.name == "nt":
+            # Windows locks the running app's files: a script swaps them once
+            # this process has exited, then starts the new copy.
+            bat = os.path.join(tempfile.gettempdir(), "mobipeg-update.bat")
+            with open(bat, "w", encoding="mbcs", newline="") as f:
+                f.write(mt.windows_swap_script(
+                    os.getpid(), root, staged, os.path.join(root, exe_name), staging
+                ))
+            subprocess.Popen(
+                ["cmd", "/c", bat],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                close_fds=True,
+            )
+        else:
+            mt.swap_in(root, staged)
+            mt.remove_tree(staging)
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-n", root])
+            else:
+                subprocess.Popen([os.path.join(root, exe_name)], start_new_session=True)
+        self.on_close()
 
     def snap_scale(self, event=None):
         """MobiClip codes 16x16 blocks: show the multiple-of-16 size that will be used."""

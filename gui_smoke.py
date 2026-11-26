@@ -701,6 +701,7 @@ def main():
     # Never read or write the real settings/queue/presets.
     import tempfile
     os.environ["MOBIPEG_CONFIG_DIR"] = tempfile.mkdtemp(prefix="mobipeg-smoke-")
+    os.environ["MOBIPEG_NO_UPDATE_CHECK"] = "1"  # no network, no update prompt
 
     try:
         import encode_gui as gui
