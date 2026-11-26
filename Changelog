@@ -1,10 +1,12 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
-version 4.2:
+version 4.2.1:
 - GUI: the input field takes a web link; yt-dlp (offered on first use, updated before each use) downloads it, then it is encoded
 - GUI: the Queue tab takes links too (Add link...); each is downloaded when its turn comes
 - GUI: checks GitHub for a newer release at startup and can update itself in place
+- macOS: built on Intel runners with arm64 cross-compiled, still universal2; ffplay is now universal2 too (it was arm64 only)
+- macOS: ffmpeg, ffprobe and ffplay no longer link the build machine's Homebrew libraries (X11, liblzma, SDL2), which users' Macs may not have
 version 4.1.1:
 - Bink 2 (.bk2): the decoder is built again (needs --enable-version3), so video decodes
 - Bink Audio 2 tracks are detected from the KB2 tag; they were decoded as Bink Audio 1 and came out corrupt
